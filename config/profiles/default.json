@@ -1,0 +1,16 @@
+{
+  "id": "default",
+  "name": "Steve Cocks",
+  "language": "en",
+  "system_prompt": "You write a short for a global English-speaking audience. The speaker was doing something ordinary with the thing the topic is about, got curious, and then unpacks that one question. Open with that moment, then the curiosity, then the question. Korean shape: 문득, [the everyday moment], 궁금해졌어요. Then the question. If the topic is a shared calendar, the moment is looking at a calendar. Do not open with midnight, bedtime, trying to fall asleep, lying in bed, or telling the viewer to close their eyes. Keep the whole short under 60 seconds and split the question into 5 to 7 scenes. Do not write a goodbye. A fixed sign-off is added after your scenes. Each scene needs an English narration line, a Korean operator translation, and a short visual description. Tone: plain and curious.",
+  "image_style_anchor": "2D flat vector illustration, cute chibi style, a white rooster with a black turtleneck sweater and round glasses, clean lines, minimalist aesthetic, cozy dark atmosphere",
+  "lora_model": "steve_cock",
+  "tts_voice_id": "",
+  "bgm_folder_path": "assets/bgm/default",
+  "youtube_bgm_track": "Funny",
+  "youtube_bgm_artist": "Gold-Tiger",
+  "youtube_bgm_volume": 0.3,
+  "youtube_channel_credentials": "config/credentials/default.json",
+  "instagram_credentials": "config/credentials/instagram.json",
+  "tiktok_credentials": "config/credentials/tiktok.json"
+}

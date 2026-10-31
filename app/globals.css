@@ -1,0 +1,8 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+.dark,
+[data-theme="dark"] {
+  --field-background: color-mix(in srgb, white 8%, var(--surface));
+  --overlay: color-mix(in srgb, white 8%, var(--surface));
+}
