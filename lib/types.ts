@@ -15,15 +15,25 @@ export type ChannelProfile = {
   tiktok_credentials: string
 }
 
+export type ShotKind = "room" | "insert"
+
+export type ActionBeat = {
+  trigger: string
+  action: string
+}
+
 export type Scene = {
   id: string
   scriptKo: string
   approvedKo: string
   scriptTarget: string
   subtitle: string
+  shot: ShotKind
   sceneDescription: string
   visualDescription: string
   voiceScript: string
+  actionBeats: ActionBeat[]
+  castIds: string[]
 }
 
 export type YoutubeMeta = {
@@ -40,12 +50,21 @@ export type SocialPost = {
 
 export type Project = {
   topic: string
+  titleKo: string
+  topicEn: string
   scriptTopic: string
+  overviewKo: string
+  overviewEn: string
   profileId: string
   outfitId: string | null
+  bgmId: string
+  placeKo: string
+  placeEn: string
+  placeApprovedKo: string
   scenes: Scene[]
   autoUpload: boolean
   scheduledAt: string
+  historyId: string
   finalSignature: string
   youtube: YoutubeMeta
   instagram: SocialPost

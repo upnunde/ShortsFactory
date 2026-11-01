@@ -22,23 +22,37 @@ export function voiceReady(scene: Scene) {
 }
 
 export function sceneReady(scene: Scene) {
-  return visualReady(scene) && voiceReady(scene) && scene.scriptTarget.trim() !== ""
+  return (
+    scene.scriptTarget.trim() !== "" &&
+    scene.sceneDescription.trim() !== "" &&
+    !englishIsStale(scene)
+  )
 }
 
 export function projectSeconds(scenes: Scene[]) {
-  return scenes.reduce((total, scene) => total + narrationSeconds(scene.scriptTarget), 0)
+  return scenes.reduce(
+    (total, scene) => total + narrationSeconds(scene.scriptTarget),
+    0
+  )
 }
 
-export function filmSignature(scenes: Scene[]) {
-  return scenes
-    .map((scene) => `${scene.id}|${scene.scriptTarget}|${scene.subtitle}|${scene.sceneDescription}`)
-    .join("\n")
+export function filmSignature(
+  project: Pick<Project, "placeEn" | "scenes" | "bgmId">
+) {
+  return [
+    project.bgmId,
+    project.placeEn,
+    ...project.scenes.map(
+      (scene) =>
+        `${scene.id}|${scene.shot}|${scene.scriptTarget}|${scene.subtitle}|${scene.sceneDescription}|${(scene.castIds ?? []).join(",")}`
+    ),
+  ].join("\n")
 }
 
 export function filmReady(project: Project) {
   return (
     project.finalSignature !== "" &&
-    project.finalSignature === filmSignature(project.scenes) &&
+    project.finalSignature === filmSignature(project) &&
     project.scenes.every(sceneReady)
   )
 }
@@ -47,14 +61,25 @@ export function scriptBlocked(project: Project) {
   if (project.scenes.length === 0) {
     return "씬이 없습니다."
   }
-  if (project.scenes.some((scene) => scene.scriptKo.trim() === "" || scene.scriptTarget.trim() === "")) {
+  if (project.placeKo.trim() === "") {
+    return "화면의 장소가 아직 없습니다."
+  }
+  if (project.placeKo.trim() !== project.placeApprovedKo.trim()) {
+    return "장소 설명을 영어로 맞춰야 합니다."
+  }
+  if (
+    project.scenes.some(
+      (scene) =>
+        scene.scriptKo.trim() === "" || scene.scriptTarget.trim() === ""
+    )
+  ) {
     return "비어 있는 대사가 있습니다."
+  }
+  if (project.scenes.some((scene) => scene.sceneDescription.trim() === "")) {
+    return "비어 있는 화면이 있습니다."
   }
   if (project.scenes.some(englishIsStale)) {
     return "영어를 다시 써야 하는 씬이 있습니다."
-  }
-  if (projectSeconds(project.scenes) > 60) {
-    return "예상 길이가 1분을 넘습니다."
   }
   return ""
 }

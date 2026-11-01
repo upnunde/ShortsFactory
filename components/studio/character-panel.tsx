@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from "react"
 
-import { AlertDialog, Button, Card, Input, Switch, TextField } from "@heroui/react"
+import { AlertDialog, Button, Card, Chip, Input, Switch, TextField } from "@heroui/react"
 import { CHARACTER_ANGLES } from "@/lib/character-angles"
-import { StepHeader } from "@/components/studio/chrome"
 
 type CharacterFile = {
   id: string
@@ -21,12 +20,14 @@ type CharacterOutfit = {
 
 type CharacterLibrary = {
   outfits: CharacterOutfit[]
+  hostId: string
   canGenerate: boolean
   activeReferences: { id: string; url: string }[]
 }
 
 const emptyLibrary: CharacterLibrary = {
   outfits: [],
+  hostId: "",
   canGenerate: false,
   activeReferences: [],
 }
@@ -62,7 +63,7 @@ export function CharacterPanel() {
     setPending(true)
     const response = await fetch("/api/character/outfits", { method: "POST" })
     setPending(false)
-    await applyLibrary(response, "착장 섹션을 추가했습니다.")
+    await applyLibrary(response, "인물을 추가했습니다.")
   }
 
   async function uploadFront(outfitId: string, file: File | undefined) {
@@ -108,7 +109,7 @@ export function CharacterPanel() {
     })
     setPending(false)
     setConfirmDeleteId(null)
-    await applyLibrary(response, "섹션을 삭제했습니다.")
+    await applyLibrary(response, "인물을 삭제했습니다.")
   }
 
   async function rename(outfitId: string, name: string) {
@@ -123,36 +124,35 @@ export function CharacterPanel() {
   }
 
   async function setActive(outfitId: string, active: boolean) {
-    if (!active) {
+    if (outfitId === library.hostId) {
       return
     }
     setPending(true)
     const response = await fetch(`/api/character/outfits/${encodeURIComponent(outfitId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ active: true }),
+      body: JSON.stringify({ active }),
     })
     setPending(false)
-    await applyLibrary(response, "이 착장만 영상 요청에 같이 나갑니다.")
+    await applyLibrary(response, active ? "이 인물을 활용합니다." : "이 인물은 대본에서 고르지 않습니다.")
   }
 
   const deleteOutfit = library.outfits.find((outfit) => outfit.id === confirmDeleteId)
 
   return (
     <>
-      <StepHeader
-        title="대표 캐릭터"
-        description="착장마다 정면과 각도를 따로 등록합니다. 켠 착장 하나만 영상 요청에 같이 나가고, 끈 착장은 지워지지 않습니다."
-      />
+      <p className="text-sm text-muted">
+        인물마다 정면과 각도를 등록합니다. 진행자는 항상 활용되고, 켠 보조 인물만 대본에서 고를 수 있습니다. 끈 인물은 지워지지 않습니다.
+      </p>
 
-      <div className="flex items-start gap-4 overflow-x-auto pb-1">
+      <div className="flex flex-col gap-4">
         {library.outfits.map((outfit) => (
           <OutfitSection
             key={outfit.id}
             outfit={outfit}
             pending={pending}
             drawing={drawingId === outfit.id}
-            beside={library.outfits.length > 1}
+            host={outfit.id === library.hostId}
             onRename={(name) => void rename(outfit.id, name)}
             onActive={(active) => void setActive(outfit.id, active)}
             onDelete={() => setConfirmDeleteId(outfit.id)}
@@ -166,7 +166,7 @@ export function CharacterPanel() {
 
       <div className="flex justify-end">
         <Button variant="outline" isDisabled={pending} onPress={() => void addSection()}>
-          착장 추가
+          인물 추가
         </Button>
       </div>
 
@@ -176,19 +176,19 @@ export function CharacterPanel() {
             <AlertDialog.Dialog>
               <AlertDialog.Header>
                 <AlertDialog.Icon status="danger" />
-                <AlertDialog.Heading>이 섹션을 삭제할까요?</AlertDialog.Heading>
+                <AlertDialog.Heading>이 인물을 삭제할까요?</AlertDialog.Heading>
               </AlertDialog.Header>
               <AlertDialog.Body>
                 {deleteOutfit
-                  ? `${deleteOutfit.name} 섹션과 그 안의 정면, 나머지 각도 이미지가 삭제됩니다.`
-                  : "이 섹션과 그 안의 이미지가 삭제됩니다."}
+                  ? `${deleteOutfit.name}과 그 안의 정면, 나머지 각도 이미지가 삭제됩니다.`
+                  : "이 인물과 그 안의 이미지가 삭제됩니다."}
               </AlertDialog.Body>
               <AlertDialog.Footer>
                 <Button variant="outline" isDisabled={pending} onPress={() => setConfirmDeleteId(null)}>
                   취소
                 </Button>
                 <Button variant="danger" isDisabled={pending} onPress={() => void deleteSection()}>
-                  섹션 삭제
+                  인물 삭제
                 </Button>
               </AlertDialog.Footer>
             </AlertDialog.Dialog>
@@ -203,7 +203,7 @@ function OutfitSection({
   outfit,
   pending,
   drawing,
-  beside,
+  host,
   onRename,
   onActive,
   onDelete,
@@ -213,7 +213,7 @@ function OutfitSection({
   outfit: CharacterOutfit
   pending: boolean
   drawing: boolean
-  beside: boolean
+  host: boolean
   onRename: (name: string) => void
   onActive: (active: boolean) => void
   onDelete: () => void
@@ -228,10 +228,16 @@ function OutfitSection({
 
   return (
     <section
-      className={`flex shrink-0 flex-col gap-4 rounded-xl border border-separator p-4 ${beside ? "w-[42rem]" : "w-full"}`}
+      className="flex w-full flex-col gap-4 rounded-xl border border-separator p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <TextField aria-label="착장 이름" value={name} onChange={setName} className="w-40">
+        <div className="flex items-center gap-2">
+          {host ? (
+            <Chip size="sm" variant="soft">
+              진행자
+            </Chip>
+          ) : null}
+          <TextField aria-label="인물 이름" value={name} onChange={setName} className="w-40">
           <Input
             onBlur={() => {
               if (name.trim() && name.trim() !== outfit.name) {
@@ -240,18 +246,26 @@ function OutfitSection({
             }}
           />
         </TextField>
+        </div>
         <div className="flex items-center gap-3">
-          <Switch isSelected={outfit.active} isDisabled={pending} onChange={onActive} aria-label="이 착장 사용">
+          <Switch
+            isSelected={host || outfit.active}
+            isDisabled={pending || host}
+            onChange={onActive}
+            aria-label="이 인물 활용"
+          >
             <Switch.Content>
               <Switch.Control>
                 <Switch.Thumb />
               </Switch.Control>
-              이 착장 사용
+              이 인물 활용
             </Switch.Content>
           </Switch>
-          <Button variant="outline" isDisabled={pending} onPress={onDelete}>
-            섹션 삭제
-          </Button>
+          {host ? null : (
+            <Button variant="outline" isDisabled={pending} onPress={onDelete}>
+              인물 삭제
+            </Button>
+          )}
         </div>
       </div>
 
@@ -259,7 +273,7 @@ function OutfitSection({
         <Card className="h-full">
           <Card.Header>
             <Card.Title>정면</Card.Title>
-            <Card.Description>이 착장의 기준이 되는 한 장입니다.</Card.Description>
+            <Card.Description>이 인물의 기준이 되는 한 장입니다.</Card.Description>
           </Card.Header>
           <Card.Content className="h-full">
             <FrontDrop image={outfit.front} pending={pending} onFile={onUpload} />
@@ -269,7 +283,7 @@ function OutfitSection({
         <Card className="h-full">
           <Card.Header>
             <Card.Title>나머지 각도</Card.Title>
-            <Card.Description>이 착장에서만 씁니다.</Card.Description>
+            <Card.Description>이 인물에서만 씁니다.</Card.Description>
           </Card.Header>
           <Card.Content className="flex flex-col gap-4">
             <div className="grid grid-cols-3 gap-3 xl:grid-cols-5">

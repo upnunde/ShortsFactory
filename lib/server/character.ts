@@ -30,6 +30,7 @@ export type CharacterOutfit = {
 
 export type CharacterLibrary = {
   outfits: CharacterOutfit[]
+  hostId: string
   canGenerate: boolean
   activeReferences: CharacterFile[]
 }
@@ -49,11 +50,12 @@ type Meta = {
 export async function getCharacterLibrary(): Promise<CharacterLibrary> {
   const meta = await readMeta()
   const outfits = await Promise.all(meta.outfits.map(toOutfit))
-  const active = outfits.find((outfit) => outfit.active)
+  const host = outfits[0]
   return {
     outfits,
+    hostId: host?.id ?? "",
     canGenerate: await canGenerateCharacterAngles(),
-    activeReferences: active ? outfitReferences(active) : [],
+    activeReferences: host ? outfitReferences(host) : [],
   }
 }
 
@@ -61,8 +63,8 @@ export async function addOutfit() {
   const meta = await readMeta()
   meta.outfits.push({
     id: randomUUID(),
-    name: meta.outfits.length === 0 ? "기본" : `착장 ${meta.outfits.length + 1}`,
-    active: meta.outfits.every((outfit) => !outfit.active),
+    name: meta.outfits.length === 0 ? "진행자" : `인물 ${meta.outfits.length + 1}`,
+    active: true,
     front: null,
     angles: emptyAngles(),
   })
@@ -73,32 +75,31 @@ export async function addOutfit() {
 export async function deleteOutfit(id: string) {
   const meta = await readMeta()
   const outfit = meta.outfits.find((item) => item.id === id)
-  if (!outfit) {
+  if (!outfit || meta.outfits[0]?.id === id) {
     return getCharacterLibrary()
   }
   await removeStoredFiles(outfit)
-  meta.outfits = ensureOneActive(meta.outfits.filter((item) => item.id !== id))
+  meta.outfits = ensureHost(meta.outfits.filter((item) => item.id !== id))
   await writeMeta(meta)
   return getCharacterLibrary()
 }
 
 export async function updateOutfit(id: string, patch: { name?: string; active?: boolean }) {
   const meta = await readMeta()
-  if (patch.active === false) {
-    return getCharacterLibrary()
-  }
+  const hostId = meta.outfits[0]?.id
   meta.outfits = meta.outfits.map((outfit) => {
     if (outfit.id !== id) {
-      return patch.active ? { ...outfit, active: false } : outfit
+      return outfit
     }
     const name = patch.name?.trim()
+    const active = outfit.id === hostId ? true : (patch.active ?? outfit.active)
     return {
       ...outfit,
       name: name ? name : outfit.name,
-      active: patch.active ?? outfit.active,
+      active,
     }
   })
-  meta.outfits = ensureOneActive(meta.outfits)
+  meta.outfits = ensureHost(meta.outfits)
   await writeMeta(meta)
   return getCharacterLibrary()
 }
@@ -236,7 +237,7 @@ async function readMeta(): Promise<Meta> {
       outfits?: Partial<OutfitRecord>[]
     }
     if (Array.isArray(parsed.outfits)) {
-      return { outfits: ensureOneActive(parsed.outfits.map((outfit, index) => normalizeOutfit(outfit, index))) }
+      return { outfits: ensureHost(parsed.outfits.map((outfit, index) => normalizeOutfit(outfit, index))) }
     }
     return {
       outfits: [
@@ -271,22 +272,17 @@ async function removeStoredFiles(outfit: OutfitRecord) {
   await Promise.all(names.map((name) => rm(path.join(imageDir, name), { force: true })))
 }
 
-function ensureOneActive(outfits: OutfitRecord[]) {
+function ensureHost(outfits: OutfitRecord[]) {
   if (outfits.length === 0) {
     return outfits
   }
-  const active = outfits.filter((outfit) => outfit.active)
-  const keep = active[0]?.id ?? outfits[0].id
-  if (active.length === 1) {
-    return outfits
-  }
-  return outfits.map((outfit) => ({ ...outfit, active: outfit.id === keep }))
+  return outfits.map((outfit, index) => (index === 0 ? { ...outfit, active: true } : outfit))
 }
 
 function normalizeOutfit(raw: Partial<OutfitRecord> | undefined, index: number): OutfitRecord {
   return {
     id: typeof raw?.id === "string" && raw.id ? raw.id : randomUUID(),
-    name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim() : index === 0 ? "기본" : `착장 ${index + 1}`,
+    name: typeof raw?.name === "string" && raw.name.trim() ? raw.name.trim() : index === 0 ? "진행자" : `인물 ${index + 1}`,
     active: raw?.active === true,
     front: typeof raw?.front === "string" ? raw.front : null,
     angles: anglesFrom(raw?.angles),

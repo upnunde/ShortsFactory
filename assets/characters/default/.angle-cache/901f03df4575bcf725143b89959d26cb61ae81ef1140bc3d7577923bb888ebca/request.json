@@ -1,0 +1,30 @@
+{
+  "frontPath": "/Users/dongjushin/Desktop/쇼츠플랫폼/assets/characters/default/bfdfb160-cc7d-4aee-8f6d-9a1d501e82fd.png",
+  "angles": [
+    {
+      "key": "three-quarter-face",
+      "label": "반측면 얼굴",
+      "prompt": "Close-up three-quarter portrait of the same character, head and shoulders, face turned slightly, same glasses, comb, beak, and black turtleneck."
+    },
+    {
+      "key": "profile",
+      "label": "옆얼굴",
+      "prompt": "Strict side profile of the same character, head and shoulders, beak and glasses in profile, same black turtleneck."
+    },
+    {
+      "key": "front-body",
+      "label": "정면 전신",
+      "prompt": "Full-body front view of the same character standing straight toward the camera, same outfit, tail, and shoes, entire body visible."
+    },
+    {
+      "key": "three-quarter-body",
+      "label": "반측면 전신",
+      "prompt": "Full-body three-quarter view of the same character standing, body turned about 45 degrees, same outfit and tail, entire body visible."
+    },
+    {
+      "key": "back-body",
+      "label": "뒷모습 전신",
+      "prompt": "Full-body back view of the same character standing, seen from behind, same sweater, jeans, shoes, tail, and comb."
+    }
+  ]
+}

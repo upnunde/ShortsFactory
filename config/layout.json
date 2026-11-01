@@ -1,4 +1,7 @@
 {
-  "titleHeight": 20,
-  "subtitleHeight": 20
+  "fontFamily": "pretendard",
+  "fontWeight": 700,
+  "titleSize": 60,
+  "subtitleSize": 50,
+  "subtitleY": 70
 }

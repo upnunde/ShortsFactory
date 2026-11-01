@@ -1,75 +1,189 @@
 "use client"
 
-import { Card, Chip } from "@heroui/react"
-import { StepActions, StepHeader } from "@/components/studio/chrome"
-import { OutfitUsage } from "@/components/studio/outfit-choice"
-import { filmReady, projectSeconds } from "@/lib/scene-status"
-import { formatSeconds, narrationSeconds } from "@/lib/timing"
+import { useEffect, useState } from "react"
+
+import { Button, Card, Chip } from "@heroui/react"
+import { ClipPreview } from "@/components/studio/clip-preview"
+import { SequencePreview } from "@/components/studio/sequence-preview"
+import { ShortsFrame } from "@/components/studio/shorts-frame"
+import { StepHeader } from "@/components/studio/chrome"
+import { videoGroups } from "@/lib/film-groups"
+import { defaultFrameLayout, type FrameLayout } from "@/lib/frame-layout"
+import { filmSignature, projectSeconds } from "@/lib/scene-status"
+import { formatSeconds } from "@/lib/timing"
 import type { Project } from "@/lib/types"
+
+type ClipJob = {
+  state: "idle" | "running" | "done" | "error"
+  signature: string
+  groups: { id: string; ready: boolean }[]
+}
+
+type FilmStatus = {
+  state: "idle" | "running" | "done" | "error"
+  message: string
+  fileReady: boolean
+  signature: string
+}
 
 export function FilmStep({
   project,
-  onBack,
-  onNext,
+  note,
+  onAssemble,
+  onReady,
 }: {
   project: Project
-  onBack: () => void
-  onNext: () => void
+  note: string
+  onAssemble: () => void
+  onReady: () => void
 }) {
-  const ready = filmReady(project)
   const seconds = projectSeconds(project.scenes)
+  const expected = filmSignature(project)
+  const [status, setStatus] = useState<FilmStatus>({
+    state: "idle",
+    message: "",
+    fileReady: false,
+    signature: "",
+  })
+  const [layout, setLayout] = useState<FrameLayout>(defaultFrameLayout)
+  const [clips, setClips] = useState<ClipJob>({
+    state: "idle",
+    signature: "",
+    groups: [],
+  })
+
+  useEffect(() => {
+    void fetch("/api/layout")
+      .then(async (response) => {
+        if (response.ok) {
+          setLayout((await response.json()) as FrameLayout)
+        }
+      })
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    let stop = false
+    async function loadClips() {
+      try {
+        const response = await fetch(`/api/film/clips?signature=${encodeURIComponent(expected)}`)
+        const body = (await response.json()) as ClipJob
+        if (!stop) {
+          setClips(body)
+        }
+      } catch {
+        if (!stop) {
+          setClips((current) => ({ ...current, state: "error" }))
+        }
+      }
+    }
+    void loadClips()
+    const timer = window.setInterval(() => void loadClips(), 3000)
+    return () => {
+      stop = true
+      window.clearInterval(timer)
+    }
+  }, [expected])
+
+  useEffect(() => {
+    let stop = false
+    async function load() {
+      try {
+        const response = await fetch("/api/film")
+        const body = (await response.json()) as FilmStatus
+        if (stop) {
+          return
+        }
+        setStatus(body)
+        if (body.fileReady && body.signature === expected) {
+          onReady()
+        }
+      } catch {
+        if (!stop) {
+          setStatus({ state: "error", message: "영상 상태를 읽지 못했습니다.", fileReady: false, signature: "" })
+        }
+      }
+    }
+    void load()
+    const timer = window.setInterval(() => void load(), 4000)
+    return () => {
+      stop = true
+      window.clearInterval(timer)
+    }
+  }, [expected, onReady])
+
+  const saved = project.finalSignature !== "" && project.finalSignature === expected
+  const fileReady = saved || (status.fileReady && status.signature === expected)
+  const groups = videoGroups(
+    project.scenes.map((scene) => ({
+      id: scene.id,
+      shot: scene.shot,
+      sceneDescription: scene.sceneDescription,
+      scriptTarget: scene.scriptTarget,
+      subtitle: scene.subtitle,
+      actionBeats: scene.actionBeats,
+      castIds: scene.castIds ?? [],
+    }))
+  )
+  const readyGroups = clips.signature === expected ? clips.groups : []
+  const clipsReady =
+    groups.length > 0 &&
+    groups.every((group) => readyGroups.find((item) => item.id === group.id)?.ready)
+  const previewClips = groups.map((group) => ({
+    src: `/api/film/clips/file?id=${group.id}`,
+    parts: project.scenes
+      .filter((scene) => group.sceneIds.includes(scene.id))
+      .map((scene) => ({
+        subtitle: scene.subtitle.trim() || scene.scriptTarget,
+        script: scene.scriptTarget,
+      })),
+  }))
 
   return (
     <>
       <StepHeader
         title="영상"
-        description="씬을 이어 붙인 최종 쇼츠입니다. 목소리와 자막이 같은 시간에 들어갑니다."
+        description="확인한 씬 영상을 하나로 합칩니다. 합친 결과가 맞으면 업로드로 넘어갑니다."
       />
-
-      <OutfitUsage outfitId={project.outfitId} />
 
       <Card>
         <Card.Header className="flex-row items-center justify-between gap-3">
           <div>
-            <Card.Title>outputs/final_shorts.mp4</Card.Title>
-            <Card.Description>9:16 · 약 {formatSeconds(seconds)}</Card.Description>
+            <Card.Title>이 작업의 영상</Card.Title>
+            <Card.Description>9:16 · 480p · 약 {formatSeconds(seconds)}</Card.Description>
           </div>
-          <Chip size="sm" color={ready ? "success" : "warning"} variant="soft">
-            {ready ? "합쳐짐" : "아직 없음"}
+          <Chip size="sm" color={fileReady ? "success" : status.state === "error" ? "danger" : "warning"} variant="soft">
+            {fileReady ? "합쳐짐" : status.state === "running" ? "만드는 중" : "아직 없음"}
           </Chip>
         </Card.Header>
         <Card.Content className="flex flex-col items-center gap-4">
-          <div className="flex aspect-[9/16] w-full max-w-xs items-center justify-center rounded-lg bg-surface-secondary px-6 text-center text-sm text-muted">
-            {ready ? "최종 영상 자리" : "씬 검수 뒤 영상 만들기를 누르면 여기에 붙습니다."}
-          </div>
-          <ol className="flex w-full flex-col gap-2 text-sm">
-            {project.scenes.map((scene, index) => (
-              <li key={scene.id} className="flex justify-between gap-4">
-                <span>
-                  {index + 1}. {scene.scriptTarget}
-                </span>
-                <span className="shrink-0 text-muted">
-                  {formatSeconds(narrationSeconds(scene.scriptTarget))}
-                </span>
-              </li>
-            ))}
-          </ol>
+          {fileReady ? (
+            <ClipPreview
+              key={project.historyId || status.message}
+              src={
+                project.historyId
+                  ? `/api/history/${encodeURIComponent(project.historyId)}/file`
+                  : "/api/film/file"
+              }
+              label="합친 영상"
+            />
+          ) : clipsReady ? (
+            <SequencePreview title={project.topicEn} layout={layout} clips={previewClips} />
+          ) : (
+            <ShortsFrame title={project.topicEn} subtitle="" layout={layout} className="w-48" />
+          )}
         </Card.Content>
       </Card>
 
-      <StepActions
-        onBack={onBack}
-        nextLabel="업로드"
-        onNext={onNext}
-        nextDisabled={!ready}
-        note={
-          ready
-            ? project.autoUpload
-              ? "자동 업로드가 켜져 있습니다. 켠 채널이 유튜브, 인스타그램, 틱톡이면 그곳으로 올립니다."
-              : "파일을 확인한 뒤 업로드 화면에서 직접 올립니다."
-            : "씬이 준비된 뒤 영상 만들기를 누르면 이 화면이 채워집니다."
-        }
-      />
+      <div className="flex flex-col items-end gap-2">
+        {note ? <p className="text-sm text-danger">{note}</p> : null}
+        <Button
+          isDisabled={status.state === "running" || !clipsReady}
+          onPress={onAssemble}
+        >
+          {status.state === "running" ? "합치는 중" : "하나로 합치기"}
+        </Button>
+      </div>
     </>
   )
 }

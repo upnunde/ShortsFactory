@@ -34,8 +34,9 @@ pnpm-debug.log*
 # local account tokens and app secrets
 config/credentials/*.json
 
-# registered character source images
-assets/characters/
+# generated shorts, keep the saved project
+/outputs/*
+!/outputs/history/
 
 # vercel
 .vercel

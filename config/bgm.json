@@ -1,0 +1,25 @@
+{
+  "defaultId": "stella-waltz",
+  "tracks": [
+    {
+      "id": "stella-waltz",
+      "name": "Stella Princess Waltz",
+      "file": "stella-waltz.mp3"
+    },
+    {
+      "id": "maksymmalko-cute-cute-music-604945",
+      "name": "maksymmalko-cute-cute-music-604945",
+      "file": "maksymmalko-cute-cute-music-604945.mp3"
+    },
+    {
+      "id": "blackbox-black-box-comic-1short-form-bgm-486309",
+      "name": "blackbox-black-box-comic-1short-form-bgm-486309",
+      "file": "blackbox-black-box-comic-1short-form-bgm-486309.mp3"
+    },
+    {
+      "id": "goldensoundlabs-ooops-286277",
+      "name": "goldensoundlabs-ooops-286277",
+      "file": "goldensoundlabs-ooops-286277.mp3"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 const WORDS_PER_SECOND = 2.4
-const TARGET_SECONDS = 60
+const TARGET_SECONDS = 50
 
 export function narrationSeconds(text: string) {
   const words = text.trim().split(/\s+/).filter(Boolean).length
@@ -18,6 +18,10 @@ export function targetSeconds() {
   return TARGET_SECONDS
 }
 
+export function narrationTooLong(seconds: number) {
+  return seconds >= TARGET_SECONDS
+}
+
 export function subtitleLines(text: string, wordsPerLine = 4) {
   const words = text.trim().split(/\s+/).filter(Boolean)
   const lines: string[] = []
@@ -32,7 +36,8 @@ export function defaultSubtitle(text: string) {
 }
 
 export function subtitleCues(subtitle: string | undefined, narration: string) {
-  const source = typeof subtitle === "string" ? subtitle : defaultSubtitle(narration)
+  const source =
+    typeof subtitle === "string" ? subtitle : defaultSubtitle(narration)
   return source
     .split("\n")
     .map((line) => line.trim())

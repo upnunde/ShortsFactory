@@ -101,18 +101,17 @@ export function OutfitPicker({
   )
 }
 
-export function OutfitUsage({ outfitId }: { outfitId: string | null }) {
+export function OutfitUsage({ outfitId: _outfitId }: { outfitId: string | null }) {
   const outfits = useOutfits()
-  const selected = resolveOutfit(outfits, outfitId)
-  if (!selected) {
+  const host = outfits[0]
+  if (!host) {
     return null
   }
-  const followingActive = !outfitId || selected.active
+  const support = outfits.filter((outfit) => outfit.id !== host.id && outfit.active)
   return (
     <p className="text-sm text-muted">
-      {followingActive
-        ? `이 영상에는 켜 둔 ${selected.name} 사진 ${selected.imageCount}장이 같이 나갑니다.`
-        : `이 영상에는 고른 ${selected.name} 사진 ${selected.imageCount}장이 같이 나갑니다.`}
+      진행자는 {host.name}입니다. 활용 중인 보조 인물은{" "}
+      {support.length > 0 ? support.map((outfit) => outfit.name).join(", ") : "없습니다"}.
     </p>
   )
 }

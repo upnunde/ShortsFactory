@@ -35,19 +35,35 @@ export function redirectUri(origin: string, platform: AccountPlatform) {
   return `${origin}/api/accounts/${platform}/callback`
 }
 
-export async function readAccountStatus(): Promise<Record<AccountPlatform, AccountStatus>> {
+export async function readAccountStatus(): Promise<
+  Record<AccountPlatform, AccountStatus>
+> {
   const entries = await Promise.all(
-    ACCOUNT_PLATFORMS.map(async (platform) => [platform, await statusFor(platform)] as const),
+    ACCOUNT_PLATFORMS.map(
+      async (platform) => [platform, await statusFor(platform)] as const
+    )
   )
   return Object.fromEntries(entries) as Record<AccountPlatform, AccountStatus>
 }
 
-export async function saveAppCredentials(platform: AccountPlatform, clientId: string, clientSecret: string) {
+export async function saveAppCredentials(
+  platform: AccountPlatform,
+  clientId: string,
+  clientSecret: string
+) {
   await mkdir(credentialsDir, { recursive: true })
-  await writeFile(appPath(platform), JSON.stringify({ clientId, clientSecret }), { mode: 0o600 })
+  await writeFile(
+    appPath(platform),
+    JSON.stringify({ clientId, clientSecret }),
+    { mode: 0o600 }
+  )
 }
 
-export async function authorizationUrl(origin: string, platform: AccountPlatform, state: string) {
+export async function authorizationUrl(
+  origin: string,
+  platform: AccountPlatform,
+  state: string
+) {
   const app = await readApp(platform)
   if (!app) {
     return null
@@ -71,7 +87,7 @@ export async function authorizationUrl(origin: string, platform: AccountPlatform
     url.searchParams.set("response_type", "code")
     url.searchParams.set(
       "scope",
-      "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement",
+      "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
     )
     url.searchParams.set("state", state)
     return url
@@ -89,7 +105,11 @@ export function createOauthState(platform: AccountPlatform) {
   return `${platform}.${randomUUID()}`
 }
 
-export async function finishOauth(origin: string, platform: AccountPlatform, code: string) {
+export async function finishOauth(
+  origin: string,
+  platform: AccountPlatform,
+  code: string
+) {
   const app = await readApp(platform)
   if (!app) {
     throw new Error("missing app")
@@ -116,6 +136,37 @@ export async function disconnectAccount(platform: AccountPlatform) {
   await rm(tokenPath(platform), { force: true })
 }
 
+export async function youtubeAccessToken() {
+  const app = await readApp("youtube")
+  const token = await readToken("youtube")
+  if (!app || !token) {
+    throw new Error("youtube-not-connected")
+  }
+  if (!token.refreshToken) {
+    return token.accessToken
+  }
+  const body = new URLSearchParams({
+    client_id: app.clientId,
+    client_secret: app.clientSecret,
+    refresh_token: token.refreshToken,
+    grant_type: "refresh_token",
+  })
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  })
+  const json = (await response.json()) as { access_token?: string }
+  if (!response.ok || !json.access_token) {
+    throw new Error("youtube-refresh-failed")
+  }
+  const refreshed = { ...token, accessToken: json.access_token }
+  await writeFile(tokenPath("youtube"), JSON.stringify(refreshed), {
+    mode: 0o600,
+  })
+  return refreshed.accessToken
+}
+
 function appPath(platform: AccountPlatform) {
   return path.join(credentialsDir, `${platform}.app.json`)
 }
@@ -134,11 +185,15 @@ async function statusFor(platform: AccountPlatform): Promise<AccountStatus> {
   }
 }
 
-async function readApp(platform: AccountPlatform): Promise<AppCredentials | null> {
+async function readApp(
+  platform: AccountPlatform
+): Promise<AppCredentials | null> {
   return readJson<AppCredentials>(appPath(platform))
 }
 
-async function readToken(platform: AccountPlatform): Promise<StoredToken | null> {
+async function readToken(
+  platform: AccountPlatform
+): Promise<StoredToken | null> {
   return readJson<StoredToken>(tokenPath(platform))
 }
 
@@ -151,7 +206,11 @@ async function readJson<T>(filePath: string): Promise<T | null> {
   }
 }
 
-async function exchangeGoogle(app: AppCredentials, redirect: string, code: string) {
+async function exchangeGoogle(
+  app: AppCredentials,
+  redirect: string,
+  code: string
+) {
   const body = new URLSearchParams({
     code,
     client_id: app.clientId,
@@ -164,14 +223,21 @@ async function exchangeGoogle(app: AppCredentials, redirect: string, code: strin
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   })
-  const json = (await response.json()) as { access_token?: string; refresh_token?: string }
+  const json = (await response.json()) as {
+    access_token?: string
+    refresh_token?: string
+  }
   if (!response.ok || !json.access_token) {
     throw new Error("google token")
   }
   return { accessToken: json.access_token, refreshToken: json.refresh_token }
 }
 
-async function exchangeFacebook(app: AppCredentials, redirect: string, code: string) {
+async function exchangeFacebook(
+  app: AppCredentials,
+  redirect: string,
+  code: string
+) {
   const url = new URL("https://graph.facebook.com/v21.0/oauth/access_token")
   url.searchParams.set("client_id", app.clientId)
   url.searchParams.set("client_secret", app.clientSecret)
@@ -185,7 +251,11 @@ async function exchangeFacebook(app: AppCredentials, redirect: string, code: str
   return { accessToken: json.access_token, refreshToken: undefined }
 }
 
-async function exchangeTikTok(app: AppCredentials, redirect: string, code: string) {
+async function exchangeTikTok(
+  app: AppCredentials,
+  redirect: string,
+  code: string
+) {
   const body = new URLSearchParams({
     client_key: app.clientId,
     client_secret: app.clientSecret,
@@ -198,7 +268,10 @@ async function exchangeTikTok(app: AppCredentials, redirect: string, code: strin
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   })
-  const json = (await response.json()) as { access_token?: string; refresh_token?: string }
+  const json = (await response.json()) as {
+    access_token?: string
+    refresh_token?: string
+  }
   if (!response.ok || !json.access_token) {
     throw new Error("tiktok token")
   }
@@ -210,22 +283,32 @@ async function accountNameFor(platform: AccountPlatform, accessToken: string) {
     if (platform === "youtube") {
       const response = await fetch(
         "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }
       )
-      const json = (await response.json()) as { items?: { snippet?: { title?: string } }[] }
+      const json = (await response.json()) as {
+        items?: { snippet?: { title?: string } }[]
+      }
       return json.items?.[0]?.snippet?.title || "유튜브 채널"
     }
     if (platform === "instagram") {
-      const response = await fetch("https://graph.facebook.com/v21.0/me?fields=name", {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
+      const response = await fetch(
+        "https://graph.facebook.com/v21.0/me?fields=name",
+        {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }
+      )
       const json = (await response.json()) as { name?: string }
       return json.name || "인스타그램 계정"
     }
-    const response = await fetch("https://open.tiktokapis.com/v2/user/info/?fields=display_name", {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    })
-    const json = (await response.json()) as { data?: { user?: { display_name?: string } } }
+    const response = await fetch(
+      "https://open.tiktokapis.com/v2/user/info/?fields=display_name",
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    )
+    const json = (await response.json()) as {
+      data?: { user?: { display_name?: string } }
+    }
     return json.data?.user?.display_name || "틱톡 계정"
   } catch {
     return "연결된 계정"

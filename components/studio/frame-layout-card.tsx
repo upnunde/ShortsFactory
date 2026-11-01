@@ -1,20 +1,23 @@
 "use client"
 
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState } from "react"
 
-import { Card, Slider } from "@heroui/react"
+import { Card, Label, ListBox, Select } from "@heroui/react"
+import { ShortsFrame } from "@/components/studio/shorts-frame"
 import {
   defaultFrameLayout,
-  setFrameBand,
-  videoHeight,
+  FONT_WEIGHTS,
+  setFontWeight,
+  setSubtitleSize,
+  setSubtitleY,
+  setTitleSize,
   type FrameLayout,
 } from "@/lib/frame-layout"
 
 export function FrameLayoutCard() {
   const [layout, setLayout] = useState<FrameLayout>(defaultFrameLayout)
   const [note, setNote] = useState("")
-  const layoutRef = useRef(layout)
-  layoutRef.current = layout
+  const layoutRef = useRef(defaultFrameLayout)
 
   useEffect(() => {
     void fetch("/api/layout")
@@ -28,8 +31,7 @@ export function FrameLayoutCard() {
       .catch(() => undefined)
   }, [])
 
-  function apply(band: "title" | "subtitle", value: number | number[]) {
-    const next = setFrameBand(layoutRef.current, band, typeof value === "number" ? value : value[0])
+  function update(next: FrameLayout) {
     layoutRef.current = next
     setLayout(next)
     return next
@@ -45,44 +47,106 @@ export function FrameLayoutCard() {
     setNote(response.ok ? "저장했습니다." : "저장하지 못했습니다.")
   }
 
-  const picture = videoHeight(layout)
-
   return (
     <Card>
       <Card.Header>
-        <Card.Title>화면 칸</Card.Title>
+        <Card.Title>글꼴과 자막</Card.Title>
         <Card.Description>
-          9:16 화면을 제목, 영상, 자막으로 나눕니다. 제목과 자막 높이를 바꾸면 영상 높이는 남은 칸이 됩니다.
+          화면 형태는 고정입니다. 글꼴, 크기, 두께와 자막이 놓이는 높이만
+          바꿉니다.
         </Card.Description>
       </Card.Header>
       <Card.Content className="flex flex-col gap-6 sm:flex-row sm:items-start">
-        <div className="mx-auto flex aspect-[9/16] w-40 shrink-0 flex-col overflow-hidden rounded-lg border border-border">
-          <Band height={layout.titleHeight} className="bg-foreground text-background">
-            제목 {layout.titleHeight}%
-          </Band>
-          <Band height={picture} className="bg-surface-secondary text-foreground">
-            영상 {picture}%
-          </Band>
-          <Band height={layout.subtitleHeight} className="bg-foreground text-background">
-            자막 {layout.subtitleHeight}%
-          </Band>
-        </div>
+        <ShortsFrame
+          title={"제목이 2줄 일 경우\n예시 화면"}
+          subtitle={"자막이 2줄 일 경우\n예시화면 최대 2줄까지만 허용"}
+          layout={layout}
+          className="w-40"
+        />
         <div className="flex min-w-0 flex-1 flex-col gap-6">
-          <HeightSlider
-            label="제목 높이"
-            value={layout.titleHeight}
-            maxValue={Math.min(40, 60 - layout.subtitleHeight)}
-            onChange={(value) => apply("title", value)}
-            onChangeEnd={(value) => void save(apply("title", value))}
+          <Select
+            aria-label="글꼴"
+            selectedKey={layout.fontFamily}
+            onSelectionChange={() => undefined}
+          >
+            <Label>글꼴</Label>
+            <Select.Trigger>
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                <ListBox.Item id="pretendard" textValue="Pretendard">
+                  Pretendard
+                </ListBox.Item>
+              </ListBox>
+            </Select.Popover>
+          </Select>
+          <Select
+            aria-label="두께"
+            selectedKey={String(layout.fontWeight)}
+            onSelectionChange={(key) => {
+              if (key == null) {
+                return
+              }
+              void save(update(setFontWeight(layoutRef.current, Number(key))))
+            }}
+          >
+            <Label>두께</Label>
+            <Select.Trigger>
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                {FONT_WEIGHTS.map((item) => (
+                  <ListBox.Item
+                    key={item.weight}
+                    id={String(item.weight)}
+                    textValue={item.label}
+                  >
+                    {item.label}
+                  </ListBox.Item>
+                ))}
+              </ListBox>
+            </Select.Popover>
+          </Select>
+          <SizeSlider
+            label="제목 크기"
+            value={layout.titleSize}
+            min={36}
+            max={96}
+            onChange={(value) => update(setTitleSize(layoutRef.current, value))}
+            onChangeEnd={(value) =>
+              void save(update(setTitleSize(layoutRef.current, value)))
+            }
           />
-          <HeightSlider
+          <SizeSlider
+            label="자막 크기"
+            value={layout.subtitleSize}
+            min={28}
+            max={80}
+            onChange={(value) =>
+              update(setSubtitleSize(layoutRef.current, value))
+            }
+            onChangeEnd={(value) =>
+              void save(update(setSubtitleSize(layoutRef.current, value)))
+            }
+          />
+          <SizeSlider
             label="자막 높이"
-            value={layout.subtitleHeight}
-            maxValue={Math.min(30, 60 - layout.titleHeight)}
-            onChange={(value) => apply("subtitle", value)}
-            onChangeEnd={(value) => void save(apply("subtitle", value))}
+            value={layout.subtitleY}
+            min={28}
+            max={92}
+            suffix="%"
+            onChange={(value) => update(setSubtitleY(layoutRef.current, value))}
+            onChangeEnd={(value) =>
+              void save(update(setSubtitleY(layoutRef.current, value)))
+            }
           />
-          <p className="text-sm text-muted">영상 높이 {picture}%. 가운데 칸은 직접 줄이지 않습니다.</p>
+          <p className="text-sm text-muted">
+            크기는 900×1600 기준입니다. 자막 높이 75%가 기본 자리입니다.
+          </p>
           {note ? <p className="text-sm text-muted">{note}</p> : null}
         </div>
       </Card.Content>
@@ -90,53 +154,44 @@ export function FrameLayoutCard() {
   )
 }
 
-function Band({
-  height,
-  className,
-  children,
-}: {
-  height: number
-  className: string
-  children: ReactNode
-}) {
-  return (
-    <div className={`flex items-center justify-center px-2 text-center text-xs ${className}`} style={{ height: `${height}%` }}>
-      {children}
-    </div>
-  )
-}
-
-function HeightSlider({
+function SizeSlider({
   label,
   value,
-  maxValue,
+  min,
+  max,
+  suffix = "",
   onChange,
   onChangeEnd,
 }: {
   label: string
   value: number
-  maxValue: number
-  onChange: (value: number | number[]) => void
-  onChangeEnd: (value: number | number[]) => void
+  min: number
+  max: number
+  suffix?: string
+  onChange: (value: number) => void
+  onChangeEnd: (value: number) => void
 }) {
   return (
-    <Slider
-      aria-label={label}
-      minValue={10}
-      maxValue={maxValue}
-      step={1}
-      value={value}
-      onChange={onChange}
-      onChangeEnd={onChangeEnd}
-    >
+    <label className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm">{label}</span>
-        <Slider.Output className="text-sm text-muted" />
+        <span className="text-sm text-muted">
+          {value}
+          {suffix}
+        </span>
       </div>
-      <Slider.Track>
-        <Slider.Fill />
-        <Slider.Thumb />
-      </Slider.Track>
-    </Slider>
+      <input
+        aria-label={label}
+        type="range"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        onPointerUp={(event) => onChangeEnd(Number(event.currentTarget.value))}
+        onKeyUp={(event) => onChangeEnd(Number(event.currentTarget.value))}
+        className="w-full accent-foreground"
+      />
+    </label>
   )
 }
