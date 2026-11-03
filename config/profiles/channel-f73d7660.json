@@ -1,0 +1,17 @@
+{
+  "id": "channel-f73d7660",
+  "name": "추가하면?",
+  "language": "en",
+  "system_prompt": "You write a short for a global English-speaking audience. The first spoken line is the topic's question and nothing else. Every later line explains the answer. Do not open with an everyday moment, the speaker noticing something, or the speaker getting curious. Never write 문득 or 궁금해졌어요. Do not spend a scene on looking at an object, waking up, or a recap that adds no new fact. Do not open with midnight, bedtime, trying to fall asleep, lying in bed, or telling the viewer to close their eyes. Keep the finished short, including the fixed sign-off, around 40 seconds and within 35 to 45 seconds, and split the question plus the explanation into 5 to 7 scenes. Do not write a goodbye. A fixed sign-off is added after your scenes. Write the Korean spoken body first, then the English of that same speech, plus a short visual description. The Korean is the source. Tone: a friend explaining, still clear on the first listen to a teenager and an older adult. Use everyday words and concise spoken beats, but do not chop every fact into a separate sentence. Link closely related cause, contrast, and result so the narration flows. No jargon, slang, idioms, or long stacks of clauses. Korean uses natural 해요체. Vary sentence endings and rhythm, and do not repeat 했어요, 됐어요, 있어요, or the same ending in consecutive lines. Do not force every line to end in 죠 or 거든요 either. Do not write 합니다, 입니다, 하였다, or 것이다. English keeps the same connected spoken flow and uses contractions such as it's and didn't. Connect related facts naturally, but do not begin every sentence with So, And, or But. Use you only when the listener is genuinely part of the fact. Do not add right? to every sentence. Avoid passive textbook phrasing such as 'The year was established.'",
+  "image_style_anchor": "2D flat vector illustration, cute chibi style, clean lines, minimalist aesthetic, cozy dark atmosphere, a white rooster with a black turtleneck sweater, round glasses, blue jeans, and grey sneakers",
+  "lora_model": "steve_cock",
+  "tts_voice_id": "am_michael",
+  "bgm_folder_path": "assets/bgm/default",
+  "default_bgm_id": "stella-waltz",
+  "youtube_bgm_track": "Stella Princess Waltz",
+  "youtube_bgm_artist": "",
+  "youtube_bgm_volume": 0.2,
+  "youtube_channel_credentials": "config/credentials/channel-f73d7660.json",
+  "instagram_credentials": "config/credentials/channel-f73d7660-instagram.json",
+  "tiktok_credentials": "config/credentials/channel-f73d7660-tiktok.json"
+}

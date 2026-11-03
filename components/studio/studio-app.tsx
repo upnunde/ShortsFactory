@@ -4,6 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 
 import { Button, ScrollShadow, Separator } from "@heroui/react"
+import { Pencil } from "lucide-react"
+import { ChannelHub } from "@/components/studio/channel-hub"
+import { DirectionStep } from "@/components/studio/direction-step"
 import { FilmStep } from "@/components/studio/film-step"
 import { HistoryPanel } from "@/components/studio/history-panel"
 import { ScenesStep } from "@/components/studio/scenes-step"
@@ -12,14 +15,20 @@ import { SettingsPanel } from "@/components/studio/settings-panel"
 import { TopicStep } from "@/components/studio/topic-step"
 import { UploadStep } from "@/components/studio/upload-step"
 import { isHistoryId } from "@/lib/history"
-import { filmSignature, scriptBlocked } from "@/lib/scene-status"
+import { normalizeProductionMode } from "@/lib/scene-production"
+import {
+  directionReady,
+  filmSignature,
+  narrationSignature,
+  scriptBlocked,
+} from "@/lib/scene-status"
 import { defaultSubtitle } from "@/lib/timing"
 import { applyYoutubeCopy, scheduleForUpload } from "@/lib/youtube-metadata"
-import { getProfile } from "@/lib/profiles"
 import { STORAGE_KEY, sampleStudio } from "@/lib/sample-project"
 import type { AccountPlatform, AccountStatus } from "@/lib/server/accounts"
 import {
   STEPS,
+  type ChannelProfile,
   type Project,
   type Scene,
   type SocialPost,
@@ -38,20 +47,38 @@ function isScene(value: unknown): value is Scene {
     typeof scene.scriptKo === "string" &&
     typeof scene.approvedKo === "string" &&
     typeof scene.scriptTarget === "string" &&
+    (scene.productionMode === undefined ||
+      typeof scene.productionMode === "string") &&
     typeof scene.sceneDescription === "string" &&
     typeof scene.visualDescription === "string" &&
     typeof scene.voiceScript === "string"
   )
 }
 
-function loadStudio(): StudioState {
+function freshStudio(profile: ChannelProfile): StudioState {
+  return {
+    ...sampleStudio,
+    project: {
+      ...sampleStudio.project,
+      profileId: profile.id,
+      bgmId: profile.default_bgm_id,
+      historyId: crypto.randomUUID(),
+    },
+  }
+}
+
+function storageKey(profileId: string) {
+  return `${STORAGE_KEY}.${profileId}`
+}
+
+function loadStudio(profile: ChannelProfile): StudioState {
   if (typeof window === "undefined") {
     return sampleStudio
   }
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
+    const raw = window.localStorage.getItem(storageKey(profile.id))
     if (!raw) {
-      return sampleStudio
+      return freshStudio(profile)
     }
     const parsed = JSON.parse(raw) as StudioState
     if (
@@ -60,11 +87,17 @@ function loadStudio(): StudioState {
       typeof parsed.project.autoUpload !== "boolean" ||
       typeof parsed.project.finalSignature !== "string"
     ) {
-      return sampleStudio
+      return freshStudio(profile)
     }
-    return { ...parsed, project: normalizeProject(parsed.project) }
+    return {
+      ...parsed,
+      project: {
+        ...normalizeProject(parsed.project),
+        profileId: profile.id,
+      },
+    }
   } catch {
-    return sampleStudio
+    return freshStudio(profile)
   }
 }
 
@@ -101,6 +134,20 @@ function normalizeProject(project: Project): Project {
     historyId: isHistoryId(project.historyId)
       ? project.historyId
       : crypto.randomUUID(),
+    directionSignature:
+      typeof project.directionSignature === "string"
+        ? project.directionSignature
+        : "",
+    voicePreviewKey:
+      typeof project.voicePreviewKey === "string" ? project.voicePreviewKey : "",
+    sceneDurations:
+      project.sceneDurations && typeof project.sceneDurations === "object"
+        ? project.sceneDurations
+        : {},
+    sceneWordTimings:
+      project.sceneWordTimings && typeof project.sceneWordTimings === "object"
+        ? project.sceneWordTimings
+        : {},
     youtube: {
       enabled: stored.enabled ?? true,
       ...applyYoutubeCopy({
@@ -114,6 +161,10 @@ function normalizeProject(project: Project): Project {
     scenes: project.scenes.map((scene) => ({
       ...scene,
       shot: scene.shot === "insert" ? "insert" : "room",
+      productionMode: normalizeProductionMode(
+        scene.productionMode,
+        scene.shot === "insert" ? "insert" : "room"
+      ),
       subtitle:
         typeof scene.subtitle === "string"
           ? scene.subtitle
@@ -152,34 +203,41 @@ function normalizePost(
   return post
 }
 
-function filmBody(project: Project) {
+function filmBody(project: Project, profile: ChannelProfile) {
   return {
     topic: project.topicEn.trim(),
     profileId: project.profileId,
     placeEn: project.placeEn,
-    anchor: getProfile(project.profileId).image_style_anchor,
+    anchor: profile.image_style_anchor,
     outfitId: project.outfitId,
     bgmId: project.bgmId,
     signature: filmSignature(project),
     scenes: project.scenes.map((scene) => ({
       id: scene.id,
       shot: scene.shot === "insert" ? "insert" : "room",
+      productionMode: scene.productionMode,
       sceneDescription: scene.sceneDescription,
       scriptTarget: scene.scriptTarget,
       subtitle: scene.subtitle,
       actionBeats: scene.actionBeats,
       castIds: scene.castIds ?? [],
+      duration: project.sceneDurations[scene.id],
     })),
   }
 }
 
 export function StudioApp({
   initialAccounts,
+  initialProfiles,
 }: {
   initialAccounts: Record<AccountPlatform, AccountStatus>
+  initialProfiles: ChannelProfile[]
 }) {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const [profiles, setProfiles] = useState(initialProfiles)
+  const channelId = searchParams.get("channel")
+  const profile = profiles.find((item) => item.id === channelId)
   const view = searchParams.get("view")
   const showHistory = view === "history"
   const showSettings =
@@ -190,19 +248,26 @@ export function StudioApp({
   const [ready, setReady] = useState(false)
   const [scriptBusy, setScriptBusy] = useState("")
   const [scriptError, setScriptError] = useState("")
+  const [filmNote, setFilmNote] = useState("")
   const placesOnce = useRef(false)
 
   useEffect(() => {
-    setStudio(loadStudio())
-    setReady(true)
-  }, [])
-
-  useEffect(() => {
-    if (!ready) {
+    if (!profile) {
       return
     }
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(studio))
-  }, [ready, studio])
+    void Promise.resolve().then(() => {
+      setStudio(loadStudio(profile))
+      placesOnce.current = false
+      setReady(true)
+    })
+  }, [profile])
+
+  useEffect(() => {
+    if (!ready || !profile) {
+      return
+    }
+    window.localStorage.setItem(storageKey(profile.id), JSON.stringify(studio))
+  }, [profile, ready, studio])
 
   useEffect(() => {
     if (!ready || !isHistoryId(studio.project.historyId)) {
@@ -218,7 +283,6 @@ export function StudioApp({
         .then(async (response) => {
           const body = (await response.json()) as { frozen?: boolean }
           if (!response.ok) {
-            setDiskSaved(false)
             return
           }
           if (body.frozen) {
@@ -235,11 +299,9 @@ export function StudioApp({
                 },
               }
             })
-            return
           }
-          setDiskSaved(true)
         })
-        .catch(() => setDiskSaved(false))
+        .catch(() => undefined)
     }, 400)
     return () => window.clearTimeout(timer)
   }, [ready, studio])
@@ -257,8 +319,10 @@ export function StudioApp({
     placesOnce.current = true
     const project = studio.project
     const ids = project.scenes.map((scene) => scene.id)
-    setScriptBusy("places")
-    setScriptError("")
+    void Promise.resolve().then(() => {
+      setScriptBusy("places")
+      setScriptError("")
+    })
     void fetch("/api/script", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -278,7 +342,12 @@ export function StudioApp({
           message?: string
           placeKo?: string
           placeEn?: string
-          scenes?: { shot?: string; sceneDescription?: string }[]
+          scenes?: {
+            shot?: string
+            productionMode?: string
+            sceneDescription?: string
+            castIds?: string[]
+          }[]
         }
         if (!response.ok || !body.placeKo || !body.placeEn || !body.scenes) {
           setScriptError(body.message || "화면 기준을 만들지 못했습니다.")
@@ -305,8 +374,13 @@ export function StudioApp({
               scenes: current.project.scenes.map((scene, index) => ({
                 ...scene,
                 shot: planned[index]?.shot === "insert" ? "insert" : "room",
+                productionMode: normalizeProductionMode(
+                  planned[index]?.productionMode,
+                  planned[index]?.shot === "insert" ? "insert" : "room"
+                ),
                 sceneDescription:
                   planned[index]?.sceneDescription || scene.sceneDescription,
+                castIds: planned[index]?.castIds ?? scene.castIds ?? [],
                 visualDescription: "",
               })),
             },
@@ -317,13 +391,12 @@ export function StudioApp({
       .finally(() => setScriptBusy(""))
   }, [ready, studio.project])
 
-  const profile = getProfile(studio.project.profileId)
-  const stepIndex = STEPS.findIndex((step) => step.id === studio.step)
-
   function goTo(step: StepId) {
     setStudio((current) => ({ ...current, step }))
     if (showSide) {
-      router.replace("/")
+      router.replace(
+        `/?channel=${encodeURIComponent(studio.project.profileId)}`
+      )
     }
   }
 
@@ -335,10 +408,24 @@ export function StudioApp({
   }
 
   function updateScene(sceneId: string, patch: Partial<Scene>) {
+    const narrationChanged =
+      patch.scriptKo !== undefined ||
+      patch.scriptTarget !== undefined ||
+      patch.approvedKo !== undefined
     setStudio((current) => ({
       ...current,
       project: {
         ...current.project,
+        ...(narrationChanged
+          ? {
+              directionSignature: "",
+              voicePreviewKey: "",
+              sceneDurations: {},
+              sceneWordTimings: {},
+              finalSignature: "",
+            }
+          : {}),
+        finalSignature: "",
         scenes: current.project.scenes.map((scene) =>
           scene.id === sceneId ? { ...scene, ...patch } : scene
         ),
@@ -413,7 +500,9 @@ export function StudioApp({
         },
       }))
       if (showSide) {
-        router.replace("/")
+        router.replace(
+          `/?channel=${encodeURIComponent(profile?.id ?? "default")}`
+        )
       }
     } catch {
       setScriptError("전체 내용을 쓰지 못했습니다.")
@@ -514,6 +603,10 @@ export function StudioApp({
           placeApprovedKo: body.placeKo || current.project.placeKo,
           finalSignature: "",
           scenes: body.scenes ?? [],
+          directionSignature: "",
+          voicePreviewKey: "",
+          sceneDurations: {},
+          sceneWordTimings: {},
           youtube: { ...current.project.youtube, ...body.youtube },
           instagram: {
             ...current.project.instagram,
@@ -547,45 +640,77 @@ export function StudioApp({
           mode: "scene",
           topic: studio.project.topic,
           profileId: studio.project.profileId,
-          scriptKo: scene.scriptKo,
-          sceneDescription: scene.sceneDescription,
-          neighbors: studio.project.scenes
-            .filter((item) => item.id !== sceneId)
-            .map((item) => ({
-              scriptKo: item.scriptKo,
-              scriptTarget: item.scriptTarget,
-            })),
+          changedSceneId: sceneId,
+          titleKo: studio.project.titleKo,
+          topicEn: studio.project.topicEn,
+          scenes: studio.project.scenes,
         }),
       })
       const body = (await response.json()) as {
         message?: string
-        scriptTarget?: string
+        titleKo?: string
+        topicEn?: string
+        overviewKo?: string
+        overviewEn?: string
+        scenes?: Project["scenes"]
+        youtube?: Project["youtube"]
+        instagram?: Project["instagram"]
+        tiktok?: Project["tiktok"]
       }
-      if (!response.ok || !body.scriptTarget) {
-        setScriptError(body.message || "영어를 맞추지 못했습니다.")
+      if (
+        !response.ok ||
+        !body.titleKo ||
+        !body.topicEn ||
+        !body.scenes ||
+        !body.youtube ||
+        !body.instagram ||
+        !body.tiktok
+      ) {
+        setScriptError(body.message || "연결된 내용을 맞추지 못했습니다.")
         return
       }
-      updateScene(sceneId, {
-        scriptTarget: body.scriptTarget,
-        approvedKo: scene.scriptKo,
-        subtitle: defaultSubtitle(body.scriptTarget),
-      })
+      setStudio((current) => ({
+        ...current,
+        project: {
+          ...current.project,
+          titleKo: body.titleKo ?? current.project.titleKo,
+          topicEn: body.topicEn ?? current.project.topicEn,
+          overviewKo: body.overviewKo ?? current.project.overviewKo,
+          overviewEn: body.overviewEn ?? current.project.overviewEn,
+          scenes: body.scenes ?? current.project.scenes,
+          youtube: { ...current.project.youtube, ...body.youtube },
+          instagram: {
+            ...current.project.instagram,
+            caption: body.instagram?.caption ?? current.project.instagram.caption,
+          },
+          tiktok: {
+            ...current.project.tiktok,
+            caption: body.tiktok?.caption ?? current.project.tiktok.caption,
+          },
+          finalSignature: "",
+          directionSignature: "",
+          voicePreviewKey: "",
+          sceneDurations: {},
+          sceneWordTimings: {},
+        },
+      }))
     } catch {
-      setScriptError("영어를 맞추지 못했습니다.")
+      setScriptError("연결된 내용을 맞추지 못했습니다.")
     } finally {
       setScriptBusy("")
     }
   }
 
-  const [filmNote, setFilmNote] = useState("")
-  const [diskSaved, setDiskSaved] = useState(false)
-
   async function makeSceneVideos() {
     setScriptError("")
+    if (!directionReady(studio.project)) {
+      setScriptError("대본과 TTS에 맞는 화면 연출을 먼저 만들어야 합니다.")
+      return
+    }
     const response = await fetch("/api/film/clips", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(filmBody(studio.project)),
+      body: JSON.stringify(filmBody(studio.project, profile!)),
     })
     const body = (await response.json()) as { message?: string }
     if (!response.ok) {
@@ -595,12 +720,172 @@ export function StudioApp({
     makeScenes()
   }
 
+  async function makeDirection(preview: {
+    key: string
+    clips: {
+      id: string
+      duration: number
+      text: string
+      words: { word: string; start: number; end: number }[]
+    }[]
+  }) {
+    const project = studio.project
+    setScriptError("")
+    setScriptBusy("direction")
+    try {
+      const settingsResponse = await fetch(
+        `/api/video?profileId=${encodeURIComponent(project.profileId)}`
+      )
+      const settings = (await settingsResponse.json()) as {
+        targetDurationSeconds?: number
+        durationToleranceSeconds?: number
+      }
+      const target = settings.targetDurationSeconds ?? 40
+      const tolerance = settings.durationToleranceSeconds ?? 5
+      const minimum = target - tolerance
+      const maximum = target + tolerance
+      let workingScenes = project.scenes
+      let workingPreview = preview
+      let fitted:
+        | {
+            overviewKo?: string
+            overviewEn?: string
+            youtube?: Project["youtube"]
+            instagram?: Project["instagram"]
+            tiktok?: Project["tiktok"]
+          }
+        | undefined
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const measured = workingPreview.clips.reduce(
+          (sum, clip) => sum + clip.duration,
+          0
+        )
+        if (measured >= minimum && measured <= maximum) break
+        const fitResponse = await fetch("/api/script", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            mode: "fit-duration",
+            topic: project.topic,
+            profileId: project.profileId,
+            measuredSeconds: measured,
+            scenes: workingScenes,
+          }),
+        })
+        const fitBody = (await fitResponse.json()) as {
+          message?: string
+          scenes?: Project["scenes"]
+          overviewKo?: string
+          overviewEn?: string
+          youtube?: Project["youtube"]
+          instagram?: Project["instagram"]
+          tiktok?: Project["tiktok"]
+        }
+        if (!fitResponse.ok || !fitBody.scenes) {
+          setScriptError(
+            fitBody.message || "대본 길이를 자동으로 맞추지 못했습니다."
+          )
+          return
+        }
+        workingScenes = fitBody.scenes
+        fitted = fitBody
+        const voiceResponse = await fetch("/api/voice/preview", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            profileId: project.profileId,
+            scenes: workingScenes.map((scene) => ({
+              id: scene.id,
+              text: scene.scriptTarget,
+            })),
+          }),
+        })
+        const voiceBody = (await voiceResponse.json()) as typeof preview & {
+          message?: string
+        }
+        if (!voiceResponse.ok || !voiceBody.key || !voiceBody.clips) {
+          setScriptError(voiceBody.message || "수정된 대본의 음성을 측정하지 못했습니다.")
+          return
+        }
+        workingPreview = voiceBody
+      }
+
+      const measured = workingPreview.clips.reduce(
+        (sum, clip) => sum + clip.duration,
+        0
+      )
+      if (measured < minimum || measured > maximum) {
+        setScriptError(
+          `자동 조정 후 음성이 ${measured.toFixed(1)}초입니다. 대본에서 직접 조정해 주세요.`
+        )
+        return
+      }
+      const durations = Object.fromEntries(
+        workingPreview.clips.map((clip) => [clip.id, clip.duration])
+      )
+      const words = Object.fromEntries(
+        workingPreview.clips.map((clip) => [clip.id, clip.words])
+      )
+      const response = await fetch("/api/script", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mode: "direction",
+          topic: project.topic,
+          profileId: project.profileId,
+          scenes: workingScenes,
+          durations,
+          words,
+        }),
+      })
+      const body = (await response.json()) as {
+        message?: string
+        scenes?: Project["scenes"]
+      }
+      if (!response.ok || !body.scenes) {
+        setScriptError(body.message || "화면 연출을 만들지 못했습니다.")
+        return
+      }
+      setStudio((current) => ({
+        step: "direction",
+        project: {
+          ...current.project,
+          scenes: body.scenes ?? current.project.scenes,
+          overviewKo: fitted?.overviewKo ?? current.project.overviewKo,
+          overviewEn: fitted?.overviewEn ?? current.project.overviewEn,
+          youtube: fitted?.youtube
+            ? { ...current.project.youtube, ...fitted.youtube }
+            : current.project.youtube,
+          instagram: fitted?.instagram
+            ? { ...current.project.instagram, ...fitted.instagram }
+            : current.project.instagram,
+          tiktok: fitted?.tiktok
+            ? { ...current.project.tiktok, ...fitted.tiktok }
+            : current.project.tiktok,
+          voicePreviewKey: workingPreview.key,
+          sceneDurations: durations,
+          sceneWordTimings: words,
+          directionSignature: narrationSignature(
+            body.scenes ?? current.project.scenes,
+            workingPreview.key
+          ),
+          finalSignature: "",
+        },
+      }))
+    } catch {
+      setScriptError("화면 연출을 만들지 못했습니다.")
+    } finally {
+      setScriptBusy("")
+    }
+  }
+
   async function redoSceneClip(groupId: string) {
     setFilmNote("")
     await fetch("/api/film/clips", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...filmBody(studio.project), groupId }),
+      body: JSON.stringify({ ...filmBody(studio.project, profile!), groupId }),
     })
   }
 
@@ -625,7 +910,7 @@ export function StudioApp({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...filmBody(project),
+          ...filmBody(project, profile!),
           autoUpload: project.autoUpload,
           scheduledAt: project.scheduledAt,
           youtube: project.youtube,
@@ -666,7 +951,7 @@ export function StudioApp({
         project.finalSignature = body.signature
       }
       setStudio({ step: saved.step, project })
-      router.push("/")
+      router.push(`/?channel=${encodeURIComponent(project.profileId)}`)
     } catch {
       setScriptError("작업을 불러오지 못했습니다.")
     }
@@ -686,12 +971,40 @@ export function StudioApp({
     })
   }, [])
 
+  if (!profile) {
+    return (
+      <ChannelHub
+        profiles={profiles}
+        onOpen={(profileId) =>
+          router.push(`/?channel=${encodeURIComponent(profileId)}`)
+        }
+        onCreated={(created) => {
+          setProfiles((current) => [...current, created])
+          router.push(`/?channel=${encodeURIComponent(created.id)}`)
+        }}
+      />
+    )
+  }
+
   return (
     <div className="flex h-svh bg-background text-foreground">
       <aside className="flex w-56 shrink-0 flex-col border-r border-separator bg-surface">
         <div className="px-4 py-5">
-          <p className="text-xs tracking-wide text-muted">로컬 작업실</p>
-          <h1 className="mt-1 text-base font-medium">쇼츠 스튜디오</h1>
+          <p className="text-xs tracking-wide text-muted">현재 채널</p>
+          <div className="mt-1 flex items-center gap-1">
+            <h1 className="min-w-0 flex-1 truncate text-base font-medium">
+              {profile.name}
+            </h1>
+            <Button
+              size="sm"
+              variant="ghost"
+              isIconOnly
+              aria-label="채널 바꾸기"
+              onPress={() => router.push("/")}
+            >
+              <Pencil className="size-4" />
+            </Button>
+          </div>
         </div>
         <Separator />
         <nav className="flex flex-1 flex-col gap-1 p-3">
@@ -716,7 +1029,11 @@ export function StudioApp({
           <Button
             variant={showHistory ? "secondary" : "ghost"}
             fullWidth
-            onPress={() => router.push("/?view=history")}
+            onPress={() =>
+              router.push(
+                `/?channel=${encodeURIComponent(profile.id)}&view=history`
+              )
+            }
           >
             <span className="flex w-full items-center justify-start">
               히스토리
@@ -725,24 +1042,13 @@ export function StudioApp({
           <Button
             variant={showSettings ? "secondary" : "ghost"}
             fullWidth
-            onPress={() => router.push("/?view=settings")}
-          >
-            <span className="flex w-full items-center justify-start">설정</span>
-          </Button>
-          <Button
-            variant="outline"
-            fullWidth
             onPress={() =>
-              setStudio({
-                ...sampleStudio,
-                project: {
-                  ...sampleStudio.project,
-                  historyId: crypto.randomUUID(),
-                },
-              })
+              router.push(
+                `/?channel=${encodeURIComponent(profile.id)}&view=settings`
+              )
             }
           >
-            샘플로 되돌리기
+            <span className="flex w-full items-center justify-start">설정</span>
           </Button>
         </div>
       </aside>
@@ -752,6 +1058,7 @@ export function StudioApp({
           {showHistory ? (
             <HistoryPanel
               currentId={studio.project.historyId}
+              profileId={profile.id}
               onOpen={(id) => void openHistory(id)}
             />
           ) : showSettings ? (
@@ -759,12 +1066,19 @@ export function StudioApp({
               initialTab={settingsTab(view, searchParams.get("tab"))}
               accountNotice={accountNotice(searchParams)}
               initialAccounts={initialAccounts}
+              profile={profile}
+              onProfileSaved={(saved) =>
+                setProfiles((current) =>
+                  current.map((item) => (item.id === saved.id ? saved : item))
+                )
+              }
             />
           ) : (
             <>
               {studio.step === "topic" ? (
                 <TopicStep
                   topic={studio.project.topic}
+                  profileId={profile.id}
                   titleKo={studio.project.titleKo}
                   topicEn={studio.project.topicEn}
                   overviewKo={studio.project.overviewKo}
@@ -813,14 +1127,30 @@ export function StudioApp({
                     }
                   }}
                   onBack={() => goTo("topic")}
-                  onMake={() => void makeSceneVideos()}
+                  onComplete={(preview) => void makeDirection(preview)}
                   busy={scriptBusy}
                   error={scriptError}
                   onRewriteScene={(sceneId) => void rewriteScene(sceneId)}
+                />
+              ) : null}
+
+              {studio.step === "direction" ? (
+                <DirectionStep
+                  project={studio.project}
+                  busy={scriptBusy !== ""}
+                  error={scriptError}
+                  onBack={() => goTo("script")}
+                  onMake={() => void makeSceneVideos()}
                   onPictureChange={(sceneId, sceneDescription) =>
                     updateScene(sceneId, {
                       sceneDescription,
-                      visualDescription: sceneDescription,
+                      visualDescription: "",
+                    })
+                  }
+                  onProductionModeChange={(sceneId, productionMode) =>
+                    updateScene(sceneId, {
+                      productionMode,
+                      visualDescription: "",
                     })
                   }
                   onCastEnter={(characterId, fromIndex) =>
@@ -841,6 +1171,7 @@ export function StudioApp({
                           }
                           return { ...scene, castIds: [...ids] }
                         }),
+                        finalSignature: "",
                       },
                     }))
                   }
@@ -850,15 +1181,13 @@ export function StudioApp({
               {studio.step === "scenes" ? (
                 <ScenesStep
                   scenes={studio.project.scenes}
-                  topic={studio.project.topicEn}
                   bgmId={studio.project.bgmId}
                   signature={filmSignature(studio.project)}
                   onBgmChange={(bgmId) => updateProject({ bgmId })}
                   blockedNote={scriptBlocked(studio.project)}
-                  onBack={() => goTo("script")}
+                  onBack={() => goTo("direction")}
                   onNext={() => goTo("film")}
                   onRedoClip={(groupId) => void redoSceneClip(groupId)}
-                  outfitId={studio.project.outfitId}
                 />
               ) : null}
 
@@ -898,16 +1227,6 @@ export function StudioApp({
             </>
           )}
 
-          {showSide ? null : (
-            <p className="text-xs text-muted">
-              {stepIndex + 1} / {STEPS.length}
-              {ready
-                ? diskSaved
-                  ? " · 이 컴퓨터에 저장됨"
-                  : " · 이 브라우저에 저장됨"
-                : ""}
-            </p>
-          )}
         </main>
       </ScrollShadow>
     </div>

@@ -24,11 +24,12 @@ export function videoGroups(scenes: FilmScene[]): VideoGroup[] {
   }
 
   for (const scene of scenes) {
-    const next = narrationSeconds(scene.scriptTarget)
+    const next = scene.duration ?? narrationSeconds(scene.scriptTarget)
     const sameRoom =
       bucket.length > 0 &&
       bucket.every((item) => item.shot === "room") &&
-      scene.shot === "room"
+      scene.shot === "room" &&
+      bucket.every((item) => item.productionMode === scene.productionMode)
     if (sameRoom && seconds + next <= MAX_CLIP_SECONDS) {
       bucket.push(scene)
       seconds += next

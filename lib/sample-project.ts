@@ -19,6 +19,7 @@ function scene(
     scriptTarget,
     subtitle: defaultSubtitle(scriptTarget),
     shot,
+    productionMode: shot === "insert" ? "graphic_motion" : "character_motion",
     sceneDescription,
     visualDescription: "",
     voiceScript: "",
@@ -51,6 +52,10 @@ export const sampleStudio: StudioState = {
     scheduledAt: nextKoreaUploadSlot(),
     historyId: "",
     finalSignature: "",
+    directionSignature: "",
+    voicePreviewKey: "",
+    sceneDurations: {},
+    sceneWordTimings: {},
     scenes: [
       scene(
         "scene-01",
@@ -60,29 +65,29 @@ export const sampleStudio: StudioState = {
       ),
       scene(
         "scene-02",
-        "빛은 빠르다. 그런데 별까지의 거리가 그 속도를 삼켜 버린다.",
-        "Light is fast. The distance to the star just swallows that speed.",
+        "빛은 빨라요. 하지만 별까지의 거리가 너무 멀어요.",
+        "Light is fast. But the distance to a star is enormous.",
         "a long empty stretch between a near point and a far point",
         "insert"
       ),
       scene(
         "scene-03",
-        "그래서 지금 보이는 빛은 지금 별의 모습이 아니다.",
-        "So the light you see now is not the star as it is now.",
+        "그래서 지금 보이는 빛은 별의 지금 모습이 아니에요.",
+        "So the light you see now isn't the star as it is now.",
         "one point of light marked as an older moment",
         "insert"
       ),
       scene(
         "scene-04",
-        "할머니가 태어나기 전에 꺼진 별의 빛이 오늘 도착할 수도 있다.",
+        "할머니가 태어나기 전에 꺼진 별의 빛이 오늘 도착할 수도 있어요.",
         "A star that burned out before my grandparents were born can have its light arrive today.",
         "an old burst of light still crossing a dark stretch",
         "insert"
       ),
       scene(
         "scene-05",
-        "하늘을 볼 때 그중 일부는 이미 없는 별이다.",
-        "Some of what you see up there is a star that is already gone.",
+        "하늘을 볼 때 그중 일부는 이미 사라진 별일 수도 있어요.",
+        "Some of what you see up there may be a star that's already gone.",
         "a field of small lights, a few of them marked as already gone",
         "insert"
       ),

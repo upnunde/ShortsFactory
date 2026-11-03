@@ -138,7 +138,7 @@ export function BgmSettingsCard() {
                 </Button>
               )}
             </div>
-            <ReadyAudio id={track.id} />
+            <ReadyAudio key={track.id} id={track.id} />
           </div>
         ))}
         {note ? <p className="text-sm text-muted">{note}</p> : null}
@@ -190,8 +190,10 @@ export function BgmPicker({
           </ListBox>
         </Select.Popover>
       </Select>
-      <ReadyAudio id={selected.id} />
-      <p className="text-sm text-muted">볼륨은 20%로 고정입니다.</p>
+      <ReadyAudio key={selected.id} id={selected.id} />
+      <p className="text-sm text-muted">
+        볼륨은 현재 채널 프리셋의 설정을 사용합니다.
+      </p>
     </div>
   )
 }
@@ -222,8 +224,6 @@ function ReadyAudio({ id }: { id: string }) {
 
   useEffect(() => {
     let stop = false
-    setSrc(null)
-    setFailed(false)
     void audioSource(id).then(
       (url) => {
         if (!stop) {

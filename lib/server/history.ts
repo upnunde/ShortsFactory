@@ -1,7 +1,11 @@
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 
-import { isHistoryId, type HistoryEntry } from "@/lib/history"
+import {
+  historyListable,
+  isHistoryId,
+  type HistoryEntry,
+} from "@/lib/history"
 import { filmSignature } from "@/lib/scene-status"
 import { STEPS, type StepId, type StudioState } from "@/lib/types"
 
@@ -12,9 +16,11 @@ type HistoryIndex = HistoryEntry[]
 
 let chain: Promise<void> = Promise.resolve()
 
-export async function listHistory() {
+export async function listHistory(profileId = "default") {
   const index = await readIndex()
-  return [...index].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+  return index
+    .filter((entry) => entry.profileId === profileId && historyListable(entry))
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
 }
 
 export async function readHistory(id: string) {
@@ -65,16 +71,29 @@ export async function saveHistory(studio: StudioState) {
     ) {
       return { ok: true as const, frozen: true }
     }
-    await mkdir(path.join(historyDir, id), { recursive: true })
-    await writeFile(projectPath(id), JSON.stringify(studio))
+
     const next: HistoryEntry = {
       id,
       topic: studio.project.topic.trim() || "제목 없음",
       step: studio.step,
       updatedAt: new Date().toISOString(),
       hasVideo: existing?.hasVideo ?? false,
+      hasUpload: existing?.hasUpload ?? false,
       signature: existing?.hasVideo ? existing.signature : "",
+      profileId: studio.project.profileId,
     }
+
+    if (!historyListable(next) && !existing) {
+      return { ok: true as const, frozen: false }
+    }
+
+    await mkdir(path.join(historyDir, id), { recursive: true })
+    await writeFile(projectPath(id), JSON.stringify(studio))
+
+    if (!historyListable(next)) {
+      return { ok: true as const, frozen: false }
+    }
+
     await writeIndex(upsert(index, next))
     return { ok: true as const, frozen: false }
   })
@@ -84,7 +103,8 @@ export async function attachHistoryVideo(
   id: string,
   sourcePath: string,
   signature: string,
-  captionsPath?: string
+  captionsPath?: string,
+  settingsSnapshot?: unknown
 ) {
   if (!isHistoryId(id)) {
     return
@@ -96,6 +116,12 @@ export async function attachHistoryVideo(
     if (captionsPath) {
       await copyFile(captionsPath, path.join(folder, "captions.srt"))
     }
+    if (settingsSnapshot) {
+      await writeFile(
+        path.join(folder, "render-settings.json"),
+        `${JSON.stringify(settingsSnapshot, null, 2)}\n`
+      )
+    }
     const index = await readIndex()
     const existing = index.find((item) => item.id === id)
     const next: HistoryEntry = {
@@ -104,9 +130,47 @@ export async function attachHistoryVideo(
       step: existing?.step || "film",
       updatedAt: new Date().toISOString(),
       hasVideo: true,
+      hasUpload: existing?.hasUpload ?? false,
       signature,
+      profileId: existing?.profileId ?? "default",
     }
     await writeIndex(upsert(index, next))
+  })
+}
+
+export async function markHistoryUploaded(id: string) {
+  if (!isHistoryId(id)) {
+    return
+  }
+  await enqueue(async () => {
+    const index = await readIndex()
+    const existing = index.find((item) => item.id === id)
+    if (!existing) {
+      return
+    }
+    const next: HistoryEntry = {
+      ...existing,
+      step: "upload",
+      updatedAt: new Date().toISOString(),
+      hasUpload: true,
+    }
+    await writeIndex(upsert(index, next))
+  })
+}
+
+export async function deleteHistory(id: string) {
+  if (!isHistoryId(id)) {
+    return false
+  }
+  return enqueue(async () => {
+    const index = await readIndex()
+    const existing = index.find((item) => item.id === id)
+    if (!existing) {
+      return false
+    }
+    await writeIndex(index.filter((item) => item.id !== id))
+    await rm(path.join(historyDir, id), { recursive: true, force: true })
+    return true
   })
 }
 
@@ -157,7 +221,12 @@ function entryOf(value: unknown): HistoryEntry[] {
       step,
       updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : "",
       hasVideo: entry.hasVideo === true,
+      hasUpload: entry.hasUpload === true,
       signature: typeof entry.signature === "string" ? entry.signature : "",
+      profileId:
+        typeof entry.profileId === "string" && entry.profileId
+          ? entry.profileId
+          : "default",
     },
   ]
 }

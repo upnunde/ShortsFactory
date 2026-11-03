@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import type { FilmScene } from "@/lib/film-plan"
+import { normalizeProductionMode } from "@/lib/scene-production"
 import { readFilmStatus, startFilm } from "@/lib/server/film-job"
 import type { ShotKind } from "@/lib/types"
 
@@ -73,6 +74,7 @@ function sceneOf(value: unknown): FilmScene[] {
     {
       id: scene.id,
       shot,
+      productionMode: normalizeProductionMode(scene.productionMode, shot),
       sceneDescription: scene.sceneDescription,
       scriptTarget: scene.scriptTarget,
       subtitle:
@@ -95,6 +97,10 @@ function sceneOf(value: unknown): FilmScene[] {
       castIds: Array.isArray(scene.castIds)
         ? scene.castIds.filter((id): id is string => typeof id === "string")
         : [],
+      duration:
+        typeof scene.duration === "number" && Number.isFinite(scene.duration)
+          ? scene.duration
+          : undefined,
     },
   ]
 }

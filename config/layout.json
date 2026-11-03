@@ -1,7 +1,9 @@
 {
   "fontFamily": "pretendard",
   "fontWeight": 700,
-  "titleSize": 60,
-  "subtitleSize": 50,
-  "subtitleY": 70
+  "titleSize": 50,
+  "subtitleSize": 45,
+  "subtitleY": 70,
+  "outputSize": "720x1280",
+  "titleBandPercent": 25
 }

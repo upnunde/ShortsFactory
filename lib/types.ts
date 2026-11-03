@@ -7,6 +7,7 @@ export type ChannelProfile = {
   lora_model: string
   tts_voice_id: string
   bgm_folder_path: string
+  default_bgm_id: string
   youtube_bgm_track: string
   youtube_bgm_artist: string
   youtube_bgm_volume: number
@@ -16,6 +17,9 @@ export type ChannelProfile = {
 }
 
 export type ShotKind = "room" | "insert"
+
+import type { SceneProductionMode } from "./scene-production"
+import type { WordTiming } from "./voice-timing"
 
 export type ActionBeat = {
   trigger: string
@@ -29,6 +33,7 @@ export type Scene = {
   scriptTarget: string
   subtitle: string
   shot: ShotKind
+  productionMode: SceneProductionMode
   sceneDescription: string
   visualDescription: string
   voiceScript: string
@@ -66,6 +71,10 @@ export type Project = {
   scheduledAt: string
   historyId: string
   finalSignature: string
+  directionSignature: string
+  voicePreviewKey: string
+  sceneDurations: Record<string, number>
+  sceneWordTimings: Record<string, WordTiming[]>
   youtube: YoutubeMeta
   instagram: SocialPost
   tiktok: SocialPost
@@ -74,6 +83,7 @@ export type Project = {
 export const STEPS = [
   { id: "topic", label: "주제" },
   { id: "script", label: "대본" },
+  { id: "direction", label: "화면 연출" },
   { id: "scenes", label: "씬" },
   { id: "film", label: "영상" },
   { id: "upload", label: "업로드" },

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server"
 
 import type { FilmScene } from "@/lib/film-plan"
-import { readClipFile, readClipJob, startSceneClips } from "@/lib/server/film-job"
+import { normalizeProductionMode } from "@/lib/scene-production"
+import { readClipJob, startSceneClips } from "@/lib/server/film-job"
 import type { ShotKind } from "@/lib/types"
 
 export const runtime = "nodejs"
@@ -64,10 +65,13 @@ function sceneOf(value: unknown): FilmScene[] {
     {
       id: scene.id,
       shot,
+      productionMode: normalizeProductionMode(scene.productionMode, shot),
       sceneDescription: scene.sceneDescription,
       scriptTarget: scene.scriptTarget,
       subtitle:
-        typeof scene.subtitle === "string" ? scene.subtitle : scene.scriptTarget,
+        typeof scene.subtitle === "string"
+          ? scene.subtitle
+          : scene.scriptTarget,
       actionBeats: Array.isArray(scene.actionBeats)
         ? scene.actionBeats.flatMap((beat) => {
             if (
@@ -84,6 +88,10 @@ function sceneOf(value: unknown): FilmScene[] {
       castIds: Array.isArray(scene.castIds)
         ? scene.castIds.filter((id): id is string => typeof id === "string")
         : [],
+      duration:
+        typeof scene.duration === "number" && Number.isFinite(scene.duration)
+          ? scene.duration
+          : undefined,
     },
   ]
 }

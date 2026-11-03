@@ -1,15 +1,18 @@
 import { narrationSeconds } from "./timing.ts"
+import type { SceneProductionMode } from "./scene-production.ts"
 import type { ActionBeat, ShotKind } from "./types.ts"
 import type { WordTiming } from "./voice-timing.ts"
 
 export type FilmScene = {
   id: string
   shot: ShotKind
+  productionMode: SceneProductionMode
   sceneDescription: string
   scriptTarget: string
   subtitle: string
   actionBeats: ActionBeat[]
   castIds: string[]
+  duration?: number
 }
 
 export type FilmLink = "start" | "continue" | "insert" | "return"
@@ -76,6 +79,7 @@ export function groupClipPrompt(
       scene ?? {
         id: "",
         shot: "room",
+        productionMode: "character_motion",
         sceneDescription: "",
         scriptTarget: "",
         subtitle: "",

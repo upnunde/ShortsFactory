@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 
 import { youtubeAccessToken } from "@/lib/server/accounts"
-import { historyCaptionPath, historyVideoPath } from "@/lib/server/history"
+import {
+  historyCaptionPath,
+  historyVideoPath,
+  markHistoryUploaded,
+} from "@/lib/server/history"
 import {
   englishCaptionSnippet,
   youtubeVideoResource,
 } from "@/lib/youtube-metadata"
 
 export type YoutubeUploadInput = {
+  profileId: string
   historyId: string
   title: string
   description: string
@@ -24,7 +29,7 @@ export async function uploadYoutubeShort(input: YoutubeUploadInput) {
   }
   const [video, token] = await Promise.all([
     readFile(videoPath).catch(() => null),
-    youtubeAccessToken(),
+    youtubeAccessToken(input.profileId),
   ])
   if (!video) {
     throw new Error("video-not-found")
@@ -56,6 +61,7 @@ export async function uploadYoutubeShort(input: YoutubeUploadInput) {
       )
     }
   }
+  await markHistoryUploaded(input.historyId)
   return {
     videoId,
     url: `https://www.youtube.com/watch?v=${videoId}`,

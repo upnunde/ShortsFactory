@@ -10,7 +10,10 @@ export async function GET(request: Request) {
   const clip = url.searchParams.get("clip") ?? ""
   const bytes = await readPreviewAudio(key, clip)
   if (!bytes) {
-    return NextResponse.json({ message: "들어볼 음성이 없습니다." }, { status: 404 })
+    return NextResponse.json(
+      { message: "들어볼 음성이 없습니다." },
+      { status: 404 }
+    )
   }
   return new NextResponse(Buffer.from(bytes), {
     headers: {
@@ -24,6 +27,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     scenes?: { id?: unknown; text?: unknown }[]
+    profileId?: unknown
   } | null
   const scenes = (body?.scenes ?? []).flatMap((scene) => {
     if (typeof scene.id !== "string" || typeof scene.text !== "string") {
@@ -36,10 +40,16 @@ export async function POST(request: Request) {
     return [{ id: scene.id, text }]
   })
   if (scenes.length === 0) {
-    return NextResponse.json({ message: "들을 대본이 없습니다." }, { status: 400 })
+    return NextResponse.json(
+      { message: "들을 대본이 없습니다." },
+      { status: 400 }
+    )
   }
   try {
-    const preview = await previewNarration(scenes)
+    const preview = await previewNarration(
+      scenes,
+      typeof body?.profileId === "string" ? body.profileId : "default"
+    )
     return NextResponse.json({
       key: preview.key,
       total: preview.total,

@@ -37,17 +37,19 @@ function useOutfits() {
               front: { url: string } | null
               angles: { image: { url: string } | null }[]
             }[]
-          } | null,
+          } | null
         ) => {
           setOutfits(
             (body?.outfits ?? []).map((outfit) => ({
               id: outfit.id,
               name: outfit.name,
               active: outfit.active,
-              imageCount: (outfit.front ? 1 : 0) + outfit.angles.filter((angle) => angle.image).length,
-            })),
+              imageCount:
+                (outfit.front ? 1 : 0) +
+                outfit.angles.filter((angle) => angle.image).length,
+            }))
           )
-        },
+        }
       )
   }, [])
 
@@ -91,7 +93,11 @@ export function OutfitPicker({
       <Select.Popover>
         <ListBox>
           {outfits.map((outfit) => (
-            <ListBox.Item key={outfit.id} id={outfit.id} textValue={outfit.name}>
+            <ListBox.Item
+              key={outfit.id}
+              id={outfit.id}
+              textValue={outfit.name}
+            >
               {outfit.name}
             </ListBox.Item>
           ))}
@@ -101,17 +107,22 @@ export function OutfitPicker({
   )
 }
 
-export function OutfitUsage({ outfitId: _outfitId }: { outfitId: string | null }) {
+export function OutfitUsage() {
   const outfits = useOutfits()
   const host = outfits[0]
   if (!host) {
     return null
   }
-  const support = outfits.filter((outfit) => outfit.id !== host.id && outfit.active)
+  const support = outfits.filter(
+    (outfit) => outfit.id !== host.id && outfit.active
+  )
   return (
     <p className="text-sm text-muted">
       진행자는 {host.name}입니다. 활용 중인 보조 인물은{" "}
-      {support.length > 0 ? support.map((outfit) => outfit.name).join(", ") : "없습니다"}.
+      {support.length > 0
+        ? support.map((outfit) => outfit.name).join(", ")
+        : "없습니다"}
+      .
     </p>
   )
 }

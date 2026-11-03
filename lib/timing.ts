@@ -1,5 +1,6 @@
 const WORDS_PER_SECOND = 2.4
-const TARGET_SECONDS = 50
+const TARGET_SECONDS = 40
+const MAX_SECONDS = 45
 
 export function narrationSeconds(text: string) {
   const words = text.trim().split(/\s+/).filter(Boolean).length
@@ -19,7 +20,7 @@ export function targetSeconds() {
 }
 
 export function narrationTooLong(seconds: number) {
-  return seconds >= TARGET_SECONDS
+  return seconds > MAX_SECONDS
 }
 
 export function subtitleLines(text: string, wordsPerLine = 4) {

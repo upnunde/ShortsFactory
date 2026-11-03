@@ -6,6 +6,7 @@ import path from "node:path"
 import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
 import { generateNarration } from "@/lib/server/tts"
 import { readVoiceId } from "@/lib/server/voice"
+import { wordTimings, type WordTiming } from "@/lib/voice-timing"
 
 const previewDir = path.join(process.cwd(), "outputs", "voice-preview")
 
@@ -14,6 +15,7 @@ export type PreviewClip = {
   file: string
   duration: number
   text: string
+  words: WordTiming[]
 }
 
 export type PreviewResult = {
@@ -25,8 +27,11 @@ export type PreviewResult = {
 const jobs = new Map<string, Promise<PreviewResult>>()
 let chain: Promise<void> = Promise.resolve()
 
-export async function previewNarration(scenes: { id: string; text: string }[]) {
-  const voiceId = await readVoiceId()
+export async function previewNarration(
+  scenes: { id: string; text: string }[],
+  profileId = "default"
+) {
+  const voiceId = await readVoiceId(profileId)
   const key = createHash("sha256")
     .update(
       `${voiceId}\n${scenes.map((scene) => `${scene.id}|${scene.text}`).join("\n")}`
@@ -43,9 +48,11 @@ export async function previewNarration(scenes: { id: string; text: string }[]) {
   }
   const job = enqueue(() => buildPreview(scenes, voiceId, key))
   jobs.set(key, job)
-  void job.finally(() => {
-    jobs.delete(key)
-  }).catch(() => undefined)
+  void job
+    .finally(() => {
+      jobs.delete(key)
+    })
+    .catch(() => undefined)
   return job
 }
 
@@ -58,7 +65,9 @@ export async function readPreviewAudio(key: string, clip: string) {
     return null
   }
   const fileName =
-    clip === "all" ? "all.wav" : manifest.clips.find((item) => item.id === clip)?.file
+    clip === "all"
+      ? "all.wav"
+      : manifest.clips.find((item) => item.id === clip)?.file
   if (!fileName || !/^(?:voice-\d{2}|all)\.wav$/.test(fileName)) {
     return null
   }
@@ -111,19 +120,32 @@ async function buildPreview(
       file: `voice-${String(index + 1).padStart(2, "0")}.wav`,
       duration: clip.duration,
       text: scenes[index]?.text ?? "",
+      words: clip.words,
     })),
     total: clips.reduce((sum, clip) => sum + clip.duration, 0),
   }
   await mkdir(dir, { recursive: true })
-  await writeFile(path.join(dir, "manifest.json"), `${JSON.stringify(result)}\n`)
+  await writeFile(
+    path.join(dir, "manifest.json"),
+    `${JSON.stringify(result)}\n`
+  )
   return result
 }
 
 async function readManifest(key: string) {
   try {
-    return JSON.parse(
+    const parsed = JSON.parse(
       await readFile(path.join(previewDir, key, "manifest.json"), "utf8")
     ) as PreviewResult
+    return {
+      ...parsed,
+      clips: parsed.clips.map((clip) => ({
+        ...clip,
+        words: Array.isArray(clip.words)
+          ? clip.words
+          : wordTimings(clip.text, clip.duration),
+      })),
+    }
   } catch {
     return null
   }

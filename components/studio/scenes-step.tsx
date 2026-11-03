@@ -5,11 +5,10 @@ import { useEffect, useState } from "react"
 import { Button, Card, Chip } from "@heroui/react"
 import { BgmPicker } from "@/components/studio/bgm-card"
 import { ClipPreview } from "@/components/studio/clip-preview"
-import { ShortsFrame } from "@/components/studio/shorts-frame"
 import { StepActions, StepHeader } from "@/components/studio/chrome"
 import { OutfitUsage } from "@/components/studio/outfit-choice"
 import { videoGroups } from "@/lib/film-groups"
-import { defaultFrameLayout, type FrameLayout } from "@/lib/frame-layout"
+import { SCENE_PRODUCTION_LABELS } from "@/lib/scene-production"
 import { englishIsStale, projectSeconds } from "@/lib/scene-status"
 import { formatSeconds, narrationSeconds, narrationTooLong } from "@/lib/timing"
 import type { Scene } from "@/lib/types"
@@ -23,7 +22,6 @@ type ClipJob = {
 
 export function ScenesStep({
   scenes,
-  topic,
   bgmId,
   signature,
   onBgmChange,
@@ -31,10 +29,8 @@ export function ScenesStep({
   onBack,
   onNext,
   onRedoClip,
-  outfitId,
 }: {
   scenes: Scene[]
-  topic: string
   bgmId: string
   signature: string
   onBgmChange: (bgmId: string) => void
@@ -42,7 +38,6 @@ export function ScenesStep({
   onBack: () => void
   onNext: () => void
   onRedoClip: (groupId: string) => void
-  outfitId: string | null
 }) {
   const blocked = blockedNote !== ""
   const over = narrationTooLong(projectSeconds(scenes))
@@ -50,6 +45,7 @@ export function ScenesStep({
     scenes.map((scene) => ({
       id: scene.id,
       shot: scene.shot,
+      productionMode: scene.productionMode,
       sceneDescription: scene.sceneDescription,
       scriptTarget: scene.scriptTarget,
       subtitle: scene.subtitle,
@@ -57,23 +53,12 @@ export function ScenesStep({
       castIds: scene.castIds ?? [],
     }))
   )
-  const [layout, setLayout] = useState<FrameLayout>(defaultFrameLayout)
   const [job, setJob] = useState<ClipJob>({
     state: "idle",
     message: "",
     signature: "",
     groups: [],
   })
-
-  useEffect(() => {
-    void fetch("/api/layout")
-      .then(async (response) => {
-        if (response.ok) {
-          setLayout((await response.json()) as FrameLayout)
-        }
-      })
-      .catch(() => undefined)
-  }, [])
 
   useEffect(() => {
     let stop = false
@@ -107,16 +92,18 @@ export function ScenesStep({
   const readyGroups = job.signature === signature ? job.groups : []
   const allReady =
     groups.length > 0 &&
-    groups.every((group) => readyGroups.find((item) => item.id === group.id)?.ready)
+    groups.every(
+      (group) => readyGroups.find((item) => item.id === group.id)?.ready
+    )
 
   return (
     <>
       <StepHeader
         title="씬"
-        description="묶인 영상을 각각 확인합니다. 문제 없으면 영상 단계에서 하나로 합칩니다."
+        description="AI 영상과 로컬 2D 모션이 섞인 TTS 포함 3:4 장면을 확인합니다. 제목, 자막과 BGM은 영상 단계에서 합칩니다."
       />
 
-      <OutfitUsage outfitId={outfitId} />
+      <OutfitUsage />
 
       <div className="grid gap-4 md:grid-cols-2">
         {groups.map((group, index) => {
@@ -133,22 +120,21 @@ export function ScenesStep({
                 return sceneIndex + 1
               })}
               lines={groupedScenes.map((scene) => scene.scriptTarget)}
+              productionLabel={
+                SCENE_PRODUCTION_LABELS[group.scenes[0].productionMode]
+              }
               seconds={
                 status?.ready
                   ? status.seconds
                   : groupedScenes.reduce(
-                      (sum, scene) => sum + narrationSeconds(scene.scriptTarget),
+                      (sum, scene) =>
+                        sum + narrationSeconds(scene.scriptTarget),
                       0
                     )
               }
               ready={status?.ready === true}
               stale={groupedScenes.some(englishIsStale)}
               busy={job.state === "running"}
-              topic={topic}
-              subtitle={firstCue(
-                groupedScenes[0]?.subtitle || groupedScenes[0]?.scriptTarget || ""
-              )}
-              layout={layout}
               onRedo={() => onRedoClip(group.id)}
             />
           )
@@ -170,7 +156,7 @@ export function ScenesStep({
               : allReady
                 ? "각 영상을 확인했습니다. 영상 단계에서 하나로 합칩니다."
                 : over
-                  ? "예상 길이가 50초 이상입니다. 대본에서 씬 영상을 만들면 여기에 붙습니다."
+                  ? "예상 길이가 45초를 넘습니다. 대본을 줄인 뒤 다시 만들어 주세요."
                   : job.message || "대본에서 씬 영상을 만들면 여기에 붙습니다."
         }
       />
@@ -182,28 +168,23 @@ function SceneClipCard({
   index,
   sceneLabels,
   lines,
+  productionLabel,
   seconds,
   ready,
   stale,
   busy,
-  topic,
-  subtitle,
-  layout,
   onRedo,
 }: {
   index: number
   sceneLabels: number[]
   lines: string[]
+  productionLabel: string
   seconds: number
   ready: boolean
   stale: boolean
   busy: boolean
-  topic: string
-  subtitle: string
-  layout: FrameLayout
   onRedo: () => void
 }) {
-  const title = topic.trim() || "제목"
   const span =
     sceneLabels.length === 1
       ? `씬 ${sceneLabels[0]}`
@@ -215,24 +196,33 @@ function SceneClipCard({
         <Card.Title>
           영상 {index + 1}
           <span className="ml-2 text-sm font-normal text-muted">
-            {span} · {ready ? `${seconds.toFixed(1)}초` : `약 ${formatSeconds(seconds)}`}
+            {span} ·{" "}
+            {ready ? `${seconds.toFixed(1)}초` : `약 ${formatSeconds(seconds)}`}
           </span>
         </Card.Title>
-        <Chip size="sm" color={ready ? "success" : stale ? "warning" : "default"} variant="soft">
+        <Chip
+          size="sm"
+          color={ready ? "success" : stale ? "warning" : "default"}
+          variant="soft"
+        >
           {ready ? "준비됨" : busy ? "만드는 중" : "아직 없음"}
         </Chip>
       </Card.Header>
       <Card.Content className="flex flex-col gap-3">
+        <Chip size="sm" variant="soft" className="self-start">
+          {productionLabel}
+        </Chip>
         {ready ? (
           <ClipPreview
             key={`${index}-${seconds}`}
             src={`/api/film/clips/file?id=clip-${String(index + 1).padStart(2, "0")}`}
             label={`영상 ${index + 1}`}
-            title={title}
-            layout={layout}
+            aspect="3:4"
           />
         ) : (
-          <SceneFrame title={title} subtitle={subtitle} layout={layout} />
+          <div className="mx-auto flex aspect-[3/4] w-48 items-center justify-center bg-black text-center text-sm whitespace-pre-line text-white/55 ring-1 ring-white/25">
+            {"3:4 장면 영상\n(TTS 포함)"}
+          </div>
         )}
         <div className="flex flex-col gap-1">
           {lines.map((line) => (
@@ -241,36 +231,15 @@ function SceneClipCard({
             </p>
           ))}
         </div>
-        <Button size="sm" variant="outline" isDisabled={!ready || busy} onPress={onRedo}>
+        <Button
+          size="sm"
+          variant="outline"
+          isDisabled={!ready || busy}
+          onPress={onRedo}
+        >
           이 영상만 다시 만들기
         </Button>
       </Card.Content>
     </Card>
-  )
-}
-
-function firstCue(subtitle: string) {
-  return subtitle
-    .split(/\n/)
-    .map((line) => line.trim())
-    .find(Boolean) || ""
-}
-
-function SceneFrame({
-  title,
-  subtitle,
-  layout,
-}: {
-  title: string
-  subtitle: string
-  layout: FrameLayout
-}) {
-  return (
-    <ShortsFrame
-      title={title}
-      subtitle={subtitle}
-      layout={layout}
-      className="w-48"
-    />
   )
 }

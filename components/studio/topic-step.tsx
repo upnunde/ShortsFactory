@@ -1,11 +1,19 @@
 "use client"
 
+import { useEffect, useState } from "react"
+
 import { Button, Card, Label, TextArea, TextField } from "@heroui/react"
 import { StepHeader } from "@/components/studio/chrome"
 import { PlaceNote } from "@/components/studio/place-note"
+import {
+  defaultFrameLayout,
+  titleCharacterLimit,
+  type FrameLayout,
+} from "@/lib/frame-layout"
 
 export function TopicStep({
   topic,
+  profileId,
   titleKo,
   topicEn,
   overviewKo,
@@ -27,6 +35,7 @@ export function TopicStep({
   error,
 }: {
   topic: string
+  profileId: string
   titleKo: string
   topicEn: string
   overviewKo: string
@@ -48,6 +57,21 @@ export function TopicStep({
   error: string
 }) {
   const busy = writeBusy || applyBusy || placeBusy
+  const [titleLimit, setTitleLimit] = useState(
+    titleCharacterLimit(defaultFrameLayout.titleSize)
+  )
+  const titleLength = Array.from(topicEn).length
+  const titleTooLong = titleLength > titleLimit
+
+  useEffect(() => {
+    void fetch(`/api/layout?profileId=${encodeURIComponent(profileId)}`)
+      .then(async (response) => {
+        if (!response.ok) return
+        const layout = (await response.json()) as FrameLayout
+        setTitleLimit(titleCharacterLimit(layout.titleSize))
+      })
+      .catch(() => undefined)
+  }, [profileId])
 
   return (
     <>
@@ -94,10 +118,21 @@ export function TopicStep({
               </div>
               <div className="flex flex-col gap-4">
                 <p className="text-sm font-medium">영문</p>
-                <TextField value={topicEn} onChange={onTopicEnChange} fullWidth>
-                  <Label>제목</Label>
-                  <TextArea rows={2} />
+                <TextField
+                  value={topicEn}
+                  onChange={(value) =>
+                    onTopicEnChange(Array.from(value).slice(0, titleLimit).join(""))
+                  }
+                  fullWidth
+                >
+                  <Label>제목 · {titleLength}/{titleLimit}자</Label>
+                  <TextArea rows={2} maxLength={titleLimit} />
                 </TextField>
+                {titleTooLong ? (
+                  <p className="text-sm text-danger">
+                    현재 제목 크기에서는 {titleLimit}자 이내로 줄여야 합니다.
+                  </p>
+                ) : null}
                 <TextField
                   value={overviewEn}
                   onChange={onOverviewEnChange}
@@ -139,7 +174,8 @@ export function TopicStep({
             busy ||
             !planReady ||
             overviewKo.trim() === "" ||
-            placeKo.trim() === ""
+            placeKo.trim() === "" ||
+            titleTooLong
           }
           onPress={onApply}
         >

@@ -40,7 +40,20 @@ export async function readAccountStatus(): Promise<
 > {
   const entries = await Promise.all(
     ACCOUNT_PLATFORMS.map(
-      async (platform) => [platform, await statusFor(platform)] as const
+      async (platform) =>
+        [platform, await statusFor(platform, "default")] as const
+    )
+  )
+  return Object.fromEntries(entries) as Record<AccountPlatform, AccountStatus>
+}
+
+export async function readChannelAccountStatus(
+  profileId: string
+): Promise<Record<AccountPlatform, AccountStatus>> {
+  const entries = await Promise.all(
+    ACCOUNT_PLATFORMS.map(
+      async (platform) =>
+        [platform, await statusFor(platform, profileId)] as const
     )
   )
   return Object.fromEntries(entries) as Record<AccountPlatform, AccountStatus>
@@ -49,11 +62,12 @@ export async function readAccountStatus(): Promise<
 export async function saveAppCredentials(
   platform: AccountPlatform,
   clientId: string,
-  clientSecret: string
+  clientSecret: string,
+  profileId = "default"
 ) {
   await mkdir(credentialsDir, { recursive: true })
   await writeFile(
-    appPath(platform),
+    appPath(platform, profileId),
     JSON.stringify({ clientId, clientSecret }),
     { mode: 0o600 }
   )
@@ -62,9 +76,10 @@ export async function saveAppCredentials(
 export async function authorizationUrl(
   origin: string,
   platform: AccountPlatform,
-  state: string
+  state: string,
+  profileId = "default"
 ) {
-  const app = await readApp(platform)
+  const app = await readApp(platform, profileId)
   if (!app) {
     return null
   }
@@ -101,16 +116,18 @@ export async function authorizationUrl(
   return url
 }
 
-export function createOauthState(platform: AccountPlatform) {
-  return `${platform}.${randomUUID()}`
+export function createOauthState(platform: AccountPlatform, profileId: string) {
+  const id = safeProfileId(profileId)
+  return `${platform}.${id}.${randomUUID()}`
 }
 
 export async function finishOauth(
   origin: string,
   platform: AccountPlatform,
-  code: string
+  code: string,
+  profileId = "default"
 ) {
-  const app = await readApp(platform)
+  const app = await readApp(platform, profileId)
   if (!app) {
     throw new Error("missing app")
   }
@@ -129,16 +146,21 @@ export async function finishOauth(
     connectedAt: new Date().toISOString(),
   }
   await mkdir(credentialsDir, { recursive: true })
-  await writeFile(tokenPath(platform), JSON.stringify(stored), { mode: 0o600 })
+  await writeFile(tokenPath(platform, profileId), JSON.stringify(stored), {
+    mode: 0o600,
+  })
 }
 
-export async function disconnectAccount(platform: AccountPlatform) {
-  await rm(tokenPath(platform), { force: true })
+export async function disconnectAccount(
+  platform: AccountPlatform,
+  profileId = "default"
+) {
+  await rm(tokenPath(platform, profileId), { force: true })
 }
 
-export async function youtubeAccessToken() {
-  const app = await readApp("youtube")
-  const token = await readToken("youtube")
+export async function youtubeAccessToken(profileId = "default") {
+  const app = await readApp("youtube", profileId)
+  const token = await readToken("youtube", profileId)
   if (!app || !token) {
     throw new Error("youtube-not-connected")
   }
@@ -161,23 +183,38 @@ export async function youtubeAccessToken() {
     throw new Error("youtube-refresh-failed")
   }
   const refreshed = { ...token, accessToken: json.access_token }
-  await writeFile(tokenPath("youtube"), JSON.stringify(refreshed), {
+  await writeFile(tokenPath("youtube", profileId), JSON.stringify(refreshed), {
     mode: 0o600,
   })
   return refreshed.accessToken
 }
 
-function appPath(platform: AccountPlatform) {
-  return path.join(credentialsDir, `${platform}.app.json`)
+function appPath(platform: AccountPlatform, profileId: string) {
+  const prefix = safeProfileId(profileId)
+  return path.join(
+    credentialsDir,
+    prefix === "default"
+      ? `${platform}.app.json`
+      : `${prefix}.${platform}.app.json`
+  )
 }
 
-function tokenPath(platform: AccountPlatform) {
-  return path.join(credentialsDir, `${platform}.token.json`)
+function tokenPath(platform: AccountPlatform, profileId: string) {
+  const prefix = safeProfileId(profileId)
+  return path.join(
+    credentialsDir,
+    prefix === "default"
+      ? `${platform}.token.json`
+      : `${prefix}.${platform}.token.json`
+  )
 }
 
-async function statusFor(platform: AccountPlatform): Promise<AccountStatus> {
-  const app = await readApp(platform)
-  const token = await readToken(platform)
+async function statusFor(
+  platform: AccountPlatform,
+  profileId: string
+): Promise<AccountStatus> {
+  const app = await readApp(platform, profileId)
+  const token = await readToken(platform, profileId)
   return {
     hasApp: app !== null,
     connected: token !== null,
@@ -186,15 +223,21 @@ async function statusFor(platform: AccountPlatform): Promise<AccountStatus> {
 }
 
 async function readApp(
-  platform: AccountPlatform
+  platform: AccountPlatform,
+  profileId: string
 ): Promise<AppCredentials | null> {
-  return readJson<AppCredentials>(appPath(platform))
+  return readJson<AppCredentials>(appPath(platform, profileId))
 }
 
 async function readToken(
-  platform: AccountPlatform
+  platform: AccountPlatform,
+  profileId: string
 ): Promise<StoredToken | null> {
-  return readJson<StoredToken>(tokenPath(platform))
+  return readJson<StoredToken>(tokenPath(platform, profileId))
+}
+
+function safeProfileId(value: string) {
+  return /^[a-z0-9-]{1,64}$/.test(value) ? value : "default"
 }
 
 async function readJson<T>(filePath: string): Promise<T | null> {

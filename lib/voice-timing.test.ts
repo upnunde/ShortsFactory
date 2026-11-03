@@ -16,9 +16,9 @@ test("실제 음성 길이 안에 모든 단어 타임스탬프를 배치한다"
   assert.equal(words[1].word, "small")
 })
 
-test("50초 이상인 음성은 제한된 범위에서 말하기 속도를 높인다", () => {
-  assert.equal(speechSpeed(49.9), 1)
-  assert.equal(speechSpeed(58.8), 1.2)
+test("45초를 넘는 음성은 제한된 범위에서 말하기 속도를 높인다", () => {
+  assert.equal(speechSpeed(45), 1)
+  assert.equal(speechSpeed(46), 1.18)
   assert.equal(speechSpeed(100), 1.25)
 })
 

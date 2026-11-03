@@ -13,12 +13,15 @@ import {
 } from "@heroui/react"
 import { AccountsPanel } from "@/components/studio/accounts-panel"
 import { CharacterPanel } from "@/components/studio/character-panel"
+import { ChannelSettingsCard } from "@/components/studio/channel-card"
 import type { AccountPlatform, AccountStatus } from "@/lib/server/accounts"
 import { BgmSettingsCard } from "@/components/studio/bgm-card"
 import { FrameLayoutCard } from "@/components/studio/frame-layout-card"
 import { WritingGuideCard } from "@/components/studio/writing-guide-card"
 import { VoiceCard } from "@/components/studio/voice-card"
+import { VideoSettingsCard } from "@/components/studio/video-settings-card"
 import { StepHeader } from "@/components/studio/chrome"
+import type { ChannelProfile } from "@/lib/types"
 
 type Status = {
   claude: { saved: boolean }
@@ -34,10 +37,14 @@ export function SettingsPanel({
   initialTab = "frame",
   accountNotice = null,
   initialAccounts,
+  profile,
+  onProfileSaved,
 }: {
   initialTab?: "character" | "frame" | "keys" | "accounts"
   accountNotice?: { kind: "connected" | "error"; platform: string } | null
   initialAccounts: Record<AccountPlatform, AccountStatus>
+  profile: ChannelProfile
+  onProfileSaved: (profile: ChannelProfile) => void
 }) {
   const [status, setStatus] = useState(EMPTY)
 
@@ -48,8 +55,8 @@ export function SettingsPanel({
   return (
     <>
       <StepHeader
-        title="설정"
-        description="캐릭터, 목소리와 배경음악, API 키, 계정 연결을 나눠 둡니다."
+        title={`${profile.name} 설정`}
+        description="이 채널의 캐릭터, 목소리, 배경음악, 영상 폼과 계정을 관리합니다."
       />
       <Tabs defaultSelectedKey={initialTab}>
         <Tabs.ListContainer>
@@ -73,13 +80,19 @@ export function SettingsPanel({
           </Tabs.List>
         </Tabs.ListContainer>
         <Tabs.Panel id="character" className="flex flex-col gap-6">
-          <CharacterPanel />
+          <CharacterPanel profileId={profile.id} />
         </Tabs.Panel>
         <Tabs.Panel id="frame" className="flex flex-col gap-6">
-          <WritingGuideCard />
-          <VoiceCard />
+          <ChannelSettingsCard
+            key={profile.id}
+            profile={profile}
+            onSaved={onProfileSaved}
+          />
+          <WritingGuideCard profileId={profile.id} />
+          <VoiceCard profileId={profile.id} />
           <BgmSettingsCard />
-          <FrameLayoutCard />
+          <VideoSettingsCard profileId={profile.id} />
+          <FrameLayoutCard profileId={profile.id} />
         </Tabs.Panel>
         <Tabs.Panel id="keys" className="flex flex-col gap-6">
           <ClaudeCard
@@ -95,6 +108,7 @@ export function SettingsPanel({
           <AccountsPanel
             notice={accountNotice}
             initialStatus={initialAccounts}
+            profileId={profile.id}
           />
         </Tabs.Panel>
       </Tabs>

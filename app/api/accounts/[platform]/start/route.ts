@@ -6,16 +6,25 @@ import {
   isAccountPlatform,
 } from "@/lib/server/accounts"
 
-export async function GET(request: NextRequest, context: RouteContext<"/api/accounts/[platform]/start">) {
+export async function GET(
+  request: NextRequest,
+  context: RouteContext<"/api/accounts/[platform]/start">
+) {
   const { platform: raw } = await context.params
   if (!isAccountPlatform(raw)) {
     return NextResponse.json({ error: "unknown platform" }, { status: 404 })
   }
   const origin = request.nextUrl.origin
-  const state = createOauthState(raw)
-  const url = await authorizationUrl(origin, raw, state)
+  const profileId = request.nextUrl.searchParams.get("profileId") ?? "default"
+  const state = createOauthState(raw, profileId)
+  const url = await authorizationUrl(origin, raw, state, profileId)
   if (!url) {
-    return NextResponse.redirect(new URL(`/?view=settings&tab=accounts&setup=${raw}`, origin))
+    return NextResponse.redirect(
+      new URL(
+        `/?channel=${encodeURIComponent(profileId)}&view=settings&tab=accounts&setup=${raw}`,
+        origin
+      )
+    )
   }
   const response = NextResponse.redirect(url)
   response.cookies.set("oauth_state", state, {

@@ -1,9 +1,15 @@
-import { narrationSeconds, subtitleCues } from "@/lib/timing"
-import type { Scene, YoutubeMeta } from "@/lib/types"
+import { narrationSeconds, subtitleCues } from "./timing.ts"
+import type { Scene, YoutubeMeta } from "./types.ts"
 
-export const EVERGREEN_TAGS = ["shorts", "facts", "trivia", "didyouknow", "knowledge"] as const
-export const DESCRIPTION_HASHTAGS = ["#Shorts", "#facts", "#trivia", "#didyouknow", "#knowledge"] as const
-export const COMMENT_PROMPT = "Which fact surprised you the most? Comment below!"
+export const EVERGREEN_TAGS = [
+  "shorts",
+  "facts",
+  "trivia",
+  "didyouknow",
+  "knowledge",
+] as const
+export const COMMENT_PROMPT =
+  "Which fact surprised you the most? Comment below!"
 export const YOUTUBE_CATEGORY_ID = "27"
 export const YOUTUBE_UPLOAD_SCOPES = [
   "https://www.googleapis.com/auth/youtube.upload",
@@ -48,18 +54,21 @@ export function formatTags(value: string) {
 }
 
 export function withEnglishDescription(description: string) {
-  let text = description.trim()
-  if (!text.toLowerCase().includes(COMMENT_PROMPT.toLowerCase())) {
-    text = text ? `${text}\n\n${COMMENT_PROMPT}` : COMMENT_PROMPT
-  }
-  const missing = DESCRIPTION_HASHTAGS.filter((tag) => !new RegExp(`${tag}\\b`, "i").test(text))
-  if (missing.length > 0) {
-    text = `${text}\n\n${missing.join(" ")}`
-  }
-  return text
+  return description
+    .split(/\n/)
+    .filter(
+      (line) =>
+        line.trim().toLowerCase() !== COMMENT_PROMPT.toLowerCase() &&
+        !/^\s*(?:#[\w-]+\s*)+$/i.test(line)
+    )
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
 }
 
-export function applyYoutubeCopy(youtube: Pick<YoutubeMeta, "title" | "description" | "tags">) {
+export function applyYoutubeCopy(
+  youtube: Pick<YoutubeMeta, "title" | "description" | "tags">
+) {
   return {
     title: youtube.title.trim(),
     description: withEnglishDescription(youtube.description),
@@ -86,7 +95,8 @@ export function nextKoreaUploadSlot(now = new Date()) {
     minute: "2-digit",
     hourCycle: "h23",
   }).formatToParts(now)
-  const read = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value)
+  const read = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(parts.find((part) => part.type === type)?.value)
   let year = read("year")
   let month = read("month")
   let day = read("day")
@@ -127,11 +137,19 @@ export function buildSrt(scenes: Scene[]) {
     if (cues.length === 0) {
       continue
     }
-    const weights = cues.map((cue) => Math.max(1, cue.split(/\s+/).filter(Boolean).length))
+    const weights = cues.map((cue) =>
+      Math.max(1, cue.split(/\s+/).filter(Boolean).length)
+    )
     const weightTotal = weights.reduce((sum, weight) => sum + weight, 0)
-    const sceneMs = Math.max(Math.round(narrationSeconds(scene.scriptTarget) * 1000), cues.length * 800)
+    const sceneMs = Math.max(
+      Math.round(narrationSeconds(scene.scriptTarget) * 1000),
+      cues.length * 800
+    )
     cues.forEach((cue, cueIndex) => {
-      const duration = Math.max(400, Math.round((sceneMs * weights[cueIndex]) / weightTotal))
+      const duration = Math.max(
+        400,
+        Math.round((sceneMs * weights[cueIndex]) / weightTotal)
+      )
       const start = cursor
       const end = start + duration
       cursor = end

@@ -1,10 +1,18 @@
 import { NextResponse } from "next/server"
 
-import { readCharacterImage, removeCharacterImage } from "@/lib/server/character"
+import {
+  readCharacterImage,
+  removeCharacterImage,
+} from "@/lib/server/character"
 
-export async function GET(_request: Request, context: RouteContext<"/api/character/file/[name]">) {
+export async function GET(
+  request: Request,
+  context: RouteContext<"/api/character/file/[name]">
+) {
   const { name } = await context.params
-  const image = await readCharacterImage(name)
+  const profileId =
+    new URL(request.url).searchParams.get("profileId") ?? "default"
+  const image = await readCharacterImage(name, profileId)
   if (!image) {
     return NextResponse.json({ error: "missing" }, { status: 404 })
   }
@@ -13,8 +21,13 @@ export async function GET(_request: Request, context: RouteContext<"/api/charact
   })
 }
 
-export async function DELETE(_request: Request, context: RouteContext<"/api/character/file/[name]">) {
+export async function DELETE(
+  request: Request,
+  context: RouteContext<"/api/character/file/[name]">
+) {
   const { name } = await context.params
-  await removeCharacterImage(name)
+  const profileId =
+    new URL(request.url).searchParams.get("profileId") ?? "default"
+  await removeCharacterImage(name, profileId)
   return NextResponse.json({ ok: true })
 }

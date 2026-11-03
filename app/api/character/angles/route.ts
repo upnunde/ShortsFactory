@@ -4,11 +4,13 @@ import { generateOutfitAngles } from "@/lib/server/draw-angles"
 
 export async function POST(request: Request) {
   const outfitId = new URL(request.url).searchParams.get("outfitId")
+  const profileId =
+    new URL(request.url).searchParams.get("profileId") ?? "default"
   if (!outfitId) {
     return NextResponse.json({ error: "no-outfit" }, { status: 400 })
   }
   try {
-    return NextResponse.json(await generateOutfitAngles(outfitId))
+    return NextResponse.json(await generateOutfitAngles(outfitId, profileId))
   } catch (error) {
     const code = error instanceof Error ? error.message : "draw-failed"
     const status = code === "no-front" || code === "missing" ? 400 : 500

@@ -11,13 +11,17 @@ import {
   frameVideoFilter,
 } from "@/lib/frame-render"
 import {
+  titleCharacterLimit,
+  titleWithinCharacterLimit,
+} from "@/lib/frame-layout"
+import {
   groupClipPrompt,
   insertStillPrompt,
   roomStillPrompt,
   type FilmScene,
 } from "@/lib/film-plan"
 import { videoGroups } from "@/lib/film-groups"
-import { getProfile } from "@/lib/profiles"
+import { readProfile } from "@/lib/server/profiles"
 import { readVoiceId } from "@/lib/server/voice"
 import { bgmFilePath } from "@/lib/server/bgm"
 import { getCharacterLibrary, readCharacterImage } from "@/lib/server/character"
@@ -30,6 +34,9 @@ import {
 } from "@/lib/server/higgsfield"
 import { generateNarration, type NarrationClip } from "@/lib/server/tts"
 import { uploadYoutubeShort } from "@/lib/server/youtube-upload"
+import { readVideoSettings } from "@/lib/server/video-settings"
+import { isAiVideoMode, productionUsage } from "@/lib/scene-production"
+import { videoSettingsKey, type VideoSettings } from "@/lib/video-settings"
 import { videoSecondsForAudio, type WordTiming } from "@/lib/voice-timing"
 
 const outputDir = path.join(process.cwd(), "outputs")
@@ -78,11 +85,14 @@ type StoredClip = {
   file: string
   key: string
   durations: number[]
+  words?: WordTiming[][]
   ready: boolean
 }
 
 type ClipManifest = {
   signature: string
+  voiceId?: string
+  videoSettings?: VideoSettings
   groups: StoredClip[]
 }
 
@@ -125,6 +135,13 @@ export async function startFilm(request: FilmRequest) {
   }
   if (!request.topic.trim()) {
     return { ok: false as const, message: "영문 주제가 없습니다." }
+  }
+  const layout = await readFrameLayout(request.profileId)
+  if (!titleWithinCharacterLimit(request.topic.trim(), layout.titleSize)) {
+    return {
+      ok: false as const,
+      message: `현재 제목 크기에서는 영문 제목을 ${titleCharacterLimit(layout.titleSize)}자 이내로 줄여야 합니다.`,
+    }
   }
   if (
     !request.placeEn.trim() ||
@@ -177,7 +194,9 @@ export async function readClipFile(groupId: string) {
     return null
   }
   const manifest = await readClipManifest()
-  const group = manifest?.groups.find((item) => item.id === groupId && item.ready)
+  const group = manifest?.groups.find(
+    (item) => item.id === groupId && item.ready
+  )
   if (!group || group.file !== `${groupId}.mp4`) {
     return null
   }
@@ -207,6 +226,28 @@ export async function startSceneClips(request: FilmRequest) {
     return { ok: false as const, message: "장소와 씬이 준비되지 않았습니다." }
   }
   const groups = videoGroups(request.scenes)
+  const videoSettings = await readVideoSettings(request.profileId)
+  const usage = productionUsage(request.scenes)
+  if (
+    usage.aiSceneCount > videoSettings.maxAiVideoScenes ||
+    usage.aiSeconds > videoSettings.maxAiVideoSeconds
+  ) {
+    return {
+      ok: false as const,
+      message: "AI 영상 씬 수 또는 생성 시간이 채널 설정의 상한을 넘습니다.",
+    }
+  }
+  if (
+    videoSettings.estimatedCostPerSecondUsd > 0 &&
+    videoSettings.maxEstimatedCostUsd > 0 &&
+    usage.aiSeconds * videoSettings.estimatedCostPerSecondUsd >
+      videoSettings.maxEstimatedCostUsd
+  ) {
+    return {
+      ok: false as const,
+      message: "예상 AI 영상 비용이 채널 설정의 상한을 넘습니다.",
+    }
+  }
   if (
     request.groupId &&
     !groups.some((group) => group.id === request.groupId)
@@ -227,8 +268,8 @@ export async function startSceneClips(request: FilmRequest) {
   const previous = await readClipManifest()
   const groupId =
     previous?.signature === request.signature ? request.groupId : undefined
-  void renderSceneClips({ ...request, groupId }, groups).catch((error: unknown) =>
-    failClips(messageFor(error))
+  void renderSceneClips({ ...request, groupId }, groups).catch(
+    (error: unknown) => failClips(messageFor(error))
   )
   return { ok: true as const }
 }
@@ -237,7 +278,7 @@ async function run(request: FilmRequest) {
   await mkdir(outputDir, { recursive: true })
   const bin = ffmpegBin()
   await mkdir(clipDir, { recursive: true })
-  const profile = getProfile(request.profileId)
+  const profile = await readProfile(request.profileId)
   const manifest = await readClipManifest()
   if (
     !manifest ||
@@ -250,7 +291,8 @@ async function run(request: FilmRequest) {
     path.join(clipDir, group.file)
   )
   const narrationDuration = manifest.groups.reduce(
-    (sum, group) => sum + group.durations.reduce((inner, value) => inner + value, 0),
+    (sum, group) =>
+      sum + group.durations.reduce((inner, value) => inner + value, 0),
     0
   )
   await writeStatus({
@@ -287,11 +329,12 @@ async function run(request: FilmRequest) {
     "+faststart",
     assembledPath,
   ])
-  const layout = await readFrameLayout()
+  const layout = await readFrameLayout(request.profileId)
   const assPath = path.join(clipDir, "layout.ass")
   const timedSubtitles = request.scenes.map((scene) => ({
     subtitle: scene.subtitle.trim() || scene.scriptTarget,
     duration: durationForScene(manifest, scene.id),
+    words: wordsForScene(manifest, scene.id),
   }))
   await writeFile(
     assPath,
@@ -353,7 +396,23 @@ async function run(request: FilmRequest) {
       request.historyId,
       finalPath,
       request.signature,
-      captionsPath
+      captionsPath,
+      {
+        profile: {
+          id: profile.id,
+          name: profile.name,
+          systemPrompt: profile.system_prompt,
+          imageStyleAnchor: profile.image_style_anchor,
+        },
+        voiceId: manifest.voiceId ?? "",
+        video: manifest.videoSettings ?? null,
+        frame: layout,
+        bgm: {
+          id: request.bgmId,
+          volume: profile.youtube_bgm_volume,
+        },
+        timing: "tts-audio-duration-with-estimated-word-boundaries",
+      }
     )
   } catch {
     throw new Error("save-failed")
@@ -370,6 +429,7 @@ async function run(request: FilmRequest) {
     })
     try {
       await uploadYoutubeShort({
+        profileId: request.profileId,
         historyId: request.historyId,
         title: request.youtube.title,
         description: request.youtube.description,
@@ -401,16 +461,19 @@ async function renderSceneClips(
 ) {
   await mkdir(clipDir, { recursive: true })
   const bin = ffmpegBin()
-  const voiceId = await readVoiceId()
+  const voiceId = await readVoiceId(request.profileId)
+  const videoSettings = await readVideoSettings(request.profileId)
   const previous = await readClipManifest()
-  const kept =
-    previous?.signature === request.signature ? previous.groups : []
+  const kept = previous?.signature === request.signature ? previous.groups : []
   const stored: StoredClip[] = []
+  let generatedSeconds = 0
   let roomUrl = ""
   let roomCast = ""
   for (const [index, group] of groups.entries()) {
-    const key = clipKey(request, group.scenes, voiceId)
-    const existing = kept.find((item) => item.id === group.id && item.key === key && item.ready)
+    const key = clipKey(request, group.scenes, voiceId, videoSettings)
+    const existing = kept.find(
+      (item) => item.id === group.id && item.key === key && item.ready
+    )
     const forced = request.groupId === group.id
     if (existing && !forced) {
       stored.push(existing)
@@ -428,6 +491,7 @@ async function renderSceneClips(
           file: `${group.id}.mp4`,
           key,
           durations: [],
+          words: [],
           ready: false,
         }
       )
@@ -453,6 +517,9 @@ async function renderSceneClips(
     const words = offsetWords(narration)
     const duration = narration.reduce((sum, clip) => sum + clip.duration, 0)
     const insert = group.scenes[0]?.shot === "insert"
+    const aiVideo = isAiVideoMode(
+      group.scenes[0]?.productionMode ?? "character_motion"
+    )
     const castIds = [
       ...new Set(
         group.scenes
@@ -483,33 +550,65 @@ async function renderSceneClips(
     }
     await writeClipStatus({
       state: "running",
-      message: `영상 ${label}을 만드는 중`,
+      message: aiVideo
+        ? `영상 ${label} Seedance 장면을 만드는 중`
+        : `영상 ${label} 로컬 2D 모션을 만드는 중`,
       signature: request.signature,
     })
-    const videoUrl = await generateMedia(
-      "bytedance/seedance-2.5/image-to-video",
-      {
-        prompt: groupClipPrompt(group.scenes, insert ? "insert" : "start", words),
-        image_url: imageUrl,
-        duration: videoSecondsForAudio(duration),
-        resolution: "480p",
-        generate_audio: false,
-      }
-    )
-    const generatedPath = path.join(clipDir, `${group.id}-raw.mp4`)
-    await writeFile(generatedPath, await downloadFile(videoUrl))
     const clipPath = path.join(clipDir, `${group.id}.mp4`)
-    await syncNarration(bin, generatedPath, audioPath, clipPath, duration)
+    if (aiVideo) {
+      const generationSeconds = videoSecondsForAudio(duration)
+      assertWithinAiLimits(
+        generatedSeconds + generationSeconds,
+        videoSettings
+      )
+      const videoUrl = await generateAiVideo(
+        videoSettings,
+        {
+          prompt: groupClipPrompt(
+            group.scenes,
+            insert ? "insert" : "start",
+            words
+          ),
+          image_url: imageUrl,
+          duration: generationSeconds,
+          resolution: videoSettings.resolution,
+          aspect_ratio: videoSettings.aspectRatio,
+          generate_audio: false,
+        }
+      )
+      generatedSeconds += generationSeconds
+      const generatedPath = path.join(clipDir, `${group.id}-raw.mp4`)
+      await writeFile(generatedPath, await downloadFile(videoUrl))
+      await syncNarration(bin, generatedPath, audioPath, clipPath, duration)
+    } else {
+      const stillPath = path.join(clipDir, `${group.id}-still.jpg`)
+      await writeFile(stillPath, await downloadFile(imageUrl))
+      await localMotion(
+        bin,
+        stillPath,
+        audioPath,
+        clipPath,
+        duration,
+        videoSettings.resolution
+      )
+    }
     stored.push({
       id: group.id,
       sceneIds: group.sceneIds,
       file: `${group.id}.mp4`,
       key,
       durations: narration.map((clip) => clip.duration),
+      words: narration.map((clip) => clip.words),
       ready: true,
     })
   }
-  await writeClipManifest({ signature: request.signature, groups: stored })
+  await writeClipManifest({
+    signature: request.signature,
+    voiceId,
+    videoSettings,
+    groups: stored,
+  })
   active = false
   await writeClipStatus({
     state: "done",
@@ -518,17 +617,23 @@ async function renderSceneClips(
   })
 }
 
-function clipKey(request: FilmRequest, scenes: FilmScene[], voiceId: string) {
+function clipKey(
+  request: FilmRequest,
+  scenes: FilmScene[],
+  voiceId: string,
+  videoSettings: VideoSettings
+) {
   return createHash("sha256")
     .update(
       [
         voiceId,
+        videoSettingsKey(videoSettings),
         request.placeEn,
         request.anchor,
         request.outfitId ?? "",
         ...scenes.map(
           (scene) =>
-            `${scene.id}|${scene.shot}|${scene.scriptTarget}|${scene.sceneDescription}|${scene.castIds.join(",")}`
+            `${scene.id}|${scene.shot}|${scene.productionMode}|${scene.scriptTarget}|${scene.sceneDescription}|${scene.castIds.join(",")}`
         ),
       ].join("\n")
     )
@@ -560,9 +665,7 @@ async function concatAudio(bin: string, files: string[], outputPath: string) {
   const listPath = `${outputPath}.txt`
   await writeFile(
     listPath,
-    files
-      .map((file) => `file '${file.replaceAll("'", "'\\''")}'`)
-      .join("\n")
+    files.map((file) => `file '${file.replaceAll("'", "'\\''")}'`).join("\n")
   )
   await runBin(bin, [
     "-y",
@@ -597,6 +700,54 @@ function durationForScene(manifest: ClipManifest, sceneId: string) {
   return 0
 }
 
+function wordsForScene(manifest: ClipManifest, sceneId: string) {
+  for (const group of manifest.groups) {
+    const index = group.sceneIds.indexOf(sceneId)
+    if (index >= 0) {
+      return group.words?.[index] ?? []
+    }
+  }
+  return []
+}
+
+function assertWithinAiLimits(
+  generatedSeconds: number,
+  settings: VideoSettings
+) {
+  if (generatedSeconds > settings.maxAiVideoSeconds) {
+    throw new Error("ai-limit")
+  }
+  if (
+    settings.estimatedCostPerSecondUsd <= 0 ||
+    settings.maxEstimatedCostUsd <= 0
+  ) {
+    return
+  }
+  const estimated = generatedSeconds * settings.estimatedCostPerSecondUsd
+  if (estimated > settings.maxEstimatedCostUsd) {
+    throw new Error("cost-limit")
+  }
+}
+
+async function generateAiVideo(
+  settings: VideoSettings,
+  input: Record<string, unknown>
+) {
+  let error: unknown = new Error("generate-failed")
+  for (let attempt = 0; attempt <= settings.maxRetriesPerScene; attempt += 1) {
+    try {
+      return await generateMedia(settings.model, input)
+    } catch (caught) {
+      error = caught
+      const code = caught instanceof Error ? caught.message : ""
+      if (code === "no-key" || code === "no-credit") {
+        throw caught
+      }
+    }
+  }
+  throw error
+}
+
 async function readClipManifest() {
   try {
     return JSON.parse(await readFile(clipManifestPath, "utf8")) as ClipManifest
@@ -612,9 +763,9 @@ async function writeClipManifest(manifest: ClipManifest) {
 
 async function readClipStatus(): Promise<Omit<ClipJobStatus, "groups">> {
   try {
-    const parsed = JSON.parse(await readFile(clipStatusPath, "utf8")) as Partial<
-      Omit<ClipJobStatus, "groups">
-    >
+    const parsed = JSON.parse(
+      await readFile(clipStatusPath, "utf8")
+    ) as Partial<Omit<ClipJobStatus, "groups">>
     return {
       state:
         parsed.state === "running" ||
@@ -642,12 +793,14 @@ async function failClips(message: string) {
 }
 
 async function roomPicture(request: FilmRequest, castIds: string[]) {
-  const files = await characterFiles(castIds)
+  const files = await characterFiles(request.profileId, castIds)
   const key = createHash("sha256")
     .update(
-      [request.placeEn.trim(), request.anchor.trim(), ...files.map((file) => file.id)].join(
-        "\n"
-      )
+      [
+        request.placeEn.trim(),
+        request.anchor.trim(),
+        ...files.map((file) => file.id),
+      ].join("\n")
     )
     .digest("hex")
   const saved = await loadRoomStill(key)
@@ -674,7 +827,11 @@ async function roomPicture(request: FilmRequest, castIds: string[]) {
     )
   }
   const url = await generateMedia("xai/grok-imagine-image-2.0", {
-    prompt: roomStillPrompt(request.anchor, request.placeEn, castIds.length > 0),
+    prompt: roomStillPrompt(
+      request.anchor,
+      request.placeEn,
+      castIds.length > 0
+    ),
     resolution: "1k",
     aspect_ratio: "3:4",
     quality: "low",
@@ -692,7 +849,10 @@ async function loadRoomStill(key: string) {
     }
     const stored = meta.stills?.find((item) => item.key === key && item.file)
     const file = stored?.file ?? (meta.key === key ? "room-still.jpg" : "")
-    if (!file || (file !== "room-still.jpg" && !/^room-[\w.-]+\.jpg$/.test(file))) {
+    if (
+      !file ||
+      (file !== "room-still.jpg" && !/^room-[\w.-]+\.jpg$/.test(file))
+    ) {
       return null
     }
     return await readFile(path.join(clipDir, file))
@@ -721,19 +881,44 @@ async function storeRoomStill(key: string, bytes: Buffer) {
   await writeFile(roomStillMetaPath, JSON.stringify({ stills: next }))
 }
 
-async function characterFiles(castIds: string[]) {
-  const library = await getCharacterLibrary()
-  const host = library.outfits.find((item) => item.id === library.hostId) ?? library.outfits[0]
+async function characterFiles(profileId: string, castIds: string[]) {
+  const library = await getCharacterLibrary(profileId)
+  const host =
+    library.outfits.find((item) => item.id === library.hostId) ??
+    library.outfits[0]
   const support = library.outfits.filter(
     (item) => item.id !== host?.id && item.active && castIds.includes(item.id)
   )
-  const ids = [host, ...support].flatMap((outfit) => [
-    outfit?.front?.id,
-    ...(outfit?.angles.map((angle) => angle.image?.id) ?? []),
-  ])
+  const pools = [host, ...support]
+    .filter((outfit): outfit is NonNullable<typeof outfit> => Boolean(outfit))
+    .map((outfit) => {
+      const preferred = ["three-quarter-face", "front-body"]
+      const preferredIds = preferred.map(
+        (key) => outfit.angles.find((angle) => angle.key === key)?.image?.id
+      )
+      const remaining = outfit.angles
+        .filter((angle) => !preferred.includes(angle.key))
+        .map((angle) => angle.image?.id)
+      return [outfit.front?.id, ...preferredIds, ...remaining].filter(
+        (id): id is string => Boolean(id)
+      )
+    })
+  const ids: string[] = []
+  for (let index = 0; ids.length < 10; index += 1) {
+    let found = false
+    for (const pool of pools) {
+      const id = pool[index]
+      if (id) {
+        ids.push(id)
+        found = true
+        if (ids.length === 10) break
+      }
+    }
+    if (!found) break
+  }
   const files: { id: string; bytes: Buffer; type: string }[] = []
-  for (const id of ids.filter((item): item is string => Boolean(item)).slice(0, 10)) {
-    const image = await readCharacterImage(id)
+  for (const id of ids) {
+    const image = await readCharacterImage(id, profileId)
     if (!image) {
       continue
     }
@@ -809,6 +994,12 @@ function messageFor(error: unknown) {
   if (code === "voice-failed") {
     return "고정 목소리를 만들지 못했습니다."
   }
+  if (code === "cost-limit") {
+    return "예상 영상 생성 비용이 설정한 상한을 넘습니다. 영상 설정에서 단가나 상한을 확인하세요."
+  }
+  if (code === "ai-limit") {
+    return "AI 영상 생성 시간이 채널 설정의 상한을 넘습니다. 대본에서 제작 방식을 확인하세요."
+  }
   return "영상을 만들지 못했습니다."
 }
 
@@ -844,6 +1035,48 @@ function syncNarration(
     "+faststart",
     outputPath,
   ])
+}
+
+function localMotion(
+  bin: string,
+  imagePath: string,
+  audioPath: string,
+  outputPath: string,
+  duration: number,
+  resolution: VideoSettings["resolution"]
+) {
+  const [width, height] = localFrameSize(resolution)
+  const seconds = Math.max(0.1, duration).toFixed(3)
+  return runBin(bin, [
+    "-y",
+    "-loop",
+    "1",
+    "-i",
+    imagePath,
+    "-i",
+    audioPath,
+    "-filter_complex",
+    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},zoompan=z='min(zoom+0.00035,1.06)':d=1:s=${width}x${height}:fps=24,format=yuv420p[v]`,
+    "-map",
+    "[v]",
+    "-map",
+    "1:a:0",
+    "-t",
+    seconds,
+    "-c:v",
+    "libx264",
+    "-c:a",
+    "aac",
+    "-movflags",
+    "+faststart",
+    outputPath,
+  ])
+}
+
+function localFrameSize(resolution: VideoSettings["resolution"]) {
+  if (resolution === "480p") return [480, 640] as const
+  if (resolution === "1080p") return [1080, 1440] as const
+  return [720, 960] as const
 }
 
 function runBin(bin: string, args: string[]) {

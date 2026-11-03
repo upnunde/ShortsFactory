@@ -11,11 +11,13 @@ export function ClipPreview({
   label,
   title,
   layout,
+  aspect = "9:16",
 }: {
   src: string
   label: string
   title?: string
   layout?: FrameLayout
+  aspect?: "3:4" | "9:16"
 }) {
   const inlineRef = useRef<HTMLVideoElement>(null)
   const largeRef = useRef<HTMLVideoElement>(null)
@@ -32,6 +34,7 @@ export function ClipPreview({
         title={title}
         layout={layout}
         framed={framed}
+        aspect={aspect}
         className="w-48 ring-1 ring-white/25"
       />
       <Modal
@@ -61,6 +64,7 @@ export function ClipPreview({
                 title={title}
                 layout={layout}
                 framed={framed}
+                aspect={aspect}
                 autoPlay
                 onReady={(video) => {
                   if (resumeAt.current > 0) {
@@ -69,7 +73,11 @@ export function ClipPreview({
                 }}
                 className="h-[min(78vh,960px)] w-auto max-w-[92vw] ring-1 ring-white/25"
               />
-              <Button className="mt-4" variant="outline" onPress={() => setOpen(false)}>
+              <Button
+                className="mt-4"
+                variant="outline"
+                onPress={() => setOpen(false)}
+              >
                 닫기
               </Button>
             </Modal.Dialog>
@@ -87,6 +95,7 @@ function PreviewVideo({
   title,
   layout,
   framed,
+  aspect,
   className,
   autoPlay = false,
   onReady,
@@ -97,6 +106,7 @@ function PreviewVideo({
   title?: string
   layout?: FrameLayout
   framed: boolean
+  aspect: "3:4" | "9:16"
   className: string
   autoPlay?: boolean
   onReady?: (video: HTMLVideoElement) => void
@@ -128,7 +138,9 @@ function PreviewVideo({
   }
 
   return (
-    <div className={`mx-auto aspect-[9/16] shrink-0 overflow-hidden bg-black ${className}`}>
+    <div
+      className={`mx-auto shrink-0 overflow-hidden bg-black ${aspect === "3:4" ? "aspect-[3/4]" : "aspect-[9/16]"} ${className}`}
+    >
       {video}
     </div>
   )

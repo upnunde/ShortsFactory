@@ -5,12 +5,12 @@ import { useEffect, useState } from "react"
 import { Card, Label, ListBox, Select } from "@heroui/react"
 import { DEFAULT_VOICE_ID, KOKORO_VOICES, voiceById } from "@/lib/voices"
 
-export function VoiceCard() {
+export function VoiceCard({ profileId }: { profileId: string }) {
   const [voiceId, setVoiceId] = useState(DEFAULT_VOICE_ID)
   const [note, setNote] = useState("")
 
   useEffect(() => {
-    void fetch("/api/voice")
+    void fetch(`/api/voice?profileId=${encodeURIComponent(profileId)}`)
       .then(async (response) => {
         if (!response.ok) {
           return
@@ -21,18 +21,23 @@ export function VoiceCard() {
         }
       })
       .catch(() => undefined)
-  }, [])
+  }, [profileId])
 
   async function save(id: string) {
     const next = voiceById(id).id
     setVoiceId(next)
     setNote("")
-    const response = await fetch("/api/voice", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: next }),
-    })
-    setNote(response.ok ? "목소리를 등록했습니다." : "목소리를 저장하지 못했습니다.")
+    const response = await fetch(
+      `/api/voice?profileId=${encodeURIComponent(profileId)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: next }),
+      }
+    )
+    setNote(
+      response.ok ? "목소리를 등록했습니다." : "목소리를 저장하지 못했습니다."
+    )
   }
 
   const selected = voiceById(voiceId)

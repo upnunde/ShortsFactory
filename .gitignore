@@ -38,6 +38,9 @@ config/credentials/*.json
 /outputs/*
 !/outputs/history/
 
+# local character generation cache
+assets/characters/**/.angle-cache/
+
 # vercel
 .vercel
 

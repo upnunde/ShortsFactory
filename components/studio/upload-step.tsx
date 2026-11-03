@@ -16,10 +16,7 @@ import { useBgmLibrary } from "@/components/studio/bgm-card"
 import { StepHeader } from "@/components/studio/chrome"
 import { filmReady } from "@/lib/scene-status"
 import { buildCoverPrompt } from "@/lib/style"
-import {
-  inKoreaUploadWindow,
-  scheduleForUpload,
-} from "@/lib/youtube-metadata"
+import { inKoreaUploadWindow, scheduleForUpload } from "@/lib/youtube-metadata"
 import type { Project, SocialPost, YoutubeMeta } from "@/lib/types"
 
 export function UploadStep({
@@ -73,6 +70,7 @@ export function UploadStep({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          profileId: project.profileId,
           historyId: project.historyId,
           title: project.youtube.title,
           description: project.youtube.description,
@@ -173,7 +171,7 @@ export function UploadStep({
         onEnabled={(enabled) =>
           onYoutubeChange({ ...project.youtube, enabled })
         }
-        note={`인증 파일 ${youtubeCredentials}. 쇼츠로 올리고, 공개 시각까지는 비공개입니다. 언어는 영어, 카테고리는 교육, 아동용은 아닙니다. 배경음악은 ${bgmName}이고, 볼륨은 ${Math.round(youtubeBgm.volume * 100)}%로 고정입니다. 영어 자막 파일을 영상 다음에 붙입니다. 끝 화면 카드는 업로드 API에 없어서, 설명의 영어 질문이 그 역할을 합니다. 썸네일은 대표 커버입니다.`}
+        note={`인증 파일 ${youtubeCredentials}. 쇼츠로 올리고, 공개 시각까지는 비공개입니다. 언어는 영어, 카테고리는 교육, 아동용은 아닙니다. 배경음악은 ${bgmName}이고, 볼륨은 ${Math.round(youtubeBgm.volume * 100)}%입니다. 영어 자막 파일을 영상 다음에 붙입니다. 썸네일은 대표 커버입니다.`}
       >
         <TextField
           value={project.youtube.title}

@@ -1,31 +1,29 @@
 import {
-  captionUnits,
   fitCaption,
+  frameDimensions,
   fontAssName,
-  TITLE_BAND,
+  SUBTITLE_SIDE_MARGIN_PERCENT,
+  subtitleCaptionUnits,
+  TITLE_SIDE_MARGIN_PERCENT,
+  titleCaptionUnits,
   type FrameLayout,
-} from "./frame-layout"
-
-const WIDTH = 1080
-const HEIGHT = 1920
+} from "./frame-layout.ts"
+import type { WordTiming } from "./voice-timing.ts"
 
 export type RenderSubtitle = {
   subtitle: string
   duration: number
+  words?: WordTiming[]
 }
 
-const SCALE = WIDTH / 900
-const subtitlePadX = Math.round(20 * SCALE)
-const subtitlePadY = Math.round(20 * SCALE)
-const titleBottom = Math.round(342 * (HEIGHT / 1600))
-
-export function frameVideoFilter(_layout: FrameLayout) {
-  const titleBand = evenPixel(HEIGHT * TITLE_BAND)
-  const video = HEIGHT - titleBand
+export function frameVideoFilter(layout: FrameLayout) {
+  const { width, height } = frameDimensions(layout)
+  const titleBand = evenPixel(height * (layout.titleBandPercent / 100))
+  const video = height - titleBand
   return [
-    `scale=${WIDTH}:${video}:force_original_aspect_ratio=increase`,
-    `crop=${WIDTH}:${video}`,
-    `pad=${WIDTH}:${HEIGHT}:0:${titleBand}:0x111111`,
+    `scale=${width}:${video}:force_original_aspect_ratio=increase`,
+    `crop=${width}:${video}`,
+    `pad=${width}:${height}:0:${titleBand}:0x111111`,
     "setsar=1",
   ].join(",")
 }
@@ -46,20 +44,23 @@ export function buildLayoutAss(
       Math.max(total, 0.1),
       "Title",
       positions.title,
-      fitCaption(title, captionUnits(layout.titleSize)).join("\n"),
+      fitCaption(title, titleCaptionUnits(layout.titleSize)).join("\n"),
       2
     ),
   ]
   let cursor = 0
   for (const scene of scenes) {
     const duration = Math.max(0, scene.duration)
-    const cues = cueSlices(scene.subtitle, duration)
+    const cues = cueSlices(scene.subtitle, duration, scene.words)
     if (cues.length === 0) {
       cursor += duration
       continue
     }
     for (const cue of cues) {
-      const caption = fitCaption(cue.text, captionUnits(layout.subtitleSize))
+      const caption = fitCaption(
+        cue.text,
+        subtitleCaptionUnits(layout.subtitleSize)
+      )
         .slice(0, 2)
         .join("\n")
       if (caption && cue.duration > 0) {
@@ -85,7 +86,7 @@ export function buildTimedSrt(scenes: RenderSubtitle[]) {
   const blocks: string[] = []
   for (const scene of scenes) {
     const duration = Math.max(0, scene.duration)
-    const cues = cueSlices(scene.subtitle, duration)
+    const cues = cueSlices(scene.subtitle, duration, scene.words)
     if (cues.length === 0) {
       cursor += duration
       continue
@@ -103,7 +104,11 @@ export function buildTimedSrt(scenes: RenderSubtitle[]) {
   return blocks.length > 0 ? `${blocks.join("\n\n")}\n` : ""
 }
 
-export function cueSlices(subtitle: string, duration: number) {
+export function cueSlices(
+  subtitle: string,
+  duration: number,
+  words: WordTiming[] = []
+) {
   const lines = subtitle
     .split(/\n/)
     .map((line) => line.trim())
@@ -111,27 +116,41 @@ export function cueSlices(subtitle: string, duration: number) {
   if (lines.length === 0 || duration <= 0) {
     return []
   }
-  const weights = lines.map((line) =>
-    Math.max(1, line.split(/\s+/).filter(Boolean).length)
-  )
+  const weights = lines.map(lineWordCount)
   const total = weights.reduce((sum, weight) => sum + weight, 0)
+  const usableWords = words.filter(
+    (word) =>
+      Number.isFinite(word.start) &&
+      Number.isFinite(word.end) &&
+      word.end >= word.start
+  )
   let used = 0
+  let wordCursor = 0
   return lines.map((text, index) => {
-    const slice =
-      index === lines.length - 1
-        ? duration - used
+    const final = index === lines.length - 1
+    const targetWord = wordCursor + weights[index] - 1
+    const wordEnd = usableWords[targetWord]?.end
+    const slice = final
+      ? duration - used
+      : wordEnd !== undefined
+        ? Math.max(0, Math.min(duration, wordEnd) - used)
         : (duration * weights[index]) / total
     used += slice
+    wordCursor += weights[index]
     return { text, duration: slice }
   })
 }
 
 function textPositions(layout: FrameLayout) {
+  const { width, height } = frameDimensions(layout)
+  const scale = width / 900
+  const subtitlePadY = Math.round(20 * scale)
+  const titleBand = height * (layout.titleBandPercent / 100)
   return {
-    title: { x: WIDTH / 2, y: titleBottom },
+    title: { x: width / 2, y: titleBand * 0.855 },
     subtitle: {
-      x: WIDTH / 2,
-      y: (HEIGHT * layout.subtitleY) / 100 + subtitlePadY,
+      x: width / 2,
+      y: (height * layout.subtitleY) / 100 + subtitlePadY,
     },
   }
 }
@@ -144,6 +163,9 @@ function dialogue(
   text: string,
   align: 2 | 5 | 8
 ) {
+  const scale = position.x / 450
+  const subtitlePadX = Math.round(20 * scale)
+  const subtitlePadY = Math.round(20 * scale)
   const x = Math.round(position.x)
   const y = Math.round(position.y)
   const box =
@@ -152,20 +174,28 @@ function dialogue(
 }
 
 function header(layout: FrameLayout) {
-  const titleFont = Math.round(layout.titleSize * SCALE)
-  const subtitleFont = Math.round(layout.subtitleSize * SCALE)
+  const { width, height } = frameDimensions(layout)
+  const scale = width / 900
+  const titleFont = Math.round(layout.titleSize * scale)
+  const subtitleFont = Math.round(layout.subtitleSize * scale)
+  const titleMargin = Math.round(
+    width * (TITLE_SIDE_MARGIN_PERCENT / 100)
+  )
+  const subtitleMargin = Math.round(
+    width * (SUBTITLE_SIDE_MARGIN_PERCENT / 100)
+  )
   const font = fontAssName(layout.fontWeight)
   return `[Script Info]
 ScriptType: v4.00+
-PlayResX: ${WIDTH}
-PlayResY: ${HEIGHT}
+PlayResX: ${width}
+PlayResY: ${height}
 ScaledBorderAndShadow: yes
 WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Title,${font},${titleFont},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,40,40,0,1
-Style: Subtitle,${font},${subtitleFont},&H00FFFFFF,&H00FFFFFF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,3,0,0,5,40,40,0,1
+Style: Title,${font},${titleFont},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,${titleMargin},${titleMargin},0,1
+Style: Subtitle,${font},${subtitleFont},&H00FFFFFF,&H00FFFFFF,&H80000000,&H00000000,0,0,0,0,100,100,0,0,3,0,0,5,${subtitleMargin},${subtitleMargin},0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
@@ -200,6 +230,10 @@ function escapeAss(text: string) {
 
 function evenPixel(value: number) {
   return Math.max(2, Math.round(value / 2) * 2)
+}
+
+function lineWordCount(line: string) {
+  return Math.max(1, line.split(/\s+/).filter(Boolean).length)
 }
 
 function pad(value: number) {

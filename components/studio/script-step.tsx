@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from "react"
 
-import { Button, Card, Chip, Label, ListBox, Select, TextArea, TextField } from "@heroui/react"
+import {
+  Button,
+  Card,
+  Chip,
+  Label,
+  TextArea,
+  TextField,
+} from "@heroui/react"
 import { LoaderCircle, Pause, Play } from "lucide-react"
 import { StepActions, StepHeader } from "@/components/studio/chrome"
 import {
@@ -14,10 +21,12 @@ import {
   defaultSubtitle,
   formatSeconds,
   narrationSeconds,
-  narrationTooLong,
-  targetSeconds,
 } from "@/lib/timing"
 import type { Project, Scene } from "@/lib/types"
+import {
+  defaultVideoSettings,
+  type VideoSettings,
+} from "@/lib/video-settings"
 
 export function ScriptStep({
   project,
@@ -25,10 +34,8 @@ export function ScriptStep({
   onSubtitleChange,
   onRevertKorean,
   onBack,
-  onMake,
+  onComplete,
   onRewriteScene,
-  onPictureChange,
-  onCastEnter,
   busy,
   error,
 }: {
@@ -37,10 +44,16 @@ export function ScriptStep({
   onSubtitleChange: (sceneId: string, subtitle: string) => void
   onRevertKorean: (sceneId: string) => void
   onBack: () => void
-  onMake: () => void
+  onComplete: (preview: {
+    key: string
+    clips: {
+      id: string
+      duration: number
+      text: string
+      words: { word: string; start: number; end: number }[]
+    }[]
+  }) => void
   onRewriteScene: (sceneId: string) => void
-  onPictureChange: (sceneId: string, sceneDescription: string) => void
-  onCastEnter: (characterId: string, fromIndex: number | null) => void
   busy: string
   error: string
 }) {
@@ -54,6 +67,7 @@ export function ScriptStep({
   const [voiceBusy, setVoiceBusy] = useState("")
   const [playing, setPlaying] = useState("")
   const [voiceError, setVoiceError] = useState("")
+  const [videoSettings, setVideoSettings] = useState(defaultVideoSettings)
   const audioRef = useRef<HTMLAudioElement>(null)
   const measured = project.scenes.every(
     (scene) => spoken[scene.id]?.text === scene.scriptTarget
@@ -63,7 +77,19 @@ export function ScriptStep({
     0
   )
   const shownTotal = measured ? measuredTotal : seconds
-  const shownOver = narrationTooLong(shownTotal)
+  const shownOver =
+    shownTotal >
+    videoSettings.targetDurationSeconds + videoSettings.durationToleranceSeconds
+
+  useEffect(() => {
+    void fetch(`/api/video?profileId=${encodeURIComponent(project.profileId)}`)
+      .then(async (response) => {
+        if (response.ok) {
+          setVideoSettings((await response.json()) as VideoSettings)
+        }
+      })
+      .catch(() => undefined)
+  }, [project.profileId])
 
   async function playAll() {
     if (measured && bundleKey) {
@@ -112,12 +138,17 @@ export function ScriptStep({
       const response = await fetch("/api/voice/preview", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ scenes }),
+        body: JSON.stringify({ scenes, profileId: project.profileId }),
       })
       const body = (await response.json()) as {
         message?: string
         key?: string
-        clips?: { id: string; duration: number; text: string }[]
+        clips?: {
+          id: string
+          duration: number
+          text: string
+          words: { word: string; start: number; end: number }[]
+        }[]
       }
       if (!response.ok || !body.key || !body.clips) {
         setVoiceError(body.message || "음성을 만들지 못했습니다.")
@@ -133,13 +164,25 @@ export function ScriptStep({
           ])
         ),
       }))
-      return { key }
+      return { key, clips: body.clips }
     } catch {
       setVoiceError("음성을 만들지 못했습니다.")
       return null
     } finally {
       setVoiceBusy("")
     }
+  }
+
+  async function completeScript() {
+    const preview = await requestVoice(
+      project.scenes.map((scene) => ({
+        id: scene.id,
+        text: scene.scriptTarget,
+      })),
+      "all"
+    )
+    if (!preview) return
+    onComplete(preview)
   }
 
   async function startAudio(key: string, scope: string) {
@@ -167,11 +210,17 @@ export function ScriptStep({
     <>
       <StepHeader
         title="대본"
-        description="말할 문장과 화면을 확인합니다. 보조 인물은 나온 씬부터 끝까지 같은 모습으로 남습니다."
+        description="이 단계에서는 말할 내용과 실제 음성 길이만 확정합니다. 완료하면 화면 연출을 별도로 설계합니다."
       />
 
       <Card>
-        <Card.Content className="flex flex-col gap-3">
+        <Card.Header>
+          <Card.Title>제작 요약</Card.Title>
+          <Card.Description>
+            음성 길이와 유료 AI 영상 사용량을 한곳에서 확인합니다.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content className="flex flex-col gap-5">
           <div className="flex items-center justify-between gap-3 text-sm">
             <div className="flex items-center gap-2">
               <PlayButton
@@ -182,7 +231,9 @@ export function ScriptStep({
                 disabled={
                   voiceBusy !== "" ||
                   project.scenes.length === 0 ||
-                  project.scenes.some((scene) => scene.scriptTarget.trim() === "")
+                  project.scenes.some(
+                    (scene) => scene.scriptTarget.trim() === ""
+                  )
                 }
                 onPress={() => void playAll()}
               />
@@ -192,14 +243,14 @@ export function ScriptStep({
               {measured
                 ? `${shownTotal.toFixed(1)}초`
                 : `약 ${formatSeconds(seconds)}`}{" "}
-              / {formatSeconds(targetSeconds())}
+              / {formatSeconds(videoSettings.targetDurationSeconds)}
             </span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-default">
             <div
               className={shownOver ? "h-full bg-danger" : "h-full bg-accent"}
               style={{
-                width: `${Math.min(100, (shownTotal / targetSeconds()) * 100)}%`,
+                width: `${Math.min(100, (shownTotal / videoSettings.targetDurationSeconds) * 100)}%`,
               }}
             />
           </div>
@@ -208,22 +259,26 @@ export function ScriptStep({
           ) : null}
           {topicDrift ? (
             <p className="text-sm text-warning">
-              주제가 이 대본을 만들 때와 다릅니다. 씬을 지우지 않고, 고친
-              한국어만 영어 갱신 대상입니다.
+              주제가 이 대본을 만들 때와 다릅니다. 원문을 맞추면 연결된 번역과
+              제목·게시 문구도 함께 갱신됩니다. 연출은 대본 완성 후 만듭니다.
             </p>
           ) : null}
+          <div className="grid gap-2 border-t border-separator pt-4 text-sm sm:grid-cols-2">
+            <Metric
+              label="전체 길이"
+              value={`${shownTotal.toFixed(1)}초 / ${videoSettings.targetDurationSeconds}±${videoSettings.durationToleranceSeconds}초`}
+              danger={shownOver}
+            />
+            <Metric label="대본 상태" value={blocked || "확정 가능"} danger={blocked !== ""} />
+          </div>
         </Card.Content>
       </Card>
-
-      <CastPlan project={project} onCastEnter={onCastEnter} />
 
       <div className="flex flex-col gap-4">
         {project.scenes.map((scene, index) => (
           <SceneScriptCard
             key={scene.id}
             index={index}
-            companions={companionsAt(project, index)}
-            onPictureChange={(value) => onPictureChange(scene.id, value)}
             scene={scene}
             onKoreanChange={(value) => onKoreanChange(scene.id, value)}
             onSubtitleChange={(value) => onSubtitleChange(scene.id, value)}
@@ -239,9 +294,7 @@ export function ScriptStep({
             playLabel={`씬 ${index + 1} 듣기`}
             playBusy={voiceBusy === scene.id}
             playing={playing === scene.id}
-            playDisabled={
-              voiceBusy !== "" || scene.scriptTarget.trim() === ""
-            }
+            playDisabled={voiceBusy !== "" || scene.scriptTarget.trim() === ""}
             onPlay={() => void playScene(scene)}
           />
         ))}
@@ -258,143 +311,44 @@ export function ScriptStep({
 
       <StepActions
         onBack={onBack}
-        nextLabel="씬 영상 만들기"
-        onNext={onMake}
-        nextDisabled={blocked !== "" || busy !== "" || voiceBusy !== ""}
+        nextLabel="대본 완성 및 화면 연출 만들기"
+        onNext={() => void completeScript()}
+        nextDisabled={
+          blocked !== "" || busy !== "" || voiceBusy !== ""
+        }
         note={
           blocked ||
           (shownOver
-            ? "예상 길이가 50초 이상입니다. 같은 장소의 짧은 씬은 한 영상으로 묶어 만듭니다. 힉스필드 비용이 듭니다."
-            : "같은 장소의 짧은 씬은 한 영상으로 묶어 만듭니다. 힉스필드 비용이 듭니다.")
+            ? `예상 길이가 ${videoSettings.targetDurationSeconds + videoSettings.durationToleranceSeconds}초를 넘습니다. 대본을 줄여 주세요.`
+            : "완료하면 TTS를 실측하고, 길이가 범위를 벗어나면 내용을 자동 요약·보강한 뒤 화면 연출을 만듭니다.")
         }
       />
     </>
   )
 }
 
-type RegisteredPerson = {
-  id: string
-  name: string
-  host: boolean
-  active: boolean
-}
-
-function companionsAt(project: Project, index: number) {
-  const scene = project.scenes[index]
-  if (!scene || scene.shot === "insert") {
-    return []
-  }
-  return scene.castIds ?? []
-}
-
-function CastPlan({
-  project,
-  onCastEnter,
+function Metric({
+  label,
+  value,
+  danger = false,
 }: {
-  project: Project
-  onCastEnter: (characterId: string, fromIndex: number | null) => void
+  label: string
+  value: string
+  danger?: boolean
 }) {
-  const [people, setPeople] = useState<RegisteredPerson[]>([])
-
-  useEffect(() => {
-    void fetch("/api/character")
-      .then((response) => (response.ok ? response.json() : null))
-      .then(
-        (
-          body: {
-            hostId?: string
-            outfits?: { id: string; name: string; active: boolean }[]
-          } | null
-        ) => {
-          const hostId = body?.hostId ?? body?.outfits?.[0]?.id ?? ""
-          setPeople(
-            (body?.outfits ?? []).map((person) => ({
-              id: person.id,
-              name: person.name,
-              host: person.id === hostId,
-              active: person.active,
-            }))
-          )
-        }
-      )
-      .catch(() => undefined)
-  }, [])
-
-  const host = people.find((person) => person.host)
-  const support = people.filter((person) => !person.host && person.active)
-  const roomScenes = project.scenes
-    .map((scene, index) => ({ scene, index }))
-    .filter((item) => item.scene.shot !== "insert")
-
   return (
-    <Card>
-      <Card.Header>
-        <Card.Title>화면</Card.Title>
-        <Card.Description>
-          진행 자리는 {project.placeKo.trim() || "아직 없습니다"}. 진행자는{" "}
-          {host?.name ?? "등록된 진행자"}이고, 자료 화면에는 인물이 나오지
-          않습니다.
-        </Card.Description>
-      </Card.Header>
-      <Card.Content className="flex flex-col gap-4">
-        {support.length === 0 ? (
-          <p className="text-sm text-muted">
-            설정에서 켠 보조 인물이 없습니다. 방 장면에는 진행자만 나옵니다.
-          </p>
-        ) : (
-          support.map((person) => {
-            const from = project.scenes.findIndex(
-              (scene) =>
-                scene.shot !== "insert" && (scene.castIds ?? []).includes(person.id)
-            )
-            return (
-              <Select
-                key={person.id}
-                aria-label={`${person.name} 등장`}
-                selectedKey={from === -1 ? "none" : String(from)}
-                onSelectionChange={(key) => {
-                  if (key == null) {
-                    return
-                  }
-                  const value = String(key)
-                  onCastEnter(person.id, value === "none" ? null : Number(value))
-                }}
-              >
-                <Label>{person.name}</Label>
-                <Select.Trigger>
-                  <Select.Value />
-                  <Select.Indicator />
-                </Select.Trigger>
-                <Select.Popover>
-                  <ListBox>
-                    <ListBox.Item id="none" textValue="나오지 않음">
-                      나오지 않음
-                    </ListBox.Item>
-                    {roomScenes.map((item) => (
-                      <ListBox.Item
-                        key={item.scene.id}
-                        id={String(item.index)}
-                        textValue={`씬 ${item.index + 1}부터`}
-                      >
-                        씬 {item.index + 1}부터
-                      </ListBox.Item>
-                    ))}
-                  </ListBox>
-                </Select.Popover>
-              </Select>
-            )
-          })
-        )}
-      </Card.Content>
-    </Card>
+    <div className="flex flex-col gap-1 rounded-lg bg-default/40 p-3">
+      <span className="text-xs text-muted">{label}</span>
+      <span className={danger ? "text-danger" : "text-foreground"}>
+        {value}
+      </span>
+    </div>
   )
 }
 
 function SceneScriptCard({
   index,
   scene,
-  companions,
-  onPictureChange,
   onKoreanChange,
   onSubtitleChange,
   onRevertKorean,
@@ -410,8 +364,6 @@ function SceneScriptCard({
 }: {
   index: number
   scene: Scene
-  companions: string[]
-  onPictureChange: (value: string) => void
   onKoreanChange: (value: string) => void
   onSubtitleChange: (value: string) => void
   onRevertKorean: () => void
@@ -450,75 +402,81 @@ function SceneScriptCard({
           </Card.Title>
         </div>
         <Chip size="sm" color={stale ? "warning" : "success"} variant="soft">
-          {stale ? "이 씬 영어만 다시 필요" : "영어 맞음"}
+          {stale ? "연결 항목 갱신 필요" : "내용 맞음"}
         </Chip>
       </Card.Header>
-      <Card.Content className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <Chip size="sm" variant="soft">
-            {scene.shot === "insert" ? "자료 화면" : "방 장면"}
-          </Chip>
-          <p className="text-sm text-muted">
-            {scene.shot === "insert"
-              ? "인물이 나오지 않습니다."
-              : `진행자${companions.length > 0 ? `와 보조 ${companions.length}명` : "만"}`}
-          </p>
-        </div>
-        <TextField value={scene.sceneDescription} onChange={onPictureChange} fullWidth>
-          <Label>화면</Label>
-          <TextArea rows={2} />
-        </TextField>
-        <div className="grid gap-4 md:grid-cols-2">
-        <TextField value={scene.scriptKo} onChange={onKoreanChange} fullWidth>
-          <Label>한국어</Label>
-          <TextArea rows={4} />
-        </TextField>
-        <div className="flex flex-col gap-2">
-          <p className="text-sm text-muted">영어 나레이션</p>
-          <p className="text-sm leading-6">{scene.scriptTarget}</p>
-          <TextField
-            value={
-              typeof scene.subtitle === "string"
-                ? scene.subtitle
-                : defaultSubtitle(scene.scriptTarget)
-            }
-            onChange={onSubtitleChange}
-            fullWidth
-          >
-            <Label>자막</Label>
-            <TextArea rows={4} />
-          </TextField>
-          <p className="text-xs text-muted">
-            한 줄이 자막 한 구간입니다. 화면에는 최대 2줄까지 나오고, 그 씬
-            음성 길이에 맞춰 차례로 바뀝니다.
-          </p>
-          {stale ? (
-            <div className="flex flex-col items-start gap-2">
-              <p className="text-sm text-warning">
-                영어 맞추기를 누르면 이 씬만 다시 번역되고, 자막 줄은 새 영어
-                기준으로 다시 나뉩니다.
+      <Card.Content className="flex flex-col gap-5">
+        <div className="grid items-stretch gap-4 lg:grid-cols-2">
+          <section className="flex min-h-[19rem] flex-col rounded-xl border border-separator bg-default/20 p-4">
+            <div className="shrink-0">
+              <p className="text-sm font-medium">한국어 원문</p>
+              <p className="mt-1 text-xs text-muted">
+                내용을 수정하면 번역, 자막, 제목과 게시 문구를 함께 맞춥니다.
+                화면 연출은 대본 완성 후 별도로 생성됩니다.
               </p>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  isDisabled={rewriteDisabled}
-                  onPress={onRewriteScene}
-                >
-                  {rewriting ? "맞추는 중" : "영어 맞추기"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  isDisabled={rewriteDisabled}
-                  onPress={onRevertKorean}
-                >
-                  한국어 되돌리기
-                </Button>
-              </div>
             </div>
-          ) : null}
+            <TextField
+              className="mt-4 min-h-0 flex-1"
+              value={scene.scriptKo}
+              onChange={onKoreanChange}
+              fullWidth
+            >
+              <Label className="sr-only">한국어 원문</Label>
+              <TextArea className="h-full min-h-0 flex-1 resize-none overflow-y-auto" />
+            </TextField>
+          </section>
+
+          <section className="flex min-h-[19rem] flex-col rounded-xl border border-separator bg-default/20 p-4">
+            <div>
+              <p className="text-sm font-medium">영어 나레이션</p>
+              <p className="mt-1 text-xs text-muted">TTS가 읽는 확정 문장입니다.</p>
+            </div>
+            <div className="mt-4 min-h-20 rounded-lg bg-background/70 p-3 text-sm leading-6 ring-1 ring-separator">
+              {scene.scriptTarget}
+            </div>
+            <TextField
+              className="mt-4"
+              value={
+                typeof scene.subtitle === "string"
+                  ? scene.subtitle
+                  : defaultSubtitle(scene.scriptTarget)
+              }
+              onChange={onSubtitleChange}
+              fullWidth
+            >
+              <Label>영문 자막 구간</Label>
+              <TextArea rows={3} />
+            </TextField>
+            <p className="mt-2 text-xs leading-5 text-muted">
+              한 줄이 한 구간이며, 음성 길이에 맞춰 최대 2줄씩 표시됩니다.
+            </p>
+          </section>
         </div>
-        </div>
+
+        {stale ? (
+          <div className="flex flex-col gap-3 rounded-xl border border-warning/30 bg-warning/10 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-warning">
+              한국어가 변경되었습니다. 연결된 항목을 새 원문에 맞춰 주세요.
+            </p>
+            <div className="flex shrink-0 gap-2">
+              <Button
+                size="sm"
+                isDisabled={rewriteDisabled}
+                onPress={onRewriteScene}
+              >
+                {rewriting ? "맞추는 중" : "전체 맞추기"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                isDisabled={rewriteDisabled}
+                onPress={onRevertKorean}
+              >
+                한국어 되돌리기
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </Card.Content>
     </Card>
   )

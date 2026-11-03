@@ -1,0 +1,12 @@
+{
+  "model": "bytedance/seedance-2.5/image-to-video",
+  "resolution": "720p",
+  "aspectRatio": "3:4",
+  "estimatedCostPerSecondUsd": 0,
+  "maxEstimatedCostUsd": 0,
+  "targetDurationSeconds": 40,
+  "durationToleranceSeconds": 5,
+  "maxAiVideoSeconds": 12,
+  "maxAiVideoScenes": 3,
+  "maxRetriesPerScene": 2
+}

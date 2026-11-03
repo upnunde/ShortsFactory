@@ -9,12 +9,24 @@ export const FONT_WEIGHTS = [
 
 export type FontWeight = (typeof FONT_WEIGHTS)[number]["weight"]
 
+export const OUTPUT_SIZES = [
+  { id: "720x1280", label: "720 × 1280", width: 720, height: 1280 },
+  { id: "1080x1920", label: "1080 × 1920", width: 1080, height: 1920 },
+] as const
+
+export type OutputSize = (typeof OUTPUT_SIZES)[number]["id"]
+
+export const TITLE_SIDE_MARGIN_PERCENT = 7
+export const SUBTITLE_SIDE_MARGIN_PERCENT = 10
+
 export type FrameLayout = {
   fontFamily: "pretendard"
   fontWeight: FontWeight
   titleSize: number
   subtitleSize: number
   subtitleY: number
+  outputSize: OutputSize
+  titleBandPercent: number
 }
 
 export const defaultFrameLayout: FrameLayout = {
@@ -23,13 +35,14 @@ export const defaultFrameLayout: FrameLayout = {
   titleSize: 60,
   subtitleSize: 50,
   subtitleY: 75,
+  outputSize: "1080x1920",
+  titleBandPercent: 25,
 }
-
-export const TITLE_BAND = 0.25
 
 const TITLE_SIZE = { min: 36, max: 96 }
 const SUBTITLE_SIZE = { min: 28, max: 80 }
 const SUBTITLE_Y = { min: 28, max: 92 }
+const TITLE_BAND_PERCENT = { min: 18, max: 35 }
 
 export function fontAssName(weight: number) {
   return (
@@ -73,8 +86,26 @@ export function fitCaption(text: string, maxUnits: number) {
   return [words.slice(0, best).join(" "), words.slice(best).join(" ")]
 }
 
-export function captionUnits(fontSize: number) {
-  return Math.max(8, Math.round(820 / fontSize))
+export function captionUnits(fontSize: number, sideMarginPercent: number) {
+  const availableWidth = 900 * (1 - (sideMarginPercent * 2) / 100)
+  return Math.max(8, Math.round(availableWidth / fontSize))
+}
+
+export function titleCaptionUnits(fontSize: number) {
+  return captionUnits(fontSize, TITLE_SIDE_MARGIN_PERCENT)
+}
+
+export function subtitleCaptionUnits(fontSize: number) {
+  return captionUnits(fontSize, SUBTITLE_SIDE_MARGIN_PERCENT)
+}
+
+export function titleCharacterLimit(fontSize: number) {
+  const unitsForTwoLines = titleCaptionUnits(fontSize) * 2
+  return Math.max(16, Math.floor((unitsForTwoLines * 0.9) / 0.55))
+}
+
+export function titleWithinCharacterLimit(text: string, fontSize: number) {
+  return Array.from(text).length <= titleCharacterLimit(fontSize)
 }
 
 function textUnits(text: string) {
@@ -110,11 +141,31 @@ export function setFontWeight(layout: FrameLayout, weight: number) {
   return { ...layout, fontWeight: weightOf(weight) }
 }
 
+export function setOutputSize(layout: FrameLayout, outputSize: string) {
+  return { ...layout, outputSize: outputSizeOf(outputSize) }
+}
+
+export function setTitleBandPercent(layout: FrameLayout, percent: number) {
+  return {
+    ...layout,
+    titleBandPercent: clamp(
+      percent,
+      TITLE_BAND_PERCENT.min,
+      TITLE_BAND_PERCENT.max
+    ),
+  }
+}
+
+export function frameDimensions(layout: Pick<FrameLayout, "outputSize">) {
+  return (
+    OUTPUT_SIZES.find((item) => item.id === layout.outputSize) ??
+    OUTPUT_SIZES[1]
+  )
+}
+
 export function normalizeFrameLayout(value: unknown): FrameLayout {
   const record =
-    value && typeof value === "object"
-      ? (value as Partial<FrameLayout>)
-      : {}
+    value && typeof value === "object" ? (value as Partial<FrameLayout>) : {}
   const legacy = typeof record.fontWeight !== "number"
   return {
     fontFamily: "pretendard",
@@ -136,7 +187,19 @@ export function normalizeFrameLayout(value: unknown): FrameLayout {
           SUBTITLE_Y.min,
           SUBTITLE_Y.max
         ),
+    outputSize: outputSizeOf(record.outputSize),
+    titleBandPercent: clamp(
+      numberOf(record.titleBandPercent, defaultFrameLayout.titleBandPercent),
+      TITLE_BAND_PERCENT.min,
+      TITLE_BAND_PERCENT.max
+    ),
   }
+}
+
+function outputSizeOf(value: unknown): OutputSize {
+  return OUTPUT_SIZES.some((item) => item.id === value)
+    ? (value as OutputSize)
+    : defaultFrameLayout.outputSize
 }
 
 function weightOf(value: unknown): FontWeight {

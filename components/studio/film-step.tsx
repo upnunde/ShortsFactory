@@ -66,7 +66,9 @@ export function FilmStep({
     let stop = false
     async function loadClips() {
       try {
-        const response = await fetch(`/api/film/clips?signature=${encodeURIComponent(expected)}`)
+        const response = await fetch(
+          `/api/film/clips?signature=${encodeURIComponent(expected)}`
+        )
         const body = (await response.json()) as ClipJob
         if (!stop) {
           setClips(body)
@@ -100,7 +102,12 @@ export function FilmStep({
         }
       } catch {
         if (!stop) {
-          setStatus({ state: "error", message: "영상 상태를 읽지 못했습니다.", fileReady: false, signature: "" })
+          setStatus({
+            state: "error",
+            message: "영상 상태를 읽지 못했습니다.",
+            fileReady: false,
+            signature: "",
+          })
         }
       }
     }
@@ -112,12 +119,14 @@ export function FilmStep({
     }
   }, [expected, onReady])
 
-  const saved = project.finalSignature !== "" && project.finalSignature === expected
+  const saved =
+    project.finalSignature !== "" && project.finalSignature === expected
   const fileReady = saved || (status.fileReady && status.signature === expected)
   const groups = videoGroups(
     project.scenes.map((scene) => ({
       id: scene.id,
       shot: scene.shot,
+      productionMode: scene.productionMode,
       sceneDescription: scene.sceneDescription,
       scriptTarget: scene.scriptTarget,
       subtitle: scene.subtitle,
@@ -128,7 +137,9 @@ export function FilmStep({
   const readyGroups = clips.signature === expected ? clips.groups : []
   const clipsReady =
     groups.length > 0 &&
-    groups.every((group) => readyGroups.find((item) => item.id === group.id)?.ready)
+    groups.every(
+      (group) => readyGroups.find((item) => item.id === group.id)?.ready
+    )
   const previewClips = groups.map((group) => ({
     src: `/api/film/clips/file?id=${group.id}`,
     parts: project.scenes
@@ -143,17 +154,34 @@ export function FilmStep({
     <>
       <StepHeader
         title="영상"
-        description="확인한 씬 영상을 하나로 합칩니다. 합친 결과가 맞으면 업로드로 넘어갑니다."
+        description="확인한 Seedance 장면과 로컬 2D 모션을 하나의 9:16 쇼츠로 합칩니다. 합친 결과가 맞으면 업로드로 넘어갑니다."
       />
 
       <Card>
         <Card.Header className="flex-row items-center justify-between gap-3">
           <div>
             <Card.Title>이 작업의 영상</Card.Title>
-            <Card.Description>9:16 · 480p · 약 {formatSeconds(seconds)}</Card.Description>
+            <Card.Description>
+              9:16 · {layout.outputSize.replace("x", " × ")} · 약{" "}
+              {formatSeconds(seconds)}
+            </Card.Description>
           </div>
-          <Chip size="sm" color={fileReady ? "success" : status.state === "error" ? "danger" : "warning"} variant="soft">
-            {fileReady ? "합쳐짐" : status.state === "running" ? "만드는 중" : "아직 없음"}
+          <Chip
+            size="sm"
+            color={
+              fileReady
+                ? "success"
+                : status.state === "error"
+                  ? "danger"
+                  : "warning"
+            }
+            variant="soft"
+          >
+            {fileReady
+              ? "합쳐짐"
+              : status.state === "running"
+                ? "만드는 중"
+                : "아직 없음"}
           </Chip>
         </Card.Header>
         <Card.Content className="flex flex-col items-center gap-4">
@@ -168,9 +196,18 @@ export function FilmStep({
               label="합친 영상"
             />
           ) : clipsReady ? (
-            <SequencePreview title={project.topicEn} layout={layout} clips={previewClips} />
+            <SequencePreview
+              title={project.topicEn}
+              layout={layout}
+              clips={previewClips}
+            />
           ) : (
-            <ShortsFrame title={project.topicEn} subtitle="" layout={layout} className="w-48" />
+            <ShortsFrame
+              title={project.topicEn}
+              subtitle=""
+              layout={layout}
+              className="w-48"
+            />
           )}
         </Card.Content>
       </Card>

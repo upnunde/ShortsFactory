@@ -11,13 +11,15 @@ export async function POST(request: Request) {
     description?: unknown
     tags?: unknown
     scheduledAt?: unknown
+    profileId?: unknown
   } | null
   if (
     typeof body?.historyId !== "string" ||
     typeof body.title !== "string" ||
     typeof body.description !== "string" ||
     typeof body.tags !== "string" ||
-    typeof body.scheduledAt !== "string"
+    typeof body.scheduledAt !== "string" ||
+    typeof body.profileId !== "string"
   ) {
     return NextResponse.json(
       { message: "업로드 정보를 읽을 수 없습니다." },
@@ -27,6 +29,7 @@ export async function POST(request: Request) {
   try {
     return NextResponse.json(
       await uploadYoutubeShort({
+        profileId: body.profileId,
         historyId: body.historyId,
         title: body.title,
         description: body.description,

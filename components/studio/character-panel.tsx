@@ -1,9 +1,21 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import Image from "next/image"
 
-import { AlertDialog, Button, Card, Chip, Input, Switch, TextField } from "@heroui/react"
-import { CHARACTER_ANGLES } from "@/lib/character-angles"
+import {
+  AlertDialog,
+  Button,
+  Card,
+  Chip,
+  Input,
+  Switch,
+  TextField,
+} from "@heroui/react"
+import {
+  CHARACTER_ANGLES,
+  CHARACTER_SOURCE_GROUPS,
+} from "@/lib/character-angles"
 
 type CharacterFile = {
   id: string
@@ -32,7 +44,7 @@ const emptyLibrary: CharacterLibrary = {
   activeReferences: [],
 }
 
-export function CharacterPanel() {
+export function CharacterPanel({ profileId }: { profileId: string }) {
   const [library, setLibrary] = useState<CharacterLibrary>(emptyLibrary)
   const [note, setNote] = useState("")
   const [pending, setPending] = useState(false)
@@ -40,15 +52,18 @@ export function CharacterPanel() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   useEffect(() => {
-    void refresh()
-  }, [])
-
-  async function refresh() {
-    const response = await fetch("/api/character")
-    if (response.ok) {
-      setLibrary((await response.json()) as CharacterLibrary)
+    let stop = false
+    void fetch(`/api/character?profileId=${encodeURIComponent(profileId)}`)
+      .then(async (response) => {
+        if (response.ok && !stop) {
+          setLibrary((await response.json()) as CharacterLibrary)
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      stop = true
     }
-  }
+  }, [profileId])
 
   async function applyLibrary(response: Response, message: string) {
     if (!response.ok) {
@@ -61,7 +76,10 @@ export function CharacterPanel() {
 
   async function addSection() {
     setPending(true)
-    const response = await fetch("/api/character/outfits", { method: "POST" })
+    const response = await fetch(
+      `/api/character/outfits?profileId=${encodeURIComponent(profileId)}`,
+      { method: "POST" }
+    )
     setPending(false)
     await applyLibrary(response, "인물을 추가했습니다.")
   }
@@ -74,7 +92,13 @@ export function CharacterPanel() {
     const form = new FormData()
     form.append("outfitId", outfitId)
     form.append("front", file)
-    const response = await fetch("/api/character", { method: "POST", body: form })
+    const response = await fetch(
+      `/api/character?profileId=${encodeURIComponent(profileId)}`,
+      {
+        method: "POST",
+        body: form,
+      }
+    )
     setPending(false)
     if (!response.ok) {
       setNote("png, jpg, webp 정면 한 장만 올릴 수 있습니다.")
@@ -87,8 +111,11 @@ export function CharacterPanel() {
   async function makeAngles(outfitId: string) {
     setPending(true)
     setDrawingId(outfitId)
-    setNote("정면을 보고 각도를 그리는 중입니다.")
-    const response = await fetch(`/api/character/angles?outfitId=${encodeURIComponent(outfitId)}`, { method: "POST" })
+    setNote("정면을 보고 누락된 캐릭터 소스만 그리는 중입니다.")
+    const response = await fetch(
+      `/api/character/angles?outfitId=${encodeURIComponent(outfitId)}&profileId=${encodeURIComponent(profileId)}`,
+      { method: "POST" }
+    )
     setPending(false)
     setDrawingId(null)
     if (!response.ok) {
@@ -96,7 +123,7 @@ export function CharacterPanel() {
       return
     }
     setLibrary((await response.json()) as CharacterLibrary)
-    setNote("나머지 각도를 그려 이 섹션에 등록했습니다.")
+    setNote("누락된 캐릭터 소스를 이 섹션에 등록했습니다.")
   }
 
   async function deleteSection() {
@@ -104,20 +131,24 @@ export function CharacterPanel() {
       return
     }
     setPending(true)
-    const response = await fetch(`/api/character/outfits/${encodeURIComponent(confirmDeleteId)}`, {
-      method: "DELETE",
-    })
+    const response = await fetch(
+      `/api/character/outfits/${encodeURIComponent(confirmDeleteId)}?profileId=${encodeURIComponent(profileId)}`,
+      { method: "DELETE" }
+    )
     setPending(false)
     setConfirmDeleteId(null)
     await applyLibrary(response, "인물을 삭제했습니다.")
   }
 
   async function rename(outfitId: string, name: string) {
-    const response = await fetch(`/api/character/outfits/${encodeURIComponent(outfitId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    })
+    const response = await fetch(
+      `/api/character/outfits/${encodeURIComponent(outfitId)}?profileId=${encodeURIComponent(profileId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      }
+    )
     if (response.ok) {
       setLibrary((await response.json()) as CharacterLibrary)
     }
@@ -128,27 +159,36 @@ export function CharacterPanel() {
       return
     }
     setPending(true)
-    const response = await fetch(`/api/character/outfits/${encodeURIComponent(outfitId)}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ active }),
-    })
+    const response = await fetch(
+      `/api/character/outfits/${encodeURIComponent(outfitId)}?profileId=${encodeURIComponent(profileId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active }),
+      }
+    )
     setPending(false)
-    await applyLibrary(response, active ? "이 인물을 활용합니다." : "이 인물은 대본에서 고르지 않습니다.")
+    await applyLibrary(
+      response,
+      active ? "이 인물을 활용합니다." : "이 인물은 대본에서 고르지 않습니다."
+    )
   }
 
-  const deleteOutfit = library.outfits.find((outfit) => outfit.id === confirmDeleteId)
+  const deleteOutfit = library.outfits.find(
+    (outfit) => outfit.id === confirmDeleteId
+  )
 
   return (
     <>
       <p className="text-sm text-muted">
-        인물마다 정면과 각도를 등록합니다. 진행자는 항상 활용되고, 켠 보조 인물만 대본에서 고를 수 있습니다. 끈 인물은 지워지지 않습니다.
+        인물마다 정면과 각도를 등록합니다. 진행자는 항상 활용되고, 켠 보조
+        인물만 대본에서 고를 수 있습니다. 끈 인물은 지워지지 않습니다.
       </p>
 
       <div className="flex flex-col gap-4">
         {library.outfits.map((outfit) => (
           <OutfitSection
-            key={outfit.id}
+            key={`${outfit.id}:${outfit.name}`}
             outfit={outfit}
             pending={pending}
             drawing={drawingId === outfit.id}
@@ -165,12 +205,19 @@ export function CharacterPanel() {
       {note ? <p className="text-right text-sm text-muted">{note}</p> : null}
 
       <div className="flex justify-end">
-        <Button variant="outline" isDisabled={pending} onPress={() => void addSection()}>
+        <Button
+          variant="outline"
+          isDisabled={pending}
+          onPress={() => void addSection()}
+        >
           인물 추가
         </Button>
       </div>
 
-      <AlertDialog isOpen={confirmDeleteId !== null} onOpenChange={(open) => !open && setConfirmDeleteId(null)}>
+      <AlertDialog
+        isOpen={confirmDeleteId !== null}
+        onOpenChange={(open) => !open && setConfirmDeleteId(null)}
+      >
         <AlertDialog.Backdrop>
           <AlertDialog.Container placement="center">
             <AlertDialog.Dialog>
@@ -184,10 +231,18 @@ export function CharacterPanel() {
                   : "이 인물과 그 안의 이미지가 삭제됩니다."}
               </AlertDialog.Body>
               <AlertDialog.Footer>
-                <Button variant="outline" isDisabled={pending} onPress={() => setConfirmDeleteId(null)}>
+                <Button
+                  variant="outline"
+                  isDisabled={pending}
+                  onPress={() => setConfirmDeleteId(null)}
+                >
                   취소
                 </Button>
-                <Button variant="danger" isDisabled={pending} onPress={() => void deleteSection()}>
+                <Button
+                  variant="danger"
+                  isDisabled={pending}
+                  onPress={() => void deleteSection()}
+                >
                   인물 삭제
                 </Button>
               </AlertDialog.Footer>
@@ -222,14 +277,8 @@ function OutfitSection({
 }) {
   const [name, setName] = useState(outfit.name)
 
-  useEffect(() => {
-    setName(outfit.name)
-  }, [outfit.name])
-
   return (
-    <section
-      className="flex w-full flex-col gap-4 rounded-xl border border-separator p-4"
-    >
+    <section className="flex w-full flex-col gap-4 rounded-xl border border-separator p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           {host ? (
@@ -237,15 +286,20 @@ function OutfitSection({
               진행자
             </Chip>
           ) : null}
-          <TextField aria-label="인물 이름" value={name} onChange={setName} className="w-40">
-          <Input
-            onBlur={() => {
-              if (name.trim() && name.trim() !== outfit.name) {
-                onRename(name.trim())
-              }
-            }}
-          />
-        </TextField>
+          <TextField
+            aria-label="인물 이름"
+            value={name}
+            onChange={setName}
+            className="w-40"
+          >
+            <Input
+              onBlur={() => {
+                if (name.trim() && name.trim() !== outfit.name) {
+                  onRename(name.trim())
+                }
+              }}
+            />
+          </TextField>
         </div>
         <div className="flex items-center gap-3">
           <Switch
@@ -269,50 +323,82 @@ function OutfitSection({
         </div>
       </div>
 
-      <div className="grid items-stretch gap-6 md:grid-cols-[18rem_minmax(0,1fr)]">
-        <Card className="h-full">
+      <div className="grid items-start gap-6 md:grid-cols-[18rem_minmax(0,1fr)]">
+        <Card className="h-fit self-start">
           <Card.Header>
             <Card.Title>정면</Card.Title>
-            <Card.Description>이 인물의 기준이 되는 한 장입니다.</Card.Description>
+            <Card.Description>
+              이 인물의 기준이 되는 한 장입니다.
+            </Card.Description>
           </Card.Header>
-          <Card.Content className="h-full">
-            <FrontDrop image={outfit.front} pending={pending} onFile={onUpload} />
+          <Card.Content className="grow-0">
+            <FrontDrop
+              image={outfit.front}
+              pending={pending}
+              onFile={onUpload}
+            />
           </Card.Content>
         </Card>
 
-        <Card className="h-full">
+        <Card>
           <Card.Header>
-            <Card.Title>나머지 각도</Card.Title>
-            <Card.Description>이 인물에서만 씁니다.</Card.Description>
+            <Card.Title>캐릭터 소스</Card.Title>
+            <Card.Description>
+              기본 각도, 제스처, 표정과 부리를 이 인물에서만 씁니다.
+            </Card.Description>
           </Card.Header>
           <Card.Content className="flex flex-col gap-4">
-            <div className="grid grid-cols-3 gap-3 xl:grid-cols-5">
-              {(outfit.angles.length > 0 ? outfit.angles : CHARACTER_ANGLES.map((angle) => ({ ...angle, image: null }))).map(
-                (angle) => (
-                  <figure key={angle.key} className="flex flex-col gap-2">
-                    {angle.image ? (
-                      <img
-                        src={angle.image.url}
-                        alt={angle.label}
-                        className="aspect-[3/4] w-full rounded-lg object-cover"
-                      />
-                    ) : (
-                      <div className="flex aspect-[3/4] w-full items-center justify-center rounded-lg border border-dashed border-separator px-2 text-center text-xs text-muted">
-                        만들기 전
-                      </div>
-                    )}
-                    <figcaption className="text-center text-sm">{angle.label}</figcaption>
-                  </figure>
-                ),
-              )}
-            </div>
+            {CHARACTER_SOURCE_GROUPS.map((group) => {
+              const definitions = CHARACTER_ANGLES.filter(
+                (angle) => angle.group === group.id
+              )
+              const slots = definitions.map(
+                (definition) =>
+                  outfit.angles.find(
+                    (angle) => angle.key === definition.key
+                  ) ?? { ...definition, image: null }
+              )
+              return (
+                <section key={group.id} className="flex flex-col gap-2">
+                  <h4 className="text-sm font-medium">{group.label}</h4>
+                  <div className="grid grid-cols-3 gap-3 xl:grid-cols-5">
+                    {slots.map((angle) => (
+                      <figure key={angle.key} className="flex flex-col gap-2">
+                        {angle.image ? (
+                          <Image
+                            src={angle.image.url}
+                            alt={angle.label}
+                            width={240}
+                            height={320}
+                            unoptimized
+                            className="aspect-[3/4] w-full rounded-lg object-cover"
+                          />
+                        ) : (
+                          <div className="flex aspect-[3/4] w-full items-center justify-center rounded-lg border border-dashed border-separator px-2 text-center text-xs text-muted">
+                            만들기 전
+                          </div>
+                        )}
+                        <figcaption className="text-center text-sm">
+                          {angle.label}
+                        </figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                </section>
+              )
+            })}
             <div className="mt-auto flex flex-col items-end gap-2">
               {outfit.angles.some((angle) => !angle.image) ? (
-                <Button isDisabled={pending || !outfit.front} onPress={onMakeAngles}>
-                  {drawing ? "그리는 중" : "나머지 각도 만들기"}
+                <Button
+                  isDisabled={pending || !outfit.front}
+                  onPress={onMakeAngles}
+                >
+                  {drawing ? "그리는 중" : "누락된 소스만 만들기"}
                 </Button>
               ) : (
-                <p className="text-right text-sm text-muted">등록된 각도입니다. 이 칸을 지우기 전까지 이 묶음을 씁니다.</p>
+                <p className="text-right text-sm text-muted">
+                  등록된 각도입니다. 이 칸을 지우기 전까지 이 묶음을 씁니다.
+                </p>
               )}
             </div>
           </Card.Content>
@@ -333,15 +419,20 @@ function FrontDrop({
 }) {
   if (image) {
     return (
-      <div className="flex h-full min-h-80 items-center justify-center rounded-lg border border-separator px-4 py-6">
-        <img src={image.url} alt="등록한 정면 캐릭터" className="aspect-[3/4] w-full max-w-52 rounded-lg object-cover" />
-      </div>
+      <Image
+        src={image.url}
+        alt="등록한 정면 캐릭터"
+        width={256}
+        height={341}
+        unoptimized
+        className="aspect-[3/4] w-full rounded-lg object-cover"
+      />
     )
   }
 
   return (
     <label
-      className="flex h-full min-h-80 cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-separator px-4 py-6 text-center text-sm break-keep text-muted"
+      className="flex min-h-80 cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-separator px-4 py-6 text-center text-sm break-keep text-muted"
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault()

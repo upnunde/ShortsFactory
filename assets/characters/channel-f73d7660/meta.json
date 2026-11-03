@@ -1,0 +1,73 @@
+{
+  "outfits": [
+    {
+      "id": "default",
+      "name": "주인공",
+      "active": true,
+      "front": "d5970357-61fe-4afb-8a26-de09ada39977.png",
+      "angles": {
+        "three-quarter-face": "f127ac47-7480-41e4-ba9f-ce52c881c411.jpg",
+        "profile": "61939da8-05d5-48f2-b941-789f68b862bc.jpg",
+        "front-body": "4f078a23-ac05-4c0a-a3db-a65f87403090.jpg",
+        "three-quarter-body": "79cb0b0d-6a93-456a-baf5-c7f48ef2b8f7.jpg",
+        "back-body": "c95d930c-f25c-4b27-884c-83e81e8952aa.jpg",
+        "gesture-explain": "rooster-gesture-explain.png",
+        "gesture-point-left": "rooster-gesture-point-left.png",
+        "gesture-point-right": "rooster-gesture-point-right.png",
+        "gesture-thinking": "rooster-gesture-thinking.png",
+        "gesture-wave": "rooster-gesture-wave.png",
+        "mouth-small": "rooster-mouth-small.png",
+        "mouth-wide": "rooster-mouth-wide.png",
+        "expression-smile": "rooster-expression-smile.png",
+        "expression-surprised": "rooster-expression-surprised.png",
+        "expression-serious": "rooster-expression-serious.png"
+      }
+    },
+    {
+      "id": "266d880c-957b-4197-9659-6ce1905a491d",
+      "name": "친구",
+      "active": true,
+      "front": "bfdfb160-cc7d-4aee-8f6d-9a1d501e82fd.png",
+      "angles": {
+        "three-quarter-face": "85bca510-afdb-40de-9c28-d54035a457fb.jpg",
+        "profile": "5d861a85-8b07-4f30-b7e8-549f4bd3af4f.jpg",
+        "front-body": "d18ef87b-e7c2-437c-9ec3-c581b35e11ac.jpg",
+        "three-quarter-body": "bb43589a-14b1-405b-bdb9-15cd3df5be82.jpg",
+        "back-body": "ee769eae-3992-42a0-99a6-43d387c8df7c.jpg",
+        "gesture-explain": "dog-gesture-explain.png",
+        "gesture-point-left": "dog-gesture-point-left.png",
+        "gesture-point-right": "dog-gesture-point-right.png",
+        "gesture-thinking": "dog-gesture-thinking.png",
+        "gesture-wave": "dog-gesture-wave.png",
+        "mouth-small": "dog-mouth-small.png",
+        "mouth-wide": "dog-mouth-wide.png",
+        "expression-smile": "dog-expression-smile.png",
+        "expression-surprised": "dog-expression-surprised.png",
+        "expression-serious": "dog-expression-serious.png"
+      }
+    },
+    {
+      "id": "ce506724-7c65-4887-b559-c4320e75d716",
+      "name": "인물 3",
+      "active": true,
+      "front": "c82f0565-60d7-4a36-9235-a81f65a13fa8.png",
+      "angles": {
+        "three-quarter-face": "bbfdfb53-8d06-4471-84a2-6b38d0e0b3fb.jpg",
+        "profile": "160c7694-353f-4447-b04e-8cca73dd4707.jpg",
+        "front-body": "a8d43c5f-4b7a-4128-ad11-a06f9d458d3d.jpg",
+        "three-quarter-body": "bca6c6be-e036-4e45-a886-0fcabd5050d0.jpg",
+        "back-body": "9ca99700-8c56-472f-aa85-f0c128bdeadc.jpg",
+        "gesture-explain": "cat-gesture-explain.png",
+        "gesture-point-left": "cat-gesture-point-left.png",
+        "gesture-point-right": "cat-gesture-point-right.png",
+        "gesture-thinking": "cat-gesture-thinking.png",
+        "gesture-wave": "cat-gesture-wave.png",
+        "mouth-small": "cat-mouth-small.png",
+        "mouth-wide": "cat-mouth-wide.png",
+        "expression-smile": "cat-expression-smile.png",
+        "expression-surprised": "cat-expression-surprised.png",
+        "expression-serious": "cat-expression-serious.png"
+      }
+    }
+  ]
+}

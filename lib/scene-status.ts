@@ -1,5 +1,5 @@
-import { narrationSeconds } from "@/lib/timing"
-import type { Project, Scene } from "@/lib/types"
+import { narrationSeconds } from "./timing.ts"
+import type { Project, Scene } from "./types.ts"
 
 export function englishIsStale(scene: Scene) {
   return scene.scriptKo.trim() !== scene.approvedKo.trim()
@@ -36,15 +36,38 @@ export function projectSeconds(scenes: Scene[]) {
   )
 }
 
+export function narrationSignature(scenes: Scene[], voicePreviewKey = "") {
+  return [
+    voicePreviewKey,
+    ...scenes.map(
+      (scene) =>
+        `${scene.id}|${scene.scriptKo.trim()}|${scene.approvedKo.trim()}|${scene.scriptTarget.trim()}`
+    ),
+  ].join("\n")
+}
+
+export function directionReady(project: Project) {
+  return (
+    project.directionSignature !== "" &&
+    project.directionSignature ===
+      narrationSignature(project.scenes, project.voicePreviewKey)
+  )
+}
+
 export function filmSignature(
-  project: Pick<Project, "placeEn" | "scenes" | "bgmId">
+  project: Pick<
+    Project,
+    "topicEn" | "placeEn" | "scenes" | "bgmId" | "voicePreviewKey"
+  >
 ) {
   return [
     project.bgmId,
+    project.voicePreviewKey,
+    project.topicEn,
     project.placeEn,
     ...project.scenes.map(
       (scene) =>
-        `${scene.id}|${scene.shot}|${scene.scriptTarget}|${scene.subtitle}|${scene.sceneDescription}|${(scene.castIds ?? []).join(",")}`
+        `${scene.id}|${scene.shot}|${scene.productionMode}|${scene.scriptTarget}|${scene.subtitle}|${scene.sceneDescription}|${(scene.castIds ?? []).join(",")}`
     ),
   ].join("\n")
 }
@@ -79,7 +102,7 @@ export function scriptBlocked(project: Project) {
     return "비어 있는 화면이 있습니다."
   }
   if (project.scenes.some(englishIsStale)) {
-    return "영어를 다시 써야 하는 씬이 있습니다."
+    return "변경된 씬의 연결 항목을 다시 맞춰야 합니다."
   }
   return ""
 }
