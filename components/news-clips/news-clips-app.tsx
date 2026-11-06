@@ -42,13 +42,13 @@ import {
   normalizeSubtitleCues,
 } from "@/lib/news-clips/text-layout"
 import {
-  bodyDurationWithEndCta,
+  NEWS_INTRO_GAP_SECONDS,
+  NEWS_TOTAL_GAP_SECONDS,
   buildReportScenes,
-  contextualEndCtaText,
+  ensureReportEndCta,
   estimateReportScenesDuration,
   reportCaptionPhrases,
   reportSubtitles,
-  withEndCta,
 } from "@/lib/news-clips/report"
 import {
   NEWS_CLIP_STEPS,
@@ -82,6 +82,14 @@ export function NewsClipsApp({
   )
   const showSettings = searchParams.get("view") === "settings"
   const showHistory = searchParams.get("view") === "history"
+  const settingsTab = newsSettingsTab(searchParams.get("tab"))
+  const connectedPlatform = searchParams.get("connected")
+  const accountErrorPlatform = searchParams.get("platform")
+  const accountNotice = connectedPlatform
+    ? { kind: "connected" as const, platform: connectedPlatform }
+    : searchParams.get("error") && accountErrorPlatform
+      ? { kind: "error" as const, platform: accountErrorPlatform }
+      : null
   const [step, setStep] = useState<NewsClipStep>("issue")
   const [furthestStep, setFurthestStep] = useState<NewsClipStep>("issue")
   const [project, setProject] = useState<NewsClipProject>(() =>
@@ -143,18 +151,11 @@ export function NewsClipsApp({
             saved.step === "review"
               ? saved.project.outputUrl
                 ? "final"
-                : saved.project.previewUrl
-                  ? "preview"
-                  : "script"
+                : "preview"
               : NEWS_CLIP_STEPS.some((item) => item.id === saved.step)
                 ? (saved.step as NewsClipStep)
                 : "issue"
-          const migratedStep: NewsClipStep =
-            storedStep === "direction"
-              ? migratedProject.previewUrl
-                ? "preview"
-                : "script"
-              : storedStep
+          const migratedStep = visibleWorkflowStep(storedStep)
           if (migratedProject.selectedIssue && sourceMatchesIssue) {
             savedStep = migratedStep
             const storedFurthest = NEWS_CLIP_STEPS.some(
@@ -162,10 +163,7 @@ export function NewsClipsApp({
             )
               ? (saved.furthestStep as NewsClipStep)
               : migratedStep
-            savedFurthestStep = visibleWorkflowStep(
-              storedFurthest,
-              migratedProject
-            )
+            savedFurthestStep = visibleWorkflowStep(storedFurthest)
             savedTranscript = saved.transcriptDraft ?? ""
           } else if (migratedProject.selectedIssue) {
             savedStep = "source"
@@ -283,9 +281,9 @@ export function NewsClipsApp({
     const snapshot = body.snapshot
     const restored = normalizeSavedNewsProject(snapshot.project, profile!.id)
     setProject(restored)
-    const restoredStep = visibleWorkflowStep(snapshot.step, restored)
+    const restoredStep = visibleWorkflowStep(snapshot.step)
     setStep(restoredStep)
-    setFurthestStep(visibleWorkflowStep(snapshot.furthestStep, restored))
+    setFurthestStep(visibleWorkflowStep(snapshot.furthestStep))
     setTranscriptDraft(snapshot.transcriptDraft ?? "")
     setIssueSearch(normalizeNewsIssueSearchState(snapshot.issueSearch))
     setSourceSearch(normalizeNewsSourceSearchState(snapshot.sourceSearch))
@@ -329,6 +327,8 @@ export function NewsClipsApp({
       previewUrl: "",
       renderSettingsKey: "",
       thumbnailUrl: "",
+      youtubeVideoId: "",
+      youtubeUploadUrl: "",
       ...patch,
     }))
   }
@@ -353,6 +353,8 @@ export function NewsClipsApp({
       previewUrl: "",
       renderSettingsKey: "",
       thumbnailUrl: "",
+      youtubeVideoId: "",
+      youtubeUploadUrl: "",
     }))
   }
 
@@ -369,6 +371,8 @@ export function NewsClipsApp({
       previewUrl: "",
       renderSettingsKey: "",
       thumbnailUrl: "",
+      youtubeVideoId: "",
+      youtubeUploadUrl: "",
     }))
     setNote("대본 공통 TTS를 저장하는 중입니다.")
     try {
@@ -414,19 +418,23 @@ export function NewsClipsApp({
         fontSize: settings.titleCardSecondFontSize,
       }
     )
-    const normalizedReportScenes = buildReportScenes(
+    const completeReportScript = ensureReportEndCta(
       reportScript,
+      title,
+      base.selectedIssue?.keywords
+    )
+    const normalizedReportScenes = buildReportScenes(
+      completeReportScript,
       transcript,
       candidate.sourceStart,
       candidate.sourceEnd,
       reportScenes,
       source.id
     )
-    const estimatedBodySeconds = estimateReportScenesDuration(
+    const outputBodySeconds = estimateReportScenesDuration(
       normalizedReportScenes,
       settings.titleVoiceRate
     )
-    const outputBodySeconds = bodyDurationWithEndCta(estimatedBodySeconds)
     return {
       ...base,
       source,
@@ -436,7 +444,7 @@ export function NewsClipsApp({
       selectedCandidateId: candidate.id,
       title,
       titleOptions: candidate.titleOptions,
-      reportScript,
+      reportScript: completeReportScript,
       reportScenes: normalizedReportScenes,
       removedRanges: [],
       keepRanges: [
@@ -447,27 +455,24 @@ export function NewsClipsApp({
           outputEnd: candidate.sourceEnd - candidate.sourceStart,
         },
       ],
-      subtitles: withEndCta(
-        normalizeSubtitleCues(
-          reportSubtitles(
-            normalizedReportScenes,
-            undefined,
-            reportCaptionPhrases(reportScript)
-          ),
-          settings.bodySubtitleText
+      subtitles: normalizeSubtitleCues(
+        reportSubtitles(
+          normalizedReportScenes,
+          undefined,
+          reportCaptionPhrases(completeReportScript)
         ),
-        outputBodySeconds,
-        contextualEndCtaText(title, base.selectedIssue?.keywords, reportScript),
-        estimatedBodySeconds
+        settings.bodySubtitleText
       ),
-      outputDurationSeconds: settings.titleCardSeconds + outputBodySeconds,
+      outputDurationSeconds:
+        settings.titleCardSeconds + outputBodySeconds + NEWS_TOTAL_GAP_SECONDS,
       bgmEnabled: settings.bgmEnabled,
       bgmVolume: settings.bgmVolume,
       titleVolume: settings.titleVolume,
       sourceVolume: settings.sourceVolume,
       quoteVolume: settings.quoteVolume,
       introStillTimeSeconds: null,
-      titleCardDurationSeconds: settings.titleCardSeconds,
+      titleCardDurationSeconds:
+        settings.titleCardSeconds + NEWS_INTRO_GAP_SECONDS,
       metadata: {
         youtubeTitle: title.replace(/\s*\n\s*/g, " "),
         description: sourceDescription(source, candidate),
@@ -479,6 +484,8 @@ export function NewsClipsApp({
       renderSettingsKey: "",
       outputUrl: "",
       renderSignature: "",
+      youtubeVideoId: "",
+      youtubeUploadUrl: "",
     } satisfies NewsClipProject
   }
 
@@ -488,6 +495,7 @@ export function NewsClipsApp({
     try {
       const response = await fetch("/api/news-clips/preview", {
         method: "POST",
+        cache: "no-store",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ project: draft, settings, force }),
       })
@@ -498,27 +506,36 @@ export function NewsClipsApp({
         titleCardDurationSeconds?: number
         outputDurationSeconds?: number
         subtitles?: NewsClipProject["subtitles"]
+        reportScenes?: NewsClipProject["reportScenes"]
       }
       if (!response.ok || !body.previewUrl) {
         setNote(body.message || "저해상도 초안을 만들지 못했습니다.")
         return false
       }
-      setProject((current) =>
-        current.id === draft.id && current.updatedAt === draft.updatedAt
-          ? {
-              ...current,
-              previewUrl: body.previewUrl ?? "",
-              previewSignature: body.signature ?? "",
-              renderSettingsKey: newsRenderSettingsKey(settings),
-              titleCardDurationSeconds:
-                body.titleCardDurationSeconds ??
-                current.titleCardDurationSeconds,
-              outputDurationSeconds:
-                body.outputDurationSeconds ?? current.outputDurationSeconds,
-              subtitles: body.subtitles ?? current.subtitles,
-            }
-          : current
-      )
+      setProject((current) => {
+        if (current.id !== draft.id) return current
+        const isLatestRevision = current.updatedAt === draft.updatedAt
+        const previewUrl = refreshMediaUrl(body.previewUrl ?? "")
+        if (!isLatestRevision) {
+          return {
+            ...current,
+            previewUrl,
+            previewSignature: "",
+          }
+        }
+        return {
+          ...current,
+          previewUrl,
+          previewSignature: body.signature ?? "",
+          renderSettingsKey: newsRenderSettingsKey(settings),
+          titleCardDurationSeconds:
+            body.titleCardDurationSeconds ?? current.titleCardDurationSeconds,
+          outputDurationSeconds:
+            body.outputDurationSeconds ?? current.outputDurationSeconds,
+          subtitles: body.subtitles ?? current.subtitles,
+          reportScenes: body.reportScenes ?? current.reportScenes,
+        }
+      })
       setNote(body.message || "저해상도 초안을 만들었습니다.")
       return true
     } catch {
@@ -655,7 +672,7 @@ export function NewsClipsApp({
   }
 
   function openStep(nextStep: NewsClipStep) {
-    if (nextStep === "script") {
+    if (nextStep === "preview") {
       setProject((current) => balanceProjectSubtitles(current, settings))
     }
     setStep(nextStep)
@@ -814,11 +831,11 @@ export function NewsClipsApp({
     )
     setProject(draft)
     setTranscriptDraft("")
-    setStep("script")
+    setStep("preview")
     setFurthestStep((current) =>
-      stepIndex("script") > stepIndex(current) ? "script" : current
+      stepIndex("preview") > stepIndex(current) ? "preview" : current
     )
-    setNote(`${sourceLabel} 영상을 분석해 대본을 만들었습니다.`)
+    setNote(`${sourceLabel} 영상을 분석해 검수할 내용을 준비했습니다.`)
   }
 
   async function runAutomaticGeneration(query = "") {
@@ -975,14 +992,19 @@ export function NewsClipsApp({
       ensureRunning()
       setProject(previewProject)
       setBusy("auto:final")
-      setNote("자동생성 · 1080×1920 최종 영상을 렌더링하고 있습니다.")
-      const finalProject = await renderAutomaticProject(
+      setNote("자동생성 · 720×1280 최종 영상을 렌더링하고 있습니다.")
+      let finalProject = await renderAutomaticProject(
         "/api/news-clips/render",
         previewProject,
         settings,
         signal
       )
       ensureRunning()
+      if (settings.youtubeAutoUpload) {
+        setNote("자동생성 · YouTube에 비공개로 업로드하고 있습니다.")
+        finalProject = await uploadAutomaticNewsClip(finalProject, signal)
+        ensureRunning()
+      }
       setProject(finalProject)
       setStep("final")
       setFurthestStep("final")
@@ -1151,6 +1173,9 @@ export function NewsClipsApp({
               profileId={profile.id}
               previewTitle={project.title}
               previewSubtitle={project.subtitles[0]?.text ?? ""}
+              initialTab={settingsTab}
+              accountNotice={accountNotice}
+              youtubeChannelId={profile.youtubeChannelId}
               onPreviewChange={applySettingsPreview}
               onClose={() =>
                 router.push(
@@ -1229,11 +1254,11 @@ export function NewsClipsApp({
                   reportScenes
                 )
                 setProject(draft)
-                advanceStep("script")
+                advanceStep("preview")
                 setNote(
                   mode === "claude"
-                    ? "Claude가 채널 방향과 근거를 반영한 시사 논평과 화면 구성을 만들었습니다."
-                    : "로컬 분석으로 논평 초안을 만들었습니다."
+                    ? "Claude가 제목·대본·자막과 화면 구성을 준비했습니다. 검수 후 영상을 만드세요."
+                    : "제목·대본·자막과 화면 구성을 준비했습니다. 검수 후 영상을 만드세요."
                 )
               }}
             />
@@ -1261,6 +1286,15 @@ export function NewsClipsApp({
       </ScrollShadow>
     </div>
   )
+}
+
+function newsSettingsTab(value: string | null) {
+  return value === "assets" ||
+    value === "text" ||
+    value === "audio" ||
+    value === "accounts"
+    ? value
+    : "search"
 }
 
 function automaticIssueScore(issue: RecommendedNewsIssue) {
@@ -1350,6 +1384,7 @@ async function renderAutomaticProject(
     titleCardDurationSeconds?: number
     outputDurationSeconds?: number
     subtitles?: NewsClipProject["subtitles"]
+    reportScenes?: NewsClipProject["reportScenes"]
   }
   if (!response.ok) {
     throw new Error(
@@ -1367,6 +1402,7 @@ async function renderAutomaticProject(
     outputDurationSeconds:
       body.outputDurationSeconds ?? project.outputDurationSeconds,
     subtitles: body.subtitles ?? project.subtitles,
+    reportScenes: body.reportScenes ?? project.reportScenes,
   }
   return endpoint.endsWith("preview")
     ? {
@@ -1408,6 +1444,33 @@ function balanceProjectSubtitles(
     previewUrl: "",
     renderSettingsKey: "",
     thumbnailUrl: "",
+    youtubeVideoId: "",
+    youtubeUploadUrl: "",
+  }
+}
+
+async function uploadAutomaticNewsClip(
+  project: NewsClipProject,
+  signal: AbortSignal
+) {
+  const response = await fetch("/api/news-clips/upload/youtube", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project }),
+    signal,
+  })
+  const body = (await response.json()) as {
+    message?: string
+    videoId?: string
+    url?: string
+  }
+  if (!response.ok || !body.videoId || !body.url) {
+    throw new Error(body.message || "YouTube에 업로드하지 못했습니다.")
+  }
+  return {
+    ...project,
+    youtubeVideoId: body.videoId,
+    youtubeUploadUrl: body.url,
   }
 }
 
@@ -1673,6 +1736,12 @@ function storageKey(profileId: string) {
   return `shorts-factory.news-clips.${profileId}`
 }
 
+function refreshMediaUrl(url: string) {
+  if (!url) return ""
+  const separator = url.includes("?") ? "&" : "?"
+  return `${url}${separator}client=${Date.now().toString(36)}`
+}
+
 function hasSavableProgress(project: NewsClipProject) {
   return Boolean(
     project.selectedIssue ||
@@ -1689,7 +1758,22 @@ function normalizeSavedNewsProject(
   profileId: string
 ): NewsClipProject {
   const fallback = freshNewsClipProject(profileId)
-  const reportScenes = Array.isArray(saved.reportScenes)
+  const savedReportScript =
+    typeof saved.reportScript === "string" ? saved.reportScript : ""
+  const legacyEndCtaCues = Array.isArray(saved.subtitles)
+    ? saved.subtitles.filter((cue) => cue.id.startsWith("end-cta"))
+    : []
+  const legacyEndCtaText = legacyEndCtaCues
+    .map((cue) => cue.text.trim())
+    .filter(Boolean)
+    .join("\n")
+  const reportScript = ensureReportEndCta(
+    savedReportScript,
+    saved.title,
+    saved.selectedIssue?.keywords,
+    legacyEndCtaText
+  )
+  const savedReportScenes = Array.isArray(saved.reportScenes)
     ? saved.reportScenes.map((scene): NewsReportScene => ({
         ...scene,
         visual: scene.visual === "quote" ? "quote" : "source",
@@ -1699,6 +1783,30 @@ function normalizeSavedNewsProject(
             : saved.source?.id || undefined,
       }))
     : []
+  const selectedCandidate = saved.candidates?.find(
+    (candidate) => candidate.id === saved.selectedCandidateId
+  )
+  const reportScenes =
+    reportScript !== savedReportScript && selectedCandidate
+      ? buildReportScenes(
+          reportScript,
+          saved.transcript ?? [],
+          selectedCandidate.sourceStart,
+          selectedCandidate.sourceEnd,
+          savedReportScenes,
+          saved.source?.id ?? ""
+        )
+      : savedReportScenes
+  const subtitles =
+    reportScript !== savedReportScript && legacyEndCtaCues.length
+      ? migrateLegacyEndCtaCues(saved.subtitles, reportScenes)
+      : reportScript !== savedReportScript && reportScenes.length
+        ? reportSubtitles(
+            reportScenes,
+            undefined,
+            reportCaptionPhrases(reportScript)
+          )
+        : saved.subtitles
 
   return {
     ...fallback,
@@ -1707,13 +1815,13 @@ function normalizeSavedNewsProject(
     supportingSources: Array.isArray(saved.supportingSources)
       ? saved.supportingSources
       : [],
-    reportScript:
-      typeof saved.reportScript === "string" ? saved.reportScript : "",
+    reportScript,
     supplementalContext:
       typeof saved.supplementalContext === "string"
         ? saved.supplementalContext.slice(0, 5000)
         : "",
     reportScenes,
+    subtitles: Array.isArray(subtitles) ? subtitles : [],
     detectedSilences: Array.isArray(saved.detectedSilences)
       ? saved.detectedSilences
       : [],
@@ -1738,14 +1846,33 @@ function normalizeSavedNewsProject(
   }
 }
 
+function migrateLegacyEndCtaCues(
+  subtitles: NewsClipProject["subtitles"],
+  reportScenes: NewsReportScene[]
+) {
+  const legacyCues = subtitles.filter((cue) => cue.id.startsWith("end-cta"))
+  const ctaScenes = reportScenes.slice(-legacyCues.length)
+  let ctaIndex = 0
+  return subtitles.map((cue) => {
+    if (!cue.id.startsWith("end-cta")) return cue
+    const scene = ctaScenes[Math.min(ctaIndex, ctaScenes.length - 1)]
+    ctaIndex += 1
+    return {
+      ...cue,
+      id: `report-cta-${ctaIndex}`,
+      sceneId: scene?.id,
+    }
+  })
+}
+
 function stepIndex(step: NewsClipStep) {
   return NEWS_CLIP_STEPS.findIndex((item) => item.id === step)
 }
 
 function previousReviewStep(step: NewsClipStep): NewsClipStep {
   if (step === "final") return "preview"
-  if (step === "preview") return "script"
-  if (step === "direction") return "script"
+  if (step === "preview" || step === "script" || step === "direction")
+    return "source"
   return "source"
 }
 
@@ -1757,15 +1884,12 @@ function nextReviewStep(step: NewsClipStep): NewsClipStep {
 }
 
 const VISIBLE_NEWS_CLIP_STEPS = NEWS_CLIP_STEPS.filter(
-  (item) => item.id !== "direction"
+  (item) => item.id !== "script" && item.id !== "direction"
 )
 
-function visibleWorkflowStep(
-  step: NewsClipStep,
-  project: NewsClipProject
-): NewsClipStep {
-  if (step !== "direction") return step
-  return project.previewUrl ? "preview" : "script"
+function visibleWorkflowStep(step: NewsClipStep): NewsClipStep {
+  if (step === "script" || step === "direction") return "preview"
+  return step
 }
 
 function sourceDescription(

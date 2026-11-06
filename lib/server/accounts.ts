@@ -11,6 +11,7 @@ export type AccountPlatform = (typeof ACCOUNT_PLATFORMS)[number]
 export type AccountStatus = {
   hasApp: boolean
   connected: boolean
+  accountId: string | null
   accountName: string | null
   avatarUrl: string | null
 }
@@ -23,6 +24,7 @@ type AppCredentials = {
 type StoredToken = {
   accessToken: string
   refreshToken?: string
+  accountId?: string
   accountName: string
   avatarUrl?: string
   connectedAt: string
@@ -128,7 +130,8 @@ export async function finishOauth(
   origin: string,
   platform: AccountPlatform,
   code: string,
-  profileId = "default"
+  profileId = "default",
+  expectedAccountId = ""
 ) {
   const app = await readApp(platform, profileId)
   if (!app) {
@@ -142,9 +145,17 @@ export async function finishOauth(
         ? await exchangeFacebook(app, callback, code)
         : await exchangeTikTok(app, callback, code)
   const identity = await accountIdentityFor(platform, token.accessToken)
+  if (
+    platform === "youtube" &&
+    expectedAccountId &&
+    identity.id !== expectedAccountId
+  ) {
+    throw new Error("youtube-channel-mismatch")
+  }
   const stored: StoredToken = {
     accessToken: token.accessToken,
     refreshToken: token.refreshToken,
+    accountId: identity.id,
     accountName: identity.name,
     avatarUrl: identity.avatarUrl,
     connectedAt: new Date().toISOString(),
@@ -222,6 +233,7 @@ async function statusFor(
   return {
     hasApp: app !== null,
     connected: token !== null,
+    accountId: token?.accountId ?? null,
     accountName: token?.accountName ?? null,
     avatarUrl: token?.avatarUrl ?? null,
   }
@@ -338,14 +350,17 @@ async function accountIdentityFor(
       )
       const json = (await response.json()) as {
         items?: {
+          id?: string
           snippet?: {
             title?: string
             thumbnails?: Record<string, { url?: string }>
           }
         }[]
       }
-      const snippet = json.items?.[0]?.snippet
+      const channel = json.items?.[0]
+      const snippet = channel?.snippet
       return {
+        id: channel?.id || "",
         name: snippet?.title || "유튜브 채널",
         avatarUrl:
           snippet?.thumbnails?.high?.url ||
@@ -363,6 +378,7 @@ async function accountIdentityFor(
       )
       const json = (await response.json()) as { name?: string }
       return {
+        id: "",
         name: json.name || "인스타그램 계정",
         avatarUrl: "",
       }
@@ -377,10 +393,11 @@ async function accountIdentityFor(
       data?: { user?: { display_name?: string } }
     }
     return {
+      id: "",
       name: json.data?.user?.display_name || "틱톡 계정",
       avatarUrl: "",
     }
   } catch {
-    return { name: "연결된 계정", avatarUrl: "" }
+    return { id: "", name: "연결된 계정", avatarUrl: "" }
   }
 }

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react"
 import { Button, Card, Tabs } from "@heroui/react"
 import { Play, Plus, Square, Trash2 } from "lucide-react"
 import { NewsFramePreview } from "@/components/news-clips/frame-preview"
+import { AccountsPanel } from "@/components/studio/accounts-panel"
 import {
   resolveTextBox,
   splitIntroTitleLines,
@@ -29,6 +30,9 @@ export function NewsClipSettingsPanel({
   onClose,
   onPreviewChange,
   onSaved,
+  initialTab = "search",
+  accountNotice = null,
+  youtubeChannelId = "",
 }: {
   profileId: string
   previewTitle: string
@@ -36,6 +40,9 @@ export function NewsClipSettingsPanel({
   onClose: () => void
   onPreviewChange: (settings: NewsClipSettings) => void
   onSaved: (settings: NewsClipSettings) => void
+  initialTab?: "search" | "assets" | "text" | "audio" | "accounts"
+  accountNotice?: { kind: "connected" | "error"; platform: string } | null
+  youtubeChannelId?: string
 }) {
   const [settings, setSettings] = useState<NewsClipSettings>({
     ...defaultNewsClipSettings,
@@ -317,7 +324,7 @@ export function NewsClipSettingsPanel({
         </Button>
       </header>
 
-      <Tabs defaultSelectedKey="search">
+      <Tabs defaultSelectedKey={initialTab}>
         <Tabs.ListContainer>
           <Tabs.List aria-label="뉴스 리포트 설정 구분">
             <Tabs.Tab id="search">
@@ -334,6 +341,10 @@ export function NewsClipSettingsPanel({
             </Tabs.Tab>
             <Tabs.Tab id="audio">
               오디오·자막
+              <Tabs.Indicator />
+            </Tabs.Tab>
+            <Tabs.Tab id="accounts">
+              채널 연결
               <Tabs.Indicator />
             </Tabs.Tab>
           </Tabs.List>
@@ -524,7 +535,7 @@ export function NewsClipSettingsPanel({
               <div className="rounded-xl border border-separator bg-default p-4 md:col-span-2">
                 <p className="text-sm font-medium">자료 영상 영역 · 3:2 고정</p>
                 <p className="mt-2 text-sm text-muted">
-                  Figma 900×600 → 최종 영상 1080×720
+                  기준 캔버스 1080×720 · 720p 출력 720×480
                 </p>
               </div>
             </Card.Content>
@@ -878,17 +889,6 @@ export function NewsClipSettingsPanel({
                 }
               />
               <RangeField
-                label="발화 중 BGM 유지량"
-                value={settings.speechDucking}
-                min={0.1}
-                max={0.8}
-                step={0.01}
-                formatValue={ratioPercent}
-                onChange={(speechDucking) =>
-                  setSettings({ ...settings, speechDucking })
-                }
-              />
-              <RangeField
                 label="아나운서 TTS 속도"
                 value={settings.titleVoiceRate}
                 min={-15}
@@ -938,6 +938,30 @@ export function NewsClipSettingsPanel({
               </label>
             </Card.Content>
           </Card>
+        </Tabs.Panel>
+
+        <Tabs.Panel id="accounts" className="flex flex-col gap-6 pt-2">
+          <AccountsPanel
+            notice={accountNotice}
+            profileId={profileId}
+            returnTo="news"
+            expectedYoutubeChannelId={youtubeChannelId}
+          />
+          <label className="flex items-center justify-between gap-4 rounded-xl border border-separator p-4 text-sm">
+            <span className="font-medium">
+              최종본 완성 후 YouTube 비공개 자동 업로드
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.youtubeAutoUpload}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  youtubeAutoUpload: event.currentTarget.checked,
+                })
+              }
+            />
+          </label>
         </Tabs.Panel>
       </Tabs>
 

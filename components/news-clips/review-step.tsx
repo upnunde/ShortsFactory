@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 
 import { Button, Card, Modal } from "@heroui/react"
 import { Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react"
@@ -9,13 +9,12 @@ import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label
 import { introStillTime, selectIntroStillRange } from "@/lib/news-clips/intro"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import {
-  bodyDurationWithEndCta,
+  NEWS_TOTAL_GAP_SECONDS,
   buildReportScenes,
-  contextualEndCtaText,
+  ensureReportEndCta,
   estimateReportScenesDuration,
   reportCaptionPhrases,
   reportSubtitles,
-  withEndCta,
 } from "@/lib/news-clips/report"
 import {
   fitTitleToLineLayouts,
@@ -30,11 +29,41 @@ import type {
   NewsClipProject,
   NewsClipSettings,
   NewsClipStep,
+  NewsReportScene,
 } from "@/lib/news-clips/types"
 import { NEWS_TTS_VOICES, newsTtsVoiceById } from "@/lib/news-clips/voices"
 
 const field =
   "w-full rounded-xl border border-separator bg-background px-3 py-2.5 text-sm outline-none focus:border-foreground/40"
+const cardTitleClass = "text-base font-semibold leading-6"
+const cardDescriptionClass = "mt-1 text-sm leading-5 text-muted"
+const sectionHeaderClass = "flex min-h-10 items-center justify-between gap-4"
+const sectionTitleClass = "text-base font-semibold leading-6"
+
+type ReviewMode = Exclude<NewsClipStep, "issue" | "source">
+type EditorTab = "script" | "captions" | "intro" | "scenes" | "media"
+
+const EDITOR_TABS: Record<
+  ReviewMode,
+  Array<{ id: EditorTab; label: string }>
+> = {
+  script: [
+    { id: "script", label: "제목·대본" },
+    { id: "captions", label: "자막" },
+  ],
+  direction: [
+    { id: "scenes", label: "화면 구성" },
+    { id: "media", label: "음향 설정" },
+  ],
+  preview: [
+    { id: "script", label: "제목·대본" },
+    { id: "intro", label: "인트로" },
+    { id: "captions", label: "자막" },
+    { id: "scenes", label: "화면 구성" },
+    { id: "media", label: "음향 설정" },
+  ],
+  final: [{ id: "media", label: "결과물" }],
+}
 
 export function NewsClipReviewStep({
   mode,
@@ -52,7 +81,7 @@ export function NewsClipReviewStep({
   onFinalized,
   onNext,
 }: {
-  mode: Exclude<NewsClipStep, "issue" | "source">
+  mode: ReviewMode
   project: NewsClipProject
   settings: NewsClipSettings
   note: string
@@ -67,7 +96,20 @@ export function NewsClipReviewStep({
   onFinalized: (project: NewsClipProject) => boolean | Promise<boolean>
   onNext: () => void
 }) {
-  const [frameMode, setFrameMode] = useState<"title" | "body">("body")
+  const [frameMode, setFrameMode] = useState<"title" | "body">("title")
+  const [editorTabByMode, setEditorTabByMode] = useState<
+    Record<ReviewMode, EditorTab>
+  >({
+    script: "script",
+    direction: "scenes",
+    preview: "script",
+    final: "media",
+  })
+  const editorTabs = EDITOR_TABS[mode]
+  const savedEditorTab = editorTabByMode[mode]
+  const editorTab = editorTabs.some((tab) => tab.id === savedEditorTab)
+    ? savedEditorTab
+    : editorTabs[0].id
   const initialTitleLines = fittedTitleLines(
     project.title,
     settings.titleCardText,
@@ -84,13 +126,16 @@ export function NewsClipReviewStep({
   )
   const editingTitleRef = useRef(false)
   const editingReportScriptRef = useRef(false)
+  const reportScriptTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [selectedSubtitleId, setSelectedSubtitleId] = useState("")
   const [voiceBusy, setVoiceBusy] = useState(false)
   const [voicePlaying, setVoicePlaying] = useState(false)
+  const [youtubeBusy, setYoutubeBusy] = useState(false)
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null)
   const sourceVideoRef = useRef<HTMLVideoElement | null>(null)
   const scriptFrameVideoRef = useRef<HTMLVideoElement | null>(null)
   const directionVideoRef = useRef<HTMLVideoElement | null>(null)
+  const renderedVideoRef = useRef<HTMLVideoElement | null>(null)
   const [selectedDirectionSceneId, setSelectedDirectionSceneId] = useState(
     project.reportScenes[0]?.id ?? ""
   )
@@ -107,6 +152,10 @@ export function NewsClipReviewStep({
   const [sourceDuration, setSourceDuration] = useState(() =>
     initialSourceDuration(project)
   )
+  const [directionSourceMetadata, setDirectionSourceMetadata] = useState({
+    url: "",
+    duration: 0,
+  })
   const sourceVideoUrl = project.source?.id
     ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(project.source.id)}`
     : ""
@@ -179,6 +228,10 @@ export function NewsClipReviewStep({
     }
   }, [project.reportScript])
 
+  useLayoutEffect(() => {
+    resizeTextareaToContent(reportScriptTextareaRef.current)
+  }, [editorTab, reportScriptDraft])
+
   useEffect(() => {
     const video = sourceVideoRef.current
     if (video?.readyState) video.currentTime = introCursor
@@ -213,6 +266,24 @@ export function NewsClipReviewStep({
     directionSourceVideoUrl,
   ])
 
+  useEffect(() => {
+    const video = renderedVideoRef.current
+    if (mode !== "preview" || !video?.readyState) return
+    video.currentTime =
+      frameMode === "title"
+        ? 0
+        : Math.min(
+            Math.max(0, project.titleCardDurationSeconds),
+            Math.max(0, video.duration - 0.05)
+          )
+  }, [
+    frameMode,
+    mode,
+    project.outputUrl,
+    project.previewUrl,
+    project.titleCardDurationSeconds,
+  ])
+
   function selectDirectionScene(sceneId: string, sourceStart: number) {
     setSelectedDirectionSceneId(sceneId)
     if (directionVideoRef.current?.readyState) {
@@ -239,54 +310,56 @@ export function NewsClipReviewStep({
   }
 
   function finishReportScript(reportScript: string) {
+    const completeReportScript = ensureReportEndCta(
+      reportScript,
+      project.title,
+      project.selectedIssue?.keywords
+    )
     const candidate = project.candidates.find(
       (item) => item.id === project.selectedCandidateId
     )
     if (!candidate) {
-      onProject({ reportScript })
+      onProject({ reportScript: completeReportScript })
       return
     }
     const reportScenes = buildReportScenes(
-      reportScript,
+      completeReportScript,
       project.transcript,
       candidate.sourceStart,
       candidate.sourceEnd,
       project.reportScenes,
       project.source?.id ?? ""
     )
-    const bodyDuration = estimateReportScenesDuration(
+    const outputBodyDuration = estimateReportScenesDuration(
       reportScenes,
       settings.titleVoiceRate
     )
-    const outputBodyDuration = bodyDurationWithEndCta(bodyDuration)
     onProject({
-      reportScript,
+      reportScript: completeReportScript,
       reportScenes,
-      subtitles: withEndCta(
-        normalizeSubtitleCues(
-          reportSubtitles(
-            reportScenes,
-            undefined,
-            reportCaptionPhrases(reportScript)
-          ),
-          settings.bodySubtitleText
+      subtitles: normalizeSubtitleCues(
+        reportSubtitles(
+          reportScenes,
+          undefined,
+          reportCaptionPhrases(completeReportScript)
         ),
-        outputBodyDuration,
-        contextualEndCtaText(
-          project.title,
-          project.selectedIssue?.keywords,
-          reportScript
-        ),
-        bodyDuration
+        settings.bodySubtitleText
       ),
-      outputDurationSeconds: settings.titleCardSeconds + outputBodyDuration,
+      outputDurationSeconds:
+        settings.titleCardSeconds + outputBodyDuration + NEWS_TOTAL_GAP_SECONDS,
       titleCardDurationSeconds: 0,
     })
   }
 
   function finishTitleEdit(title: string) {
+    const bodyDuration = estimateReportScenesDuration(
+      project.reportScenes,
+      settings.titleVoiceRate
+    )
     onProject({
       title,
+      outputDurationSeconds:
+        settings.titleCardSeconds + bodyDuration + NEWS_TOTAL_GAP_SECONDS,
       titleCardDurationSeconds: 0,
       metadata: {
         ...project.metadata,
@@ -302,14 +375,15 @@ export function NewsClipReviewStep({
     const reportScenes = project.reportScenes.map((scene) =>
       scene.id === sceneId ? { ...scene, ...patch } : scene
     )
-    const bodyDuration = estimateReportScenesDuration(
+    const outputBodyDuration = estimateReportScenesDuration(
       reportScenes,
       settings.titleVoiceRate
     )
     onProject({
       reportScenes,
-      subtitles: retimeSubtitleCues(project.subtitles, bodyDuration),
-      outputDurationSeconds: settings.titleCardSeconds + bodyDuration,
+      subtitles: retimeSubtitleCues(project.subtitles, outputBodyDuration),
+      outputDurationSeconds:
+        settings.titleCardSeconds + outputBodyDuration + NEWS_TOTAL_GAP_SECONDS,
     })
   }
 
@@ -366,7 +440,9 @@ export function NewsClipReviewStep({
         start: 0,
         end: Math.max(
           0.5,
-          project.outputDurationSeconds - settings.titleCardSeconds
+          project.outputDurationSeconds -
+            settings.titleCardSeconds -
+            NEWS_TOTAL_GAP_SECONDS
         ),
         text: "",
         emphasis: [],
@@ -479,14 +555,15 @@ export function NewsClipReviewStep({
     onSettings({ typecastVoiceId })
   }
 
-  async function render() {
+  async function render(force = false) {
     onBusy("render")
     onNote("")
     try {
       const response = await fetch("/api/news-clips/render", {
         method: "POST",
+        cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project, settings }),
+        body: JSON.stringify({ project, settings, force }),
       })
       const body = (await response.json()) as {
         message?: string
@@ -496,6 +573,7 @@ export function NewsClipReviewStep({
         titleCardDurationSeconds?: number
         outputDurationSeconds?: number
         subtitles?: NewsClipProject["subtitles"]
+        reportScenes?: NewsClipProject["reportScenes"]
       }
       if (!response.ok) {
         onNote(body.message || "최종 렌더링을 시작하지 못했습니다.")
@@ -511,15 +589,31 @@ export function NewsClipReviewStep({
         outputDurationSeconds:
           body.outputDurationSeconds ?? project.outputDurationSeconds,
         subtitles: body.subtitles ?? project.subtitles,
+        reportScenes: body.reportScenes ?? project.reportScenes,
+        youtubeVideoId: "",
+        youtubeUploadUrl: "",
       }
-      const finalizedProject = { ...project, ...patch }
+      let finalizedProject = { ...project, ...patch }
+      if (settings.youtubeAutoUpload) {
+        const uploaded = await uploadYoutube(finalizedProject)
+        if (uploaded) {
+          const uploadPatch = {
+            youtubeVideoId: uploaded.videoId,
+            youtubeUploadUrl: uploaded.url,
+          }
+          finalizedProject = { ...finalizedProject, ...uploadPatch }
+          Object.assign(patch, uploadPatch)
+        }
+      }
       onProject(patch)
       const saved = await Promise.resolve(onFinalized(finalizedProject)).catch(
         () => false
       )
       onNote(
         saved
-          ? body.message || "최종 결과물을 만들었습니다."
+          ? finalizedProject.youtubeUploadUrl
+            ? "최종본을 만들고 YouTube에 비공개로 업로드했습니다."
+            : body.message || "최종 결과물을 만들었습니다."
           : "영상은 완성했지만 저장하지 못했습니다."
       )
       return true
@@ -529,6 +623,45 @@ export function NewsClipReviewStep({
     } finally {
       onBusy("")
     }
+  }
+
+  async function uploadYoutube(target = project) {
+    setYoutubeBusy(true)
+    try {
+      const response = await fetch("/api/news-clips/upload/youtube", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: target }),
+      })
+      const body = (await response.json()) as {
+        message?: string
+        videoId?: string
+        url?: string
+      }
+      if (!response.ok || !body.videoId || !body.url) {
+        onNote(body.message || "YouTube에 업로드하지 못했습니다.")
+        return null
+      }
+      return { videoId: body.videoId, url: body.url }
+    } catch {
+      onNote("YouTube에 업로드하지 못했습니다.")
+      return null
+    } finally {
+      setYoutubeBusy(false)
+    }
+  }
+
+  async function uploadFinalToYoutube() {
+    const uploaded = await uploadYoutube(project)
+    if (!uploaded) return
+    const patch = {
+      youtubeVideoId: uploaded.videoId,
+      youtubeUploadUrl: uploaded.url,
+    }
+    const uploadedProject = { ...project, ...patch }
+    onProject(patch)
+    await Promise.resolve(onFinalized(uploadedProject)).catch(() => false)
+    onNote("YouTube에 비공개로 업로드했습니다.")
   }
 
   const heading = REVIEW_STEP_COPY[mode]
@@ -578,6 +711,40 @@ export function NewsClipReviewStep({
               >
                 자막 프레임
               </Button>
+            </div>
+          ) : null}
+          {mode === "preview" ? (
+            <div
+              role="tablist"
+              aria-label="미리보기 화면"
+              className="flex w-full gap-1 rounded-xl border border-separator bg-default p-1"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={frameMode === "title"}
+                className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                  frameMode === "title"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground"
+                }`}
+                onClick={() => setFrameMode("title")}
+              >
+                인트로
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={frameMode === "body"}
+                className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                  frameMode === "body"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted hover:text-foreground"
+                }`}
+                onClick={() => setFrameMode("body")}
+              >
+                본문
+              </button>
             </div>
           ) : null}
           {mode === "script" ? (
@@ -642,6 +809,12 @@ export function NewsClipReviewStep({
               preload="metadata"
               className="aspect-video w-full rounded-2xl bg-black shadow-xl"
               onLoadedMetadata={(event) => {
+                if (Number.isFinite(event.currentTarget.duration)) {
+                  setDirectionSourceMetadata({
+                    url: directionSourceVideoUrl,
+                    duration: event.currentTarget.duration,
+                  })
+                }
                 event.currentTarget.currentTime = Math.max(
                   0,
                   selectedDirectionScene?.sourceStart ?? 0
@@ -650,15 +823,26 @@ export function NewsClipReviewStep({
             />
           ) : renderedVideoUrl ? (
             <video
-              key={renderedVideoUrl}
+              ref={renderedVideoRef}
+              key={`${renderedVideoUrl}-${project.previewSignature}-${project.renderSignature}`}
               src={renderedVideoUrl}
               controls
               playsInline
               className="aspect-[9/16] w-full rounded-2xl bg-black shadow-xl"
+              onLoadedMetadata={(event) => {
+                if (mode !== "preview") return
+                event.currentTarget.currentTime =
+                  frameMode === "title"
+                    ? 0
+                    : Math.min(
+                        Math.max(0, project.titleCardDurationSeconds),
+                        Math.max(0, event.currentTarget.duration - 0.05)
+                      )
+              }}
             />
           ) : (
             <NewsFramePreview
-              mode="body"
+              mode={frameMode}
               title={titleDraft}
               subtitle={
                 selectedSubtitle?.text ||
@@ -668,24 +852,6 @@ export function NewsClipReviewStep({
               zoom={project.crop.zoom}
             />
           )}
-          {mode === "preview" ? (
-            <div className="grid gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                isDisabled={
-                  busy !== "" || !titleValid || titleDirty || reportScriptDirty
-                }
-                onPress={() => void onPreview(true)}
-              >
-                <LoadingButtonLabel
-                  loading={busy === "preview"}
-                  label="영상 다시 만들기"
-                  loadingLabel="만드는 중"
-                />
-              </Button>
-            </div>
-          ) : null}
           {mode === "preview" && !project.previewSignature ? (
             <p className="text-xs text-warning">
               수정 내용은 초안을 갱신한 뒤 영상에 반영됩니다.
@@ -700,173 +866,93 @@ export function NewsClipReviewStep({
                   : "bg-danger/10 text-danger"
             }`}
           >
-            예상 길이 {project.outputDurationSeconds.toFixed(1)}초 · 기준{" "}
-            {minimum}~{maximum}초
-            {project.titleCardDurationSeconds > 0
-              ? ` · 제목 TTS ${project.titleCardDurationSeconds.toFixed(1)}초`
-              : ""}
-            {project.outputDurationSeconds >= settings.idealMinSeconds &&
-            project.outputDurationSeconds <= settings.idealMaxSeconds
-              ? " · 목표 범위"
-              : durationRecommended
-                ? " · 권장 범위"
-                : durationRenderable
-                  ? " · 권장 범위 밖 · 제작 가능"
-                  : " · 59초 미만으로 조정 필요"}
+            예상 길이 {project.outputDurationSeconds.toFixed(1)}초
           </div>
         </div>
 
         <div className="flex min-w-0 flex-col gap-5">
-          {mode === "direction" ? (
-            <Card>
-              <Card.Header>
-                <Card.Title>대본 공통 TTS</Card.Title>
-              </Card.Header>
-              <Card.Content className="flex flex-col gap-4">
-                <label className="flex max-w-md flex-col gap-2">
-                  <span className="text-sm font-medium">TTS 제공자</span>
-                  <select
-                    aria-label="대본 공통 TTS 제공자"
-                    value={settings.ttsProvider}
-                    className={`${field} h-[42px]`}
-                    onChange={(event) =>
-                      selectProvider(event.currentTarget.value)
-                    }
-                  >
-                    <option value="auto">자동 · Typecast 우선</option>
-                    <option value="free">무료 TTS</option>
-                    <option value="typecast">Typecast</option>
-                  </select>
-                </label>
-                <div
-                  className={`grid items-end gap-3 ${
-                    settings.ttsProvider === "auto"
-                      ? "md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_11rem]"
-                      : "md:grid-cols-[minmax(0,1fr)_11rem]"
+          {editorTabs.length > 1 ? (
+            <div
+              role="tablist"
+              aria-label="편집 주제"
+              className="sticky top-6 z-20 flex w-full gap-1 overflow-x-auto rounded-xl border border-separator bg-default p-1 shadow-sm"
+            >
+              {editorTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={editorTab === tab.id}
+                  className={`shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition ${
+                    editorTab === tab.id
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted hover:text-foreground"
                   }`}
+                  onClick={() => {
+                    setEditorTabByMode((current) => ({
+                      ...current,
+                      [mode]: tab.id,
+                    }))
+                    if (tab.id === "intro") setFrameMode("title")
+                    if (tab.id === "captions") setFrameMode("body")
+                  }}
                 >
-                  {settings.ttsProvider !== "free" ? (
-                    <label className="flex min-w-0 flex-col gap-2">
-                      <span className="text-sm font-medium">
-                        Typecast 목소리
-                      </span>
-                      <select
-                        aria-label="등록된 Typecast 목소리"
-                        value={settings.typecastVoiceId}
-                        className={`${field} h-[42px]`}
-                        onChange={(event) =>
-                          selectTypecastVoice(event.currentTarget.value)
-                        }
-                      >
-                        {settings.typecastVoices.map((voice) => (
-                          <option key={voice.id} value={voice.voiceId}>
-                            {voice.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  {settings.ttsProvider !== "typecast" ? (
-                    <label className="flex min-w-0 flex-col gap-2">
-                      <span className="text-sm font-medium">
-                        {settings.ttsProvider === "auto"
-                          ? "무료 대체 음성"
-                          : "무료 TTS 목소리"}
-                      </span>
-                      <select
-                        aria-label="무료 TTS 목소리"
-                        value={newsTtsVoiceById(settings.titleVoice).id}
-                        className={`${field} h-[42px]`}
-                        onChange={(event) =>
-                          selectFreeVoice(event.currentTarget.value)
-                        }
-                      >
-                        {NEWS_TTS_VOICES.map((voice) => (
-                          <option key={voice.id} value={voice.id}>
-                            {voice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    className="h-[42px] w-full justify-center"
-                    isDisabled={voiceBusy}
-                    onPress={() => {
-                      if (voicePlaying) {
-                        stopVoicePreview()
-                        onNote("TTS 미리듣기를 멈췄습니다.")
-                      } else {
-                        void previewVoice()
-                      }
-                    }}
-                  >
-                    {voicePlaying ? (
-                      <Square className="size-4 fill-current" />
-                    ) : (
-                      <Play className="size-4" />
-                    )}
-                    {voiceBusy
-                      ? "음성 생성 중"
-                      : voicePlaying
-                        ? "미리듣기 멈추기"
-                        : "음성 미리듣기"}
-                  </Button>
-                </div>
-              </Card.Content>
-            </Card>
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           ) : null}
 
-          {mode === "script" || mode === "preview" ? (
+          {(mode === "script" || mode === "preview") &&
+          editorTab === "script" ? (
             <Card>
-              <Card.Header className="flex-row items-start justify-between gap-4">
+              <Card.Header className="min-h-16 flex-row items-end justify-between gap-4 border-b border-separator pb-4">
                 <div>
-                  <Card.Title>제목·시사 논평 대본</Card.Title>
-                  <Card.Description>
+                  <Card.Title className={cardTitleClass}>
+                    제목·시사 논평 대본
+                  </Card.Title>
+                  <Card.Description className={cardDescriptionClass}>
                     논평은 TTS로 읽고, 직접 발언은 원본 음성을 씁니다.
                   </Card.Description>
                 </div>
-                {mode === "script" ? (
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      isDisabled={busy !== ""}
-                      onPress={() => void onReselect("all")}
-                    >
-                      <LoadingButtonLabel
-                        loading={busy === "reselect"}
-                        label="대본 재작성"
-                        loadingLabel="재작성 중"
-                      />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={
-                        project.supplementalContext ? "secondary" : "outline"
-                      }
-                      isDisabled={busy !== ""}
-                      onPress={() => {
-                        setSupplementDraft(project.supplementalContext)
-                        setSupplementOpen(true)
-                      }}
-                    >
-                      내용 첨부
-                    </Button>
-                  </div>
-                ) : null}
+                <div className="ml-auto flex shrink-0 items-center justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    isDisabled={busy !== ""}
+                    onPress={() => void onReselect("all")}
+                  >
+                    <LoadingButtonLabel
+                      loading={busy === "reselect"}
+                      label="전체 재작성"
+                      loadingLabel="재작성 중"
+                    />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={
+                      project.supplementalContext ? "secondary" : "outline"
+                    }
+                    isDisabled={busy !== ""}
+                    onPress={() => {
+                      setSupplementDraft(project.supplementalContext)
+                      setSupplementOpen(true)
+                    }}
+                  >
+                    내용 첨부
+                  </Button>
+                </div>
               </Card.Header>
-              <Card.Content className="flex flex-col gap-4">
-                <div className="flex flex-col gap-2">
-                  <span className="flex min-h-8 items-center justify-between gap-3 text-sm">
+              <Card.Content className="flex flex-col gap-6">
+                <div className="flex flex-col gap-3">
+                  <div className={sectionHeaderClass}>
                     <span className="flex items-center gap-2">
-                      <span>인트로 제목</span>
+                      <span className={sectionTitleClass}>인트로 제목</span>
                       {titleDirty ? (
                         <span className="text-xs text-warning">저장 전</span>
                       ) : null}
                     </span>
-                    <span className="flex items-center gap-2">
+                    <span className="ml-auto flex items-center justify-end gap-2">
                       <Button
                         size="sm"
                         isDisabled={busy !== "" || !titleDirty || !titleValid}
@@ -874,22 +960,20 @@ export function NewsClipReviewStep({
                       >
                         저장
                       </Button>
-                      {mode === "script" ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          isDisabled={busy !== ""}
-                          onPress={() => void onReselect("title")}
-                        >
-                          <LoadingButtonLabel
-                            loading={busy === "rewrite-title"}
-                            label="다시 작성"
-                            loadingLabel="작성 중"
-                          />
-                        </Button>
-                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        isDisabled={busy !== ""}
+                        onPress={() => void onReselect("title")}
+                      >
+                        <LoadingButtonLabel
+                          loading={busy === "rewrite-title"}
+                          label="다시 작성"
+                          loadingLabel="작성 중"
+                        />
+                      </Button>
                     </span>
-                  </span>
+                  </div>
                   <div className="grid gap-3 md:grid-cols-2">
                     <label className="flex min-w-0 flex-col gap-2">
                       <span className="text-xs font-medium text-muted">
@@ -947,17 +1031,20 @@ export function NewsClipReviewStep({
                     </label>
                   </div>
                 </div>
-                <div className="flex flex-col gap-2">
-                  <span className="flex min-h-8 items-center justify-between gap-3 text-sm">
+                <div className="flex flex-col gap-3 border-t border-separator pt-5">
+                  <div className={sectionHeaderClass}>
                     <span className="flex items-center gap-2">
-                      <label htmlFor="news-clip-report-script">
+                      <label
+                        htmlFor="news-clip-report-script"
+                        className={sectionTitleClass}
+                      >
                         시사 논평 대본
                       </label>
                       {reportScriptDirty ? (
                         <span className="text-xs text-warning">저장 전</span>
                       ) : null}
                     </span>
-                    <span className="flex items-center gap-2">
+                    <span className="ml-auto flex items-center justify-end gap-2">
                       <Button
                         size="sm"
                         isDisabled={busy !== "" || !reportScriptDirty}
@@ -965,62 +1052,65 @@ export function NewsClipReviewStep({
                       >
                         저장
                       </Button>
-                      {mode === "script" ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          isDisabled={busy !== ""}
-                          onPress={() => void onReselect("script")}
-                        >
-                          <LoadingButtonLabel
-                            loading={busy === "rewrite-script"}
-                            label="다시 작성"
-                            loadingLabel="작성 중"
-                          />
-                        </Button>
-                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        isDisabled={busy !== ""}
+                        onPress={() => void onReselect("script")}
+                      >
+                        <LoadingButtonLabel
+                          loading={busy === "rewrite-script"}
+                          label="다시 작성"
+                          loadingLabel="작성 중"
+                        />
+                      </Button>
                     </span>
-                  </span>
+                  </div>
                   <textarea
+                    ref={reportScriptTextareaRef}
                     id="news-clip-report-script"
                     aria-label="시사 논평 대본"
-                    rows={9}
+                    rows={1}
                     value={reportScriptDraft}
                     onFocus={() => {
                       editingReportScriptRef.current = true
                     }}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      resizeTextareaToContent(event.currentTarget)
                       setReportScriptDraft(event.currentTarget.value)
-                    }
+                    }}
                     onBlur={() => {
                       editingReportScriptRef.current = false
                     }}
-                    className={field}
+                    className={`${field} [field-sizing:content] min-h-24 resize-none overflow-hidden`}
                   />
                 </div>
               </Card.Content>
             </Card>
           ) : null}
 
-          {mode === "preview" && introVideoUrl ? (
+          {mode === "preview" && editorTab === "intro" && introVideoUrl ? (
             <Card>
-              <Card.Header className="flex-row items-center justify-between gap-4">
+              <Card.Header className="min-h-16 flex-row items-start justify-between gap-4">
                 <div>
-                  <Card.Title>인트로 이미지</Card.Title>
-                  <Card.Description>
+                  <Card.Title className={cardTitleClass}>
+                    인트로 이미지
+                  </Card.Title>
+                  <Card.Description className={cardDescriptionClass}>
                     인트로에 쓸 장면을 고릅니다.
                   </Card.Description>
                 </div>
                 <Button
                   size="sm"
                   variant="outline"
+                  className="ml-auto shrink-0"
                   isDisabled={project.introStillTimeSeconds === null}
                   onPress={restoreAutomaticIntroStill}
                 >
                   <RotateCcw className="size-4" /> 자동 선택
                 </Button>
               </Card.Header>
-              <Card.Content className="flex flex-col gap-4">
+              <Card.Content className="flex flex-col gap-5">
                 <NewsFramePreview
                   mode="title"
                   title={titleDraft}
@@ -1146,19 +1236,21 @@ export function NewsClipReviewStep({
             </Card>
           ) : null}
 
-          {mode === "script" ? (
+          {mode === "script" && editorTab === "captions" ? (
             <Card>
               <Card.Header className="flex-row items-start justify-between gap-4">
                 <div>
-                  <Card.Title>문장별 자막 편집</Card.Title>
-                  <Card.Description>
+                  <Card.Title className={cardTitleClass}>
+                    문장별 자막 편집
+                  </Card.Title>
+                  <Card.Description className={cardDescriptionClass}>
                     문구·구간을 수정하며 최대 2줄로 맞춥니다.
                   </Card.Description>
                 </div>
                 <Button
                   size="sm"
                   variant="outline"
-                  className="shrink-0"
+                  className="ml-auto shrink-0"
                   onPress={() => addSubtitle()}
                 >
                   <Plus className="size-4" /> 자막 추가
@@ -1234,130 +1326,194 @@ export function NewsClipReviewStep({
             </Card>
           ) : null}
 
-          {mode === "direction" || mode === "preview" ? (
+          {(mode === "direction" || mode === "preview") &&
+          editorTab === "scenes" ? (
             <Card>
               <Card.Header>
-                <Card.Title>
+                <Card.Title className={cardTitleClass}>
                   문장별 화면 구성 · 핵심 {project.source ? 1 : 0}개 + 보조{" "}
                   {project.supportingSources.length}개
                 </Card.Title>
-                <Card.Description>
+                <Card.Description className={cardDescriptionClass}>
                   자료는 TTS 유지, 직접 발언만 원본 음성입니다.
                 </Card.Description>
               </Card.Header>
-              <Card.Content className="flex flex-col gap-3">
-                {project.reportScenes.length ? (
-                  project.reportScenes.map((scene, index) => (
-                    <div
-                      key={scene.id}
-                      className={`grid gap-3 rounded-xl border p-3 md:grid-cols-[76px_1fr] ${
-                        mode === "direction" &&
-                        scene.id === selectedDirectionScene?.id
-                          ? "border-foreground/35 bg-default"
-                          : "border-separator"
-                      }`}
-                    >
-                      {mode === "direction" ? (
-                        <Button
-                          size="sm"
-                          variant={
-                            scene.id === selectedDirectionScene?.id
-                              ? "secondary"
-                              : "ghost"
-                          }
-                          className="justify-start"
-                          onPress={() =>
-                            selectDirectionScene(scene.id, scene.sourceStart)
-                          }
-                        >
-                          문장 {index + 1}
-                        </Button>
-                      ) : (
-                        <span className="pt-2 text-xs text-muted">
-                          문장 {index + 1}
-                        </span>
-                      )}
-                      <div className="flex min-w-0 flex-col gap-3">
-                        <p className="text-sm leading-6">{scene.narration}</p>
-                        <div className="flex flex-col gap-3">
-                          <label className="flex w-full flex-col gap-2">
-                            <span className="text-sm">사용 자료</span>
-                            <select
-                              aria-label={`문장 ${index + 1} 사용 자료`}
-                              value={scene.sourceId || project.source?.id || ""}
-                              onChange={(event) =>
-                                updateReportScene(scene.id, {
-                                  sourceId: event.currentTarget.value,
-                                })
-                              }
-                              className={field}
-                            >
-                              {project.source ? (
-                                <option value={project.source.id}>
-                                  핵심 · {project.source.title}
+              <Card.Content className="flex flex-col gap-6">
+                <section className="flex flex-col gap-4 border-b border-separator pb-5">
+                  <h4 className={sectionTitleClass}>전체 화면 설정</h4>
+                  <div className="grid gap-5 md:grid-cols-3">
+                    <RangeInput
+                      label="화면 확대"
+                      value={project.crop.zoom}
+                      min={1.02}
+                      max={1.8}
+                      step={0.01}
+                      formatValue={ratioPercent}
+                      onChange={(zoom) =>
+                        onProject({ crop: { ...project.crop, zoom } })
+                      }
+                    />
+                    <RangeInput
+                      label="가로 크롭 중심"
+                      value={project.crop.x}
+                      min={0}
+                      max={100}
+                      step={1}
+                      formatValue={screenPercent}
+                      onChange={(x) =>
+                        onProject({ crop: { ...project.crop, x } })
+                      }
+                    />
+                    <RangeInput
+                      label="세로 크롭 중심"
+                      value={project.crop.y}
+                      min={0}
+                      max={100}
+                      step={1}
+                      formatValue={screenPercent}
+                      onChange={(y) =>
+                        onProject({ crop: { ...project.crop, y } })
+                      }
+                    />
+                  </div>
+                </section>
+                <div className="flex flex-col gap-4">
+                  {project.reportScenes.length ? (
+                    project.reportScenes.map((scene, index) => (
+                      <div
+                        key={scene.id}
+                        className={`grid gap-3 rounded-xl border p-3 md:grid-cols-[76px_1fr] ${
+                          mode === "direction" &&
+                          scene.id === selectedDirectionScene?.id
+                            ? "border-foreground/35 bg-default"
+                            : "border-separator"
+                        }`}
+                      >
+                        {mode === "direction" ? (
+                          <Button
+                            size="sm"
+                            variant={
+                              scene.id === selectedDirectionScene?.id
+                                ? "secondary"
+                                : "ghost"
+                            }
+                            className="justify-start"
+                            onPress={() =>
+                              selectDirectionScene(scene.id, scene.sourceStart)
+                            }
+                          >
+                            문장 {index + 1}
+                          </Button>
+                        ) : (
+                          <span className="pt-2 text-xs text-muted">
+                            문장 {index + 1}
+                          </span>
+                        )}
+                        <div className="flex min-w-0 flex-col gap-3">
+                          <p className="text-sm leading-6">{scene.narration}</p>
+                          <div className="flex flex-col gap-3">
+                            <label className="flex w-full flex-col gap-2">
+                              <span className="text-sm">사용 자료</span>
+                              <select
+                                aria-label={`문장 ${index + 1} 사용 자료`}
+                                value={
+                                  scene.sourceId || project.source?.id || ""
+                                }
+                                onChange={(event) =>
+                                  updateReportScene(scene.id, {
+                                    sourceId: event.currentTarget.value,
+                                  })
+                                }
+                                className={field}
+                              >
+                                {project.source ? (
+                                  <option value={project.source.id}>
+                                    핵심 · {project.source.title}
+                                  </option>
+                                ) : null}
+                                {project.supportingSources.map((source) => (
+                                  <option key={source.id} value={source.id}>
+                                    보조 · {source.title}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="flex w-full flex-col gap-2">
+                              <span className="text-sm">화면 종류</span>
+                              <select
+                                aria-label={`문장 ${index + 1} 화면 종류`}
+                                value={scene.visual}
+                                onChange={(event) =>
+                                  updateReportScene(scene.id, {
+                                    visual: event.currentTarget.value as
+                                      "source" | "quote",
+                                  })
+                                }
+                                className={field}
+                              >
+                                <option value="source">
+                                  자료 화면 · TTS 계속
                                 </option>
-                              ) : null}
-                              {project.supportingSources.map((source) => (
-                                <option key={source.id} value={source.id}>
-                                  보조 · {source.title}
+                                <option value="quote">
+                                  직접 발언 · 원본 음성
                                 </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label className="flex w-full flex-col gap-2">
-                            <span className="text-sm">화면 종류</span>
-                            <select
-                              aria-label={`문장 ${index + 1} 화면 종류`}
-                              value={scene.visual}
-                              onChange={(event) =>
-                                updateReportScene(scene.id, {
-                                  visual: event.currentTarget.value as
-                                    "source" | "quote",
-                                })
+                              </select>
+                            </label>
+                            <SourceRangeTimeline
+                              scene={scene}
+                              sourceId={
+                                scene.sourceId || project.source?.id || ""
                               }
-                              className={field}
-                            >
-                              <option value="source">
-                                자료 화면 · TTS 계속
-                              </option>
-                              <option value="quote">
-                                직접 발언 · 원본 음성
-                              </option>
-                            </select>
-                          </label>
-                          <div className="grid gap-3 sm:grid-cols-2">
-                            <NumberInput
-                              label="자료 시작(초)"
-                              value={scene.sourceStart}
-                              onChange={(sourceStart) =>
+                              duration={sceneSourceDuration(
+                                project,
+                                scene,
+                                directionSourceMetadata.url ===
+                                  sourceVideoUrlFor(
+                                    scene.sourceId || project.source?.id
+                                  )
+                                  ? directionSourceMetadata.duration
+                                  : 0
+                              )}
+                              onStartChange={(sourceStart) => {
+                                selectDirectionScene(scene.id, sourceStart)
                                 updateReportScene(scene.id, { sourceStart })
-                              }
-                            />
-                            <NumberInput
-                              label="자료 종료(초)"
-                              value={scene.sourceEnd}
-                              onChange={(sourceEnd) =>
+                              }}
+                              onEndChange={(sourceEnd) => {
+                                selectDirectionScene(
+                                  scene.id,
+                                  Math.max(scene.sourceStart, sourceEnd - 0.1)
+                                )
                                 updateReportScene(scene.id, { sourceEnd })
-                              }
+                              }}
                             />
                           </div>
                         </div>
                       </div>
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-sm text-muted">
-                    대본을 입력하면 문장별 화면이 생깁니다.
-                  </p>
-                )}
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted">
+                      대본을 입력하면 문장별 화면이 생깁니다.
+                    </p>
+                  )}
+                </div>
               </Card.Content>
             </Card>
           ) : null}
 
-          {mode === "preview" ? (
+          {mode === "preview" && editorTab === "captions" ? (
             <Card>
-              <Card.Header>
-                <Card.Title>자막·강조 단어</Card.Title>
+              <Card.Header className="flex-row items-center justify-between gap-4">
+                <Card.Title className={cardTitleClass}>
+                  자막·강조 단어
+                </Card.Title>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto shrink-0"
+                  onPress={() => addSubtitle()}
+                >
+                  <Plus className="size-4" /> 자막 추가
+                </Button>
               </Card.Header>
               <Card.Content className="divide-y divide-separator">
                 {project.subtitles.map((caption, index) => (
@@ -1369,8 +1525,19 @@ export function NewsClipReviewStep({
                       <span className="text-sm font-medium">
                         자막 {index + 1}
                       </span>
-                      <span className="text-xs text-muted tabular-nums">
-                        {time(caption.start)} → {time(caption.end)}
+                      <span className="flex items-center gap-2">
+                        <span className="text-xs text-muted tabular-nums">
+                          {time(caption.start)} → {time(caption.end)}
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          isIconOnly
+                          aria-label={`자막 ${index + 1} 삭제`}
+                          onPress={() => removeSubtitle(caption.id)}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
                       </span>
                     </div>
                     <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
@@ -1441,118 +1608,221 @@ export function NewsClipReviewStep({
             </Card>
           ) : null}
 
-          {mode === "preview" ? (
+          {(mode === "direction" || mode === "preview") &&
+          editorTab === "media" ? (
             <Card>
-              <Card.Header>
-                <Card.Title>화면·오디오</Card.Title>
-                <Card.Description>
-                  확대·음량·크롭 중심을 조정합니다.
+              <Card.Header className="min-h-16">
+                <Card.Title className={cardTitleClass}>음향 설정</Card.Title>
+                <Card.Description className={cardDescriptionClass}>
+                  TTS 목소리와 영상에 적용할 음량을 설정합니다.
                 </Card.Description>
               </Card.Header>
-              <Card.Content className="grid gap-5 md:grid-cols-2">
-                <RangeInput
-                  label="화면 확대"
-                  value={project.crop.zoom}
-                  min={1.02}
-                  max={1.8}
-                  step={0.01}
-                  formatValue={ratioPercent}
-                  onChange={(zoom) =>
-                    onProject({ crop: { ...project.crop, zoom } })
-                  }
-                />
-                <RangeInput
-                  label="가로 크롭 중심"
-                  value={project.crop.x}
-                  min={0}
-                  max={100}
-                  step={1}
-                  formatValue={screenPercent}
-                  onChange={(x) => onProject({ crop: { ...project.crop, x } })}
-                />
-                <RangeInput
-                  label="세로 크롭 중심"
-                  value={project.crop.y}
-                  min={0}
-                  max={100}
-                  step={1}
-                  formatValue={screenPercent}
-                  onChange={(y) => onProject({ crop: { ...project.crop, y } })}
-                />
-                <RangeInput
-                  label="BGM 음량"
-                  value={project.bgmVolume}
-                  min={0}
-                  max={0.4}
-                  step={0.01}
-                  formatValue={ratioPercent}
-                  onChange={(bgmVolume) => onProject({ bgmVolume })}
-                />
-                <RangeInput
-                  label="제목 TTS 음량"
-                  value={project.titleVolume}
-                  min={0}
-                  max={2}
-                  step={0.05}
-                  formatValue={ratioPercent}
-                  onChange={(titleVolume) => onProject({ titleVolume })}
-                />
-                <RangeInput
-                  label="아나운서 TTS 음량"
-                  value={project.sourceVolume}
-                  min={0}
-                  max={2}
-                  step={0.05}
-                  formatValue={ratioPercent}
-                  onChange={(sourceVolume) => onProject({ sourceVolume })}
-                />
-                <RangeInput
-                  label="원본 직접 발언 음량"
-                  value={project.quoteVolume}
-                  min={0}
-                  max={2}
-                  step={0.05}
-                  formatValue={ratioPercent}
-                  onChange={(quoteVolume) => onProject({ quoteVolume })}
-                />
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={project.bgmEnabled}
-                    onChange={(event) =>
-                      onProject({ bgmEnabled: event.currentTarget.checked })
-                    }
-                  />
-                  이 영상에 BGM 적용
-                </label>
+              <Card.Content className="flex flex-col gap-6">
+                <section className="flex flex-col gap-4">
+                  <h4 className={sectionTitleClass}>TTS</h4>
+                  <label className="flex max-w-md flex-col gap-2">
+                    <span className="text-sm font-medium">TTS 제공자</span>
+                    <select
+                      aria-label="대본 공통 TTS 제공자"
+                      value={settings.ttsProvider}
+                      className={`${field} h-[42px]`}
+                      onChange={(event) =>
+                        selectProvider(event.currentTarget.value)
+                      }
+                    >
+                      <option value="auto">자동 · Typecast 우선</option>
+                      <option value="free">무료 TTS</option>
+                      <option value="typecast">Typecast</option>
+                    </select>
+                  </label>
+                  <div
+                    className={`grid items-end gap-3 ${
+                      settings.ttsProvider === "auto"
+                        ? "md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_11rem]"
+                        : "md:grid-cols-[minmax(0,1fr)_11rem]"
+                    }`}
+                  >
+                    {settings.ttsProvider !== "free" ? (
+                      <label className="flex min-w-0 flex-col gap-2">
+                        <span className="text-sm font-medium">
+                          Typecast 목소리
+                        </span>
+                        <select
+                          aria-label="등록된 Typecast 목소리"
+                          value={settings.typecastVoiceId}
+                          className={`${field} h-[42px]`}
+                          onChange={(event) =>
+                            selectTypecastVoice(event.currentTarget.value)
+                          }
+                        >
+                          {settings.typecastVoices.map((voice) => (
+                            <option key={voice.id} value={voice.voiceId}>
+                              {voice.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {settings.ttsProvider !== "typecast" ? (
+                      <label className="flex min-w-0 flex-col gap-2">
+                        <span className="text-sm font-medium">
+                          {settings.ttsProvider === "auto"
+                            ? "무료 대체 음성"
+                            : "무료 TTS 목소리"}
+                        </span>
+                        <select
+                          aria-label="무료 TTS 목소리"
+                          value={newsTtsVoiceById(settings.titleVoice).id}
+                          className={`${field} h-[42px]`}
+                          onChange={(event) =>
+                            selectFreeVoice(event.currentTarget.value)
+                          }
+                        >
+                          {NEWS_TTS_VOICES.map((voice) => (
+                            <option key={voice.id} value={voice.id}>
+                              {voice.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <Button
+                      variant="outline"
+                      className="h-[42px] w-full justify-center"
+                      isDisabled={voiceBusy}
+                      onPress={() => {
+                        if (voicePlaying) {
+                          stopVoicePreview()
+                          onNote("TTS 미리듣기를 멈췄습니다.")
+                        } else {
+                          void previewVoice()
+                        }
+                      }}
+                    >
+                      {voicePlaying ? (
+                        <Square className="size-4 fill-current" />
+                      ) : (
+                        <Play className="size-4" />
+                      )}
+                      {voiceBusy
+                        ? "음성 생성 중"
+                        : voicePlaying
+                          ? "미리듣기 멈추기"
+                          : "음성 미리듣기"}
+                    </Button>
+                  </div>
+                </section>
+                <section className="flex flex-col gap-4 border-t border-separator pt-5">
+                  <div className={sectionHeaderClass}>
+                    <h4 className={sectionTitleClass}>음량·BGM</h4>
+                    <label className="ml-auto flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={project.bgmEnabled}
+                        onChange={(event) =>
+                          onProject({
+                            bgmEnabled: event.currentTarget.checked,
+                          })
+                        }
+                      />
+                      BGM 적용
+                    </label>
+                  </div>
+                  <div className="grid gap-5 md:grid-cols-2">
+                    <RangeInput
+                      label="BGM 음량"
+                      value={project.bgmVolume}
+                      min={0}
+                      max={0.4}
+                      step={0.01}
+                      formatValue={ratioPercent}
+                      onChange={(bgmVolume) => onProject({ bgmVolume })}
+                    />
+                    <RangeInput
+                      label="제목 TTS 음량"
+                      value={project.titleVolume}
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      formatValue={ratioPercent}
+                      onChange={(titleVolume) => onProject({ titleVolume })}
+                    />
+                    <RangeInput
+                      label="아나운서 TTS 음량"
+                      value={project.sourceVolume}
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      formatValue={ratioPercent}
+                      onChange={(sourceVolume) => onProject({ sourceVolume })}
+                    />
+                    <RangeInput
+                      label="원본 직접 발언 음량"
+                      value={project.quoteVolume}
+                      min={0}
+                      max={2}
+                      step={0.05}
+                      formatValue={ratioPercent}
+                      onChange={(quoteVolume) => onProject({ quoteVolume })}
+                    />
+                  </div>
+                </section>
               </Card.Content>
             </Card>
           ) : null}
 
           {mode === "final" ? (
             <Card>
-              <Card.Header>
-                <Card.Title>고해상도 최종 결과물</Card.Title>
-                <Card.Description>
+              <Card.Header className="min-h-16">
+                <Card.Title className={cardTitleClass}>
+                  최종 결과물 · 720×1280
+                </Card.Title>
+                <Card.Description className={cardDescriptionClass}>
                   최종 영상·썸네일을 확인하고 받습니다.
                 </Card.Description>
               </Card.Header>
-              <Card.Content className="flex flex-wrap gap-3">
-                {project.outputUrl ? (
-                  <a className="text-sm underline" href={project.outputUrl}>
-                    영상 받기
-                  </a>
-                ) : (
-                  <p className="text-sm text-warning">
-                    최종 결과물이 없습니다. 이전 단계에서 최종 제작을
-                    실행하세요.
-                  </p>
-                )}
-                {project.thumbnailUrl ? (
-                  <a className="text-sm underline" href={project.thumbnailUrl}>
-                    썸네일 받기
-                  </a>
-                ) : null}
+              <Card.Content className="flex items-center justify-between gap-4">
+                <div className="flex flex-wrap gap-3">
+                  {project.outputUrl ? (
+                    <a className="text-sm underline" href={project.outputUrl}>
+                      영상 받기
+                    </a>
+                  ) : (
+                    <p className="text-sm text-warning">
+                      최종 결과물이 없습니다. 이전 단계에서 최종 제작을
+                      실행하세요.
+                    </p>
+                  )}
+                  {project.thumbnailUrl ? (
+                    <a
+                      className="text-sm underline"
+                      href={project.thumbnailUrl}
+                    >
+                      썸네일 받기
+                    </a>
+                  ) : null}
+                  {project.youtubeUploadUrl ? (
+                    <a
+                      className="text-sm underline"
+                      href={project.youtubeUploadUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      YouTube에서 열기
+                    </a>
+                  ) : null}
+                </div>
+                <Button
+                  size="sm"
+                  isDisabled={
+                    youtubeBusy ||
+                    !project.outputUrl ||
+                    !!project.youtubeUploadUrl
+                  }
+                  onPress={() => void uploadFinalToYoutube()}
+                >
+                  {youtubeBusy ? "업로드 중" : "YouTube 업로드"}
+                </Button>
               </Card.Content>
             </Card>
           ) : null}
@@ -1596,34 +1866,58 @@ export function NewsClipReviewStep({
           </Button>
         ) : null}
         {mode === "preview" ? (
-          <Button
-            isDisabled={
-              busy !== "" ||
-              !durationRenderable ||
-              !project.previewUrl ||
-              !titleValid ||
-              titleDirty ||
-              reportScriptDirty
-            }
-            onPress={() => void renderAndContinue()}
-          >
-            <LoadingButtonLabel
-              loading={busy === "render"}
-              label="최종 만들기"
-              loadingLabel="만드는 중"
-            />
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              isDisabled={
+                busy !== "" ||
+                !durationRenderable ||
+                !titleValid ||
+                titleDirty ||
+                reportScriptDirty
+              }
+              onPress={() => void onPreview(true)}
+            >
+              <LoadingButtonLabel
+                loading={busy === "preview"}
+                label={
+                  project.previewUrl
+                    ? "미리보기 다시 만들기"
+                    : "미리보기 만들기"
+                }
+                loadingLabel="미리보기 만드는 중"
+              />
+            </Button>
+            <Button
+              isDisabled={
+                busy !== "" ||
+                !durationRenderable ||
+                !project.previewUrl ||
+                !project.previewSignature ||
+                !titleValid ||
+                titleDirty ||
+                reportScriptDirty
+              }
+              onPress={() => void renderAndContinue()}
+            >
+              <LoadingButtonLabel
+                loading={busy === "render"}
+                label="최종본 만들기"
+                loadingLabel="최종본 만드는 중"
+              />
+            </Button>
+          </>
         ) : null}
         {mode === "final" ? (
           <Button
             variant="outline"
             isDisabled={busy !== "" || !durationRenderable}
-            onPress={() => void render()}
+            onPress={() => void render(true)}
           >
             <LoadingButtonLabel
               loading={busy === "render"}
-              label="영상 다시 만들기"
-              loadingLabel="만드는 중"
+              label="최종본 다시 만들기 · 720×1280"
+              loadingLabel="최종본 만드는 중"
             />
           </Button>
         ) : null}
@@ -1691,13 +1985,13 @@ const REVIEW_STEP_COPY = {
     completion: "문장별 화면과 원본 구간이 확정된 상태",
   },
   preview: {
-    eyebrow: "4단계 · 편집 책임: 초안",
-    title: "저해상도 초안 검수·수정",
-    description: "초안을 보며 컷·자막·화면·음량을 조정합니다.",
-    completion: "초안 검수가 끝난 상태",
+    eyebrow: "3단계 · 편집 책임: 통합 검수",
+    title: "대본·화면 검수와 영상 제작",
+    description: "제목·대본·자막·화면·음성을 확인한 뒤 영상을 만듭니다.",
+    completion: "전체 내용을 검수하고 영상 제작을 시작할 수 있는 상태",
   },
   final: {
-    eyebrow: "5단계 · 편집 책임: 납품",
+    eyebrow: "4단계 · 편집 책임: 납품",
     title: "최종 제작·결과 확인",
     description: "최종 영상과 썸네일을 확인합니다.",
     completion: "최종 결과물을 받을 수 있는 상태",
@@ -1707,27 +2001,98 @@ const REVIEW_STEP_COPY = {
   { eyebrow: string; title: string; description: string; completion: string }
 >
 
-function NumberInput({
-  label,
-  value,
-  onChange,
+function SourceRangeTimeline({
+  scene,
+  sourceId,
+  duration,
+  onStartChange,
+  onEndChange,
 }: {
-  label: string
-  value: number
-  onChange: (value: number) => void
+  scene: NewsReportScene
+  sourceId: string
+  duration: number
+  onStartChange: (value: number) => void
+  onEndChange: (value: number) => void
 }) {
+  const safeDuration = Math.max(0.1, duration, scene.sourceEnd)
+  const start = Math.max(0, Math.min(scene.sourceStart, safeDuration - 0.1))
+  const end = Math.max(start + 0.1, Math.min(scene.sourceEnd, safeDuration))
+  const startPercent = (start / safeDuration) * 100
+  const endPercent = (end / safeDuration) * 100
+  const stripUrl = sourceId
+    ? `/api/news-clips/timeline-strip?sourceId=${encodeURIComponent(sourceId)}&v=3`
+    : ""
+
   return (
-    <label className="flex flex-col gap-2">
-      <span className="text-sm">{label}</span>
-      <input
-        type="number"
-        min={0}
-        step={0.1}
-        value={value}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
-        className={field}
-      />
-    </label>
+    <div className="rounded-xl bg-default px-3 py-3">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span className="font-medium">영상 구간</span>
+        <span className="text-muted tabular-nums">
+          {time(start)} → {time(end)} · {(end - start).toFixed(1)}초
+        </span>
+      </div>
+      <div
+        className="relative mt-3 h-12 overflow-hidden rounded-lg bg-neutral-900"
+        style={
+          stripUrl
+            ? {
+                backgroundImage: `url("${stripUrl}")`,
+                backgroundPosition: "center",
+                backgroundRepeat: "no-repeat",
+                backgroundSize: "100% 100%",
+              }
+            : undefined
+        }
+      >
+        <div
+          className="absolute inset-y-0 left-0 bg-black/60"
+          style={{ width: `${startPercent}%` }}
+        />
+        <div
+          className="absolute inset-y-0 right-0 bg-black/60"
+          style={{ width: `${Math.max(0, 100 - endPercent)}%` }}
+        />
+        <div
+          className="absolute inset-y-0 border-y-2 border-foreground/90 bg-white/5"
+          style={{
+            left: `${startPercent}%`,
+            width: `${Math.max(0, endPercent - startPercent)}%`,
+          }}
+        />
+        <input
+          aria-label="영상 구간 시작"
+          type="range"
+          min={0}
+          max={safeDuration}
+          step={0.1}
+          value={start}
+          onChange={(event) =>
+            onStartChange(
+              Math.min(Number(event.currentTarget.value), end - 0.1)
+            )
+          }
+          className="source-range-input z-10"
+        />
+        <input
+          aria-label="영상 구간 종료"
+          type="range"
+          min={0}
+          max={safeDuration}
+          step={0.1}
+          value={end}
+          onChange={(event) =>
+            onEndChange(
+              Math.max(Number(event.currentTarget.value), start + 0.1)
+            )
+          }
+          className="source-range-input z-20"
+        />
+      </div>
+      <div className="flex justify-between text-xs text-muted tabular-nums">
+        <span>{time(0)}</span>
+        <span>{time(safeDuration)}</span>
+      </div>
+    </div>
   )
 }
 
@@ -1786,6 +2151,29 @@ function initialSourceDuration(project: NewsClipProject) {
     project.source?.durationSeconds ?? 0,
     ...project.candidates.map((candidate) => candidate.sourceEnd),
     ...project.reportScenes.map((scene) => scene.sourceEnd)
+  )
+}
+
+function resizeTextareaToContent(element: HTMLTextAreaElement | null) {
+  if (!element) return
+  element.style.height = "auto"
+  element.style.height = `${element.scrollHeight}px`
+}
+
+function sceneSourceDuration(
+  project: NewsClipProject,
+  scene: NewsReportScene,
+  loadedDuration: number
+) {
+  const sourceId = scene.sourceId || project.source?.id
+  const source = [project.source, ...project.supportingSources].find(
+    (item) => item?.id === sourceId
+  )
+  return Math.max(
+    0.1,
+    loadedDuration,
+    source?.durationSeconds ?? 0,
+    scene.sourceEnd
   )
 }
 

@@ -10,13 +10,21 @@ import {
   titleLineCharacterLimit,
 } from "@/lib/news-clips/text-layout"
 import { parseTranscript } from "@/lib/news-clips/transcript"
-import { buildReportScenes } from "@/lib/news-clips/report"
+import {
+  buildReportScenes,
+  ensureReportEndCta,
+  normalizeQuoteScenes,
+} from "@/lib/news-clips/report"
 import type {
   NewsClipCandidate,
   NewsClipSettings,
   NewsReportScene,
   TranscriptSegment,
 } from "@/lib/news-clips/types"
+
+const REPORT_MIN_CHARACTERS = 288
+const REPORT_TARGET_CHARACTERS = 312
+const REPORT_MAX_CHARACTERS = 320
 
 export type NewsAnalysisSource = {
   id: string
@@ -90,20 +98,40 @@ export async function analyzeNewsTranscript(
     }
     report = localReport(transcript, selectedCandidate)
   }
-  const reportScenes = buildReportScenes(
+  const reportScript = ensureReportEndCta(
     report.script,
+    sourceContext.issue.title,
+    sourceContext.issue.keywords
+  )
+  const reportScenes = buildReportScenes(
+    reportScript,
     transcript,
     selectedCandidate.sourceStart,
     selectedCandidate.sourceEnd,
     report.preferred,
     sourceContext.primarySourceId
   )
+  const distributedScenes = distributeSupportingSources(
+    reportScenes,
+    sourceContext
+  )
+  const transcripts = Object.fromEntries([
+    [sourceContext.primarySourceId, transcript],
+    ...sourceContext.supportingSources.map(
+      (source) => [source.id, source.transcript] as const
+    ),
+  ])
   return {
     transcript,
     candidates,
     selectedCandidate,
-    reportScript: report.script,
-    reportScenes: distributeSupportingSources(reportScenes, sourceContext),
+    reportScript,
+    reportScenes: normalizeQuoteScenes(
+      distributedScenes,
+      transcripts,
+      sourceContext.primarySourceId,
+      settings.titleVoiceRate
+    ),
     analysisMode,
   }
 }
@@ -212,7 +240,10 @@ async function reportWithClaude(
       "'시행됩니다', '선정됐습니다', '나타났습니다', '전해졌습니다', '비판이 나오고 있습니다', '자세히 알아보겠습니다'처럼 보도자료를 읽는 존댓말 종결은 사용하지 않는다.",
       "제공된 원문 밖의 사실이나 숨은 의도를 만들어내지 않는다. 확인되지 않은 의혹은 사실처럼 단정하지 말고 반드시 질문·가능성·추론으로 구분한다.",
       "근거 없이 '언론이 숨겼다', '아무도 모른다', '충격적인 진실'처럼 비밀을 과장하는 표현은 쓰지 않는다. 친밀한 말투와 사실의 희소성을 혼동하지 않는다.",
-      "본문 TTS가 약 45~50초가 되도록 공백 제외 240~290자, 5~7개의 완결된 문장으로 작성한다.",
+      `댓글 유도 문구까지 포함한 전체 본문 TTS가 약 50~56초가 되도록 공백 제외 ${REPORT_MIN_CHARACTERS}~${REPORT_MAX_CHARACTERS}자로 작성하고, ${REPORT_TARGET_CHARACTERS}자 안팎을 우선한다.`,
+      "대본의 마지막에는 앞선 결론과 자연스럽게 연결되는 짧은 질문과 댓글 유도 문구를 반드시 포함한다. 예: '이 정책, 어떻게 봐?' / '댓글로 의견 남겨줘.'",
+      "댓글 유도 문구도 script의 마지막 발화이자 자막이며 visuals의 마지막 source 장면으로 포함한다. 별도 후처리 문구로 취급하지 않는다.",
+      "댓글 유도까지 포함해 7~11개의 완결된 문장으로 작성한다.",
       "각 문장은 한 가지 주장과 근거를 담고 자연스러운 한국어 문장으로 완성한다.",
       "script 문자열은 한 문단으로 출력하지 말고, 화면에 함께 보여 줄 자연스러운 자막 호흡마다 줄바꿈(\\n)을 넣는다. 한 문장이 여러 자막 호흡으로 나뉘어도 문장부호는 문장 마지막에만 둔다.",
       `자막 한 구간은 현재 화면 기준 최대 2줄이며 공백 제외 ${captionChunkLimit}자 이내로 쓴다. 지나치게 짧게 자르지 말고 대체로 ${Math.max(6, captionLineLimit - 3)}~${captionChunkLimit}자 안에서 의미가 읽히는 구절로 묶는다.`,
@@ -226,6 +257,10 @@ async function reportWithClaude(
       "source는 아나운서 TTS가 이어지는 무음 자료 화면이다. quote는 TTS를 멈추고 원본 음성을 그대로 들려주는 강한 직접 발언이다.",
       "보조 자료는 기본적으로 source로만 사용한다. 제공된 보조 자료 자막에 실제 직접 발언과 정확한 타임코드가 있을 때만 quote로 지정할 수 있다.",
       "quote 문장의 script 내용은 지정한 원본 구간에서 실제로 말한 문장을 그대로 사용하고, 앞뒤 맥락을 왜곡하지 않는다.",
+      "quote에는 원문을 요약하거나 '주장했어', '말했어', '지적했어' 같은 해설형 종결로 바꾼 문장을 절대 넣지 않는다. 한 글자라도 확신할 수 없으면 source로 지정한다.",
+      "quote의 sourceStart와 sourceEnd는 해당 직접 발언 문장의 시작과 끝에 맞추고, 다음 문장이나 앞 문장이 섞이지 않게 한다.",
+      "quote 다음 문장은 원본 발언을 다시 반복하지 말고, '그런데', '이 말의 핵심은', '문제는'처럼 방금 들은 발언에서 다음 근거나 평가로 자연스럽게 이어지는 TTS 해설로 쓴다.",
+      "quote 앞뒤 문장을 이어 읽었을 때 주어와 논점이 갑자기 바뀌거나 같은 내용을 두 번 설명하지 않도록 전체 흐름을 검토한다.",
       "source와 quote에는 해당 근거가 실제 등장하는 sourceStart와 sourceEnd를 원본 타임코드 안에서 지정한다.",
       "JSON 객체만 출력한다: {script:string, visuals:[{visual:'source'|'quote',sourceId:string,sourceStart:number,sourceEnd:number}]}",
     ].join("\n"),
@@ -326,7 +361,7 @@ function localReport(
   const selected: TranscriptSegment[] = []
   let length = 0
   for (const segment of relevant) {
-    if (length >= 260) break
+    if (length >= REPORT_TARGET_CHARACTERS) break
     selected.push(segment)
     length += segment.text.replace(/\s+/g, "").length
   }

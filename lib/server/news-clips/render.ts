@@ -11,12 +11,14 @@ import {
 } from "@/lib/news-clips/intro"
 import { finalDurationAllowed } from "@/lib/news-clips/timeline"
 import {
-  bodyDurationWithEndCta,
-  contextualEndCtaText,
+  NEWS_INTRO_GAP_SECONDS,
+  NEWS_OUTRO_GAP_SECONDS,
+  normalizeQuoteScenes,
+  quoteTranscriptAlignment,
   retimeSubtitleCuesToScenes,
-  withEndCta,
 } from "@/lib/news-clips/report"
 import { NEWS_RENDER_SCHEMA_VERSION } from "@/lib/news-clips/render-key"
+import { parseTranscript } from "@/lib/news-clips/transcript"
 import {
   normalizeSubtitleCues,
   resolveTextBox,
@@ -28,6 +30,7 @@ import type { TypecastSpeechTiming } from "@/lib/news-clips/typecast-response"
 import {
   downloadApprovedSource,
   readSource,
+  readStoredTranscript,
 } from "@/lib/server/news-clips/source-store"
 import { newsChannelId } from "@/lib/server/news-clips/channels"
 import {
@@ -42,6 +45,7 @@ import type {
   NewsReportScene,
   NewsSource,
   SubtitleCue,
+  TranscriptSegment,
 } from "@/lib/news-clips/types"
 
 const NEWS_RENDER_VERSION = NEWS_RENDER_SCHEMA_VERSION
@@ -265,6 +269,12 @@ export async function renderNewsClip(
   project = {
     ...project,
     title: renderTitle,
+    reportScenes: normalizeQuoteScenes(
+      project.reportScenes,
+      project.source?.id ? { [project.source.id]: project.transcript } : {},
+      project.source?.id ?? "",
+      settings.titleVoiceRate
+    ),
     metadata: {
       ...project.metadata,
       youtubeTitle: renderTitle.replace(/\s*\n\s*/g, " "),
@@ -276,6 +286,17 @@ export async function renderNewsClip(
   if (!source) throw new Error("source-upload-required")
   const sourceFiles = new Map(
     [...sources].map(([sourceId, item]) => [sourceId, item.localFile])
+  )
+  const sourceTranscripts = new Map(
+    await Promise.all(
+      [...sources.keys()].map(async (sourceId) => {
+        if (sourceId === source.id && project.transcript.length) {
+          return [sourceId, project.transcript] as const
+        }
+        const stored = await readStoredTranscript(sourceId)
+        return [sourceId, stored ? parseTranscript(stored) : []] as const
+      })
+    )
   )
 
   const folder = path.join(
@@ -290,7 +311,12 @@ export async function renderNewsClip(
   const dimensions =
     mode === "preview"
       ? { width: 540, height: 960, scale: 0.5, preset: "ultrafast" }
-      : { width: 1080, height: 1920, scale: 1, preset: "medium" }
+      : {
+          width: 720,
+          height: 1280,
+          scale: 720 / 1080,
+          preset: "medium",
+        }
   const ttsProvider = await resolveNewsTtsProvider(settings)
   const ttsIdentity = newsTtsCacheIdentity(ttsProvider)
   const captions = path.join(folder, "captions.srt")
@@ -319,7 +345,10 @@ export async function renderNewsClip(
   const thumbnail = path.join(folder, "thumbnail.png")
   const cachePath = path.join(folder, `${prefix}render-cache.json`)
   await synthesizeSpeech(project.title, settings, titleAudio, ttsProvider)
-  const titleCardDurationSeconds = await mediaDuration(titleAudio)
+  const titleSpeechDurationSeconds = await mediaDuration(titleAudio)
+  const titleCardDurationSeconds = roundDuration(
+    titleSpeechDurationSeconds + NEWS_INTRO_GAP_SECONDS
+  )
   const report = await synthesizeReport(
     project.reportScenes,
     settings,
@@ -328,29 +357,22 @@ export async function renderNewsClip(
     source.id,
     project.sourceVolume,
     project.quoteVolume,
-    ttsProvider
+    ttsProvider,
+    sourceTranscripts
   )
-  const narrationDurationSeconds = report.duration
-  const bodyDurationSeconds = bodyDurationWithEndCta(narrationDurationSeconds)
+  const bodyDurationSeconds = roundDuration(
+    report.duration + NEWS_OUTRO_GAP_SECONDS
+  )
   const outputDurationSeconds = roundDuration(
     titleCardDurationSeconds + bodyDurationSeconds
   )
   validateDuration(outputDurationSeconds, settings)
   const effectiveProject: NewsClipProject = {
     ...project,
-    subtitles: withEndCta(
-      retimeSubtitleCuesToScenes(
-        normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText),
-        project.reportScenes,
-        report.scenes
-      ),
-      bodyDurationSeconds,
-      contextualEndCtaText(
-        project.title,
-        project.selectedIssue?.keywords,
-        project.reportScript
-      ),
-      narrationDurationSeconds
+    subtitles: retimeSubtitleCuesToScenes(
+      normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText),
+      project.reportScenes,
+      report.scenes
     ),
     titleCardDurationSeconds,
     outputDurationSeconds,
@@ -417,7 +439,6 @@ export async function renderNewsClip(
     bgmEnabled: effectiveProject.bgmEnabled,
     bgmVolume: effectiveProject.bgmVolume,
     bgmFile: settings.bgmFile,
-    speechDucking: settings.speechDucking,
   })
 
   await Promise.all([
@@ -436,7 +457,7 @@ export async function renderNewsClip(
     ),
     writeFile(
       path.join(folder, "manifest.json"),
-      `${JSON.stringify(manifestOf(effectiveProject, sources), null, 2)}\n`
+      `${JSON.stringify(manifestOf(effectiveProject, sources, dimensions), null, 2)}\n`
     ),
     writeFile(
       path.join(folder, "youtube-metadata.json"),
@@ -478,7 +499,8 @@ export async function renderNewsClip(
       captionsAss,
       bodyTitleAss,
       bodyVideo,
-      dimensions
+      dimensions,
+      bodyDurationSeconds
     )
   }
   if (
@@ -536,18 +558,23 @@ export async function renderNewsClip(
       titleCardDurationSeconds,
       outputDurationSeconds,
       subtitles: effectiveProject.subtitles,
+      reportScenes: effectiveProject.reportScenes,
     }
   }
+  const outputVersion = force
+    ? `${signature.slice(0, 12)}-${Date.now().toString(36)}`
+    : signature.slice(0, 12)
   return {
     signature,
-    outputUrl: `${base}/final.mp4`,
-    thumbnailUrl: `${base}/thumbnail.png`,
+    outputUrl: `${base}/final.mp4?v=${outputVersion}`,
+    thumbnailUrl: `${base}/thumbnail.png?v=${outputVersion}`,
     captionsUrl: `${base}/captions.srt`,
     titleFrameUrl: `${base}/title-frame.png`,
     manifestUrl: `${base}/manifest.json`,
     titleCardDurationSeconds,
     outputDurationSeconds,
     subtitles: effectiveProject.subtitles,
+    reportScenes: effectiveProject.reportScenes,
   }
 }
 
@@ -652,9 +679,15 @@ async function synthesizeReport(
   primarySourceId: string,
   ttsVolume: number,
   quoteVolume: number,
-  provider: ResolvedNewsTtsProvider
+  provider: ResolvedNewsTtsProvider,
+  transcripts: Map<string, TranscriptSegment[]>
 ) {
-  const audioFiles: { path: string; volume: number; duration: number }[] = []
+  const audioFiles: {
+    path: string
+    volume: number
+    duration: number
+    normalizeSpeech?: boolean
+  }[] = []
   const durations: number[] = []
   const alignments: TypecastSpeechTiming["words"][] = []
   for (const [index, scene] of scenes.entries()) {
@@ -680,7 +713,12 @@ async function synthesizeReport(
       const duration = await mediaDuration(audio)
       audioFiles.push({ path: audio, volume: quoteVolume, duration })
       durations.push(duration)
-      alignments.push([])
+      alignments.push(
+        quoteTranscriptAlignment(
+          scene,
+          transcripts.get(scene.sourceId || primarySourceId) ?? []
+        )
+      )
       continue
     }
 
@@ -697,10 +735,16 @@ async function synthesizeReport(
       provider
     )
     const duration = await mediaDuration(audio)
-    audioFiles.push({ path: audio, volume: ttsVolume, duration })
+    audioFiles.push({
+      path: audio,
+      volume: ttsVolume,
+      duration,
+      normalizeSpeech: true,
+    })
     durations.push(duration)
     alignments.push(timing?.words ?? [])
   }
+
   const signature = digest({ audioFiles, durations })
   const audio = path.join(folder, `report-${signature.slice(0, 16)}.m4a`)
   if (!(await exists(audio))) {
@@ -722,6 +766,7 @@ async function synthesizeReport(
     audio,
     signature,
     scenes: timedScenes,
+    narrationDuration: roundDuration(cursor),
     duration: roundDuration(cursor),
   }
 }
@@ -768,14 +813,21 @@ async function extractQuoteAudio(
 }
 
 async function concatAudio(
-  inputs: { path: string; volume: number; duration: number }[],
+  inputs: {
+    path: string
+    volume: number
+    duration: number
+    normalizeSpeech?: boolean
+  }[],
   output: string
 ) {
   const inputArgs = inputs.flatMap((input) => ["-i", input.path])
-  const normalized = inputs.map(
-    (input, index) =>
-      `[${index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${Math.max(0, Math.min(2, input.volume))},apad,atrim=duration=${Math.max(0.1, input.duration)}[audio${index}]`
-  )
+  const normalized = inputs.map((input, index) => {
+    const speechNormalization = input.normalizeSpeech
+      ? ",loudnorm=I=-20:TP=-3:LRA=7,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+      : ""
+    return `[${index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${speechNormalization},volume=${Math.max(0, Math.min(2, input.volume))},apad,atrim=duration=${Math.max(0.1, input.duration)}[audio${index}]`
+  })
   const streams = inputs.map((_, index) => `[audio${index}]`).join("")
   await run(ffmpegBin(), [
     "-y",
@@ -908,11 +960,13 @@ async function makeBodyVideo(
   captionsAss: string,
   bodyTitleAss: string,
   output: string,
-  dimensions: RenderDimensions
+  dimensions: RenderDimensions,
+  requestedBodyDurationSeconds: number
 ) {
   const rect = settings.videoRect
   const narrationDurationSeconds = Math.max(0.1, scenes.at(-1)?.end ?? 0.1)
   const bodyDurationSeconds = Math.max(
+    requestedBodyDurationSeconds,
     narrationDurationSeconds,
     project.subtitles.at(-1)?.end ?? narrationDurationSeconds
   )
@@ -1079,7 +1133,7 @@ async function applyBgm(
     "-i",
     bgm,
     "-filter_complex",
-    `[1:a]volume=${project.bgmVolume},afade=t=in:st=0:d=0.4,afade=t=out:st=${Math.max(0, project.outputDurationSeconds - 0.5)}:d=0.5[bgm];[bgm][0:a]sidechaincompress=threshold=0.02:ratio=${Math.max(1, Math.min(20, 3 / settings.speechDucking))}:attack=20:release=300[ducked];[0:a][ducked]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]`,
+    `[1:a]volume=${project.bgmVolume},afade=t=in:st=0:d=0.4,afade=t=out:st=${Math.max(0, project.outputDurationSeconds - 0.5)}:d=0.5[bgm];[0:a][bgm]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]`,
     "-map",
     "0:v",
     "-map",
@@ -1179,20 +1233,16 @@ function bodyTitleAssText(
   return assSingleLineDocument(
     assFontFamily(settings.fontFamily, layout.fontWeight),
     metrics.fontSize,
-    event,
-    3,
-    1
+    event
   )
 }
 
 function assSingleLineDocument(
   fontFamily: string,
   fontSize: number,
-  events: string,
-  outline = 4,
-  shadow = 2
+  events: string
 ) {
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: SingleLine,${fontFamily},${fontSize},&H00FFFFFF,&H000000FF,&H00101010,&H64000000,0,0,0,0,100,100,0,0,1,${outline},${shadow},8,0,0,0,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events}\n`
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: SingleLine,${fontFamily},${fontSize},&H00FFFFFF,&H000000FF,&HFF101010,&HFF000000,0,0,0,0,100,100,0,0,1,0,0,8,0,0,0,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events}\n`
 }
 
 function assSingleLineEvent(
@@ -1206,7 +1256,7 @@ function assSingleLineEvent(
   y: number,
   alignment: number
 ) {
-  return `Dialogue: 0,0:00:00.00,${assTime(duration)},SingleLine,,0,0,0,,{\\an${alignment}\\pos(${x},${y})\\q2\\fs${fontSize}\\fscx${Math.round(scaleX * 100)}\\fsp${layout.letterSpacing}\\b${layout.fontWeight}\\c${hexToAss(color)}}${assText(text)}`
+  return `Dialogue: 0,0:00:00.00,${assTime(duration)},SingleLine,,0,0,0,,{\\an${alignment}\\pos(${x},${y})\\q2\\bord0\\shad0\\fs${fontSize}\\fscx${Math.round(scaleX * 100)}\\fsp${layout.letterSpacing}\\b${layout.fontWeight}\\c${hexToAss(color)}}${assText(text)}`
 }
 
 function textAnchor(
@@ -1239,11 +1289,11 @@ function subtitlesToAss(cues: SubtitleCue[], settings: NewsClipSettings) {
           `{\\c${highlight}}${escapedWord}{\\c${primary}}`
         )
       }
-      return `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Subtitle,,0,0,0,,{\\q2\\b${layout.fontWeight}}${text}`
+      return `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Subtitle,,0,0,0,,{\\q2\\bord0\\shad0\\b${layout.fontWeight}}${text}`
     })
     .join("\n")
   const { left, right } = textMargins(layout, settings.safeMarginPercent)
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Subtitle,${assFontFamily(settings.fontFamily, layout.fontWeight)},${layout.fontSize},${primary},&H000000FF,&H00101010,&H64000000,0,0,0,0,100,100,${layout.letterSpacing},0,1,3,1,${assAlignment(layout.alignment)},${left},${right},${layout.y},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events}\n`
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Subtitle,${assFontFamily(settings.fontFamily, layout.fontWeight)},${layout.fontSize},${primary},&H000000FF,&HFF101010,&HFF000000,0,0,0,0,100,100,${layout.letterSpacing},0,1,0,0,${assAlignment(layout.alignment)},${left},${right},${layout.y},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events}\n`
 }
 
 function assFontFamily(
@@ -1298,7 +1348,8 @@ function assTime(value: number) {
 
 function manifestOf(
   project: NewsClipProject,
-  sources: Map<string, NewsSource>
+  sources: Map<string, NewsSource>,
+  dimensions: RenderDimensions
 ) {
   const candidate = project.candidates.find(
     (item) => item.id === project.selectedCandidateId
@@ -1333,7 +1384,12 @@ function manifestOf(
         "",
       sourceTimecode: { start: scene.sourceStart, end: scene.sourceEnd },
     })),
-    output: { width: 1080, height: 1920, video: "H.264", audio: "AAC" },
+    output: {
+      width: dimensions.width,
+      height: dimensions.height,
+      video: "H.264",
+      audio: "AAC",
+    },
   }
 }
 

@@ -15,10 +15,9 @@
   "bgmFile": "/news-clips/news-channel-30cfb65e/bgm-4aca5ede8b0f.mp3",
   "bgmEnabled": true,
   "bgmVolume": 0.12,
-  "speechDucking": 0.35,
   "ttsProvider": "auto",
   "titleVoice": "mms-kor",
-  "typecastVoiceId": "tc_66ab0e26ec23f325b7ad51df",
+  "typecastVoiceId": "tc_6837dec48fc46637a9272b88",
   "typecastVoices": [
     {
       "id": "typecast-default",
@@ -27,11 +26,16 @@
     },
     {
       "id": "typecast-voice-2",
-      "name": "얘슬",
-      "voiceId": "tc_66ab0e26ec23f325b7ad51df"
+      "name": "서진",
+      "voiceId": "tc_68537c9420b646f2176890ba"
+    },
+    {
+      "id": "cf1face5-6c15-4f44-943e-e18889e231ce",
+      "name": "소예",
+      "voiceId": "tc_6837dec48fc46637a9272b88"
     }
   ],
-  "titleVoiceRate": -4,
+  "titleVoiceRate": 5,
   "titleVolume": 1,
   "sourceVolume": 1,
   "quoteVolume": 1,
@@ -77,6 +81,7 @@
     "height": 720
   },
   "safeMarginPercent": 5,
-  "removeFillers": false,
-  "cutTransition": "hard"
+  "removeFillers": true,
+  "cutTransition": "hard",
+  "youtubeAutoUpload": false
 }

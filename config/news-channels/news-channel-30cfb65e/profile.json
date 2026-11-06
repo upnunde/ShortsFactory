@@ -2,6 +2,7 @@
   "id": "news-channel-30cfb65e",
   "name": "뉴스스토리",
   "language": "ko",
+  "youtubeChannelId": "UCcr34SqPsv4w9lk8v-GcvJw",
   "youtubeChannelCredentials": "config/credentials/news-channel-30cfb65e.json",
   "createdAt": "2026-11-04T06:02:33.847Z"
 }

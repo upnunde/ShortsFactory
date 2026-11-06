@@ -8,6 +8,7 @@ export type NewsChannelProfile = {
   name: string
   language: string
   avatarUrl: string
+  youtubeChannelId: string
   youtubeChannelCredentials: string
   createdAt: string
 }
@@ -213,7 +214,6 @@ export type NewsClipSettings = {
   bgmFile: string
   bgmEnabled: boolean
   bgmVolume: number
-  speechDucking: number
   ttsProvider: NewsTtsProvider
   titleVoice: string
   typecastVoiceId: string
@@ -237,6 +237,7 @@ export type NewsClipSettings = {
   safeMarginPercent: number
   removeFillers: boolean
   cutTransition: "hard" | "dissolve"
+  youtubeAutoUpload: boolean
 }
 
 export type NewsClipProject = {
@@ -279,6 +280,8 @@ export type NewsClipProject = {
   previewSignature: string
   renderSettingsKey: string
   thumbnailUrl: string
+  youtubeVideoId: string
+  youtubeUploadUrl: string
   metadata: { youtubeTitle: string; description: string; tags: string[] }
 }
 
@@ -300,12 +303,17 @@ export const NEWS_CLIP_STEPS: {
   { id: "source", label: "원본 영상 선택", role: "보도 근거 결정" },
   { id: "script", label: "보도 대본 검수", role: "제목·보도문 확정" },
   { id: "direction", label: "화면 연출 구성", role: "장면·음성 방식 확정" },
-  { id: "preview", label: "초안 검수·수정", role: "영상·자막·음향 확인" },
-  { id: "final", label: "최종 제작·결과", role: "고해상도 결과 확인" },
+  {
+    id: "preview",
+    label: "통합 검수·영상 제작",
+    role: "대본·자막·화면 검수 후 영상 제작",
+  },
+  { id: "final", label: "최종 결과", role: "720p 결과 확인" },
 ]
 
 // Figma body frame 900×1600 has a 900×600 (3:2) video opening at y=350.
-// The render canvas is 1080×1920, so every value is scaled by 1.2.
+// Layout settings use a logical 1080×1920 canvas. Final output scales the
+// complete composition to 720×1280 without changing its visual proportions.
 export const NEWS_BODY_VIDEO_RECT = {
   x: 0,
   y: 420,
@@ -331,7 +339,6 @@ export const defaultNewsClipSettings: NewsClipSettings = {
   bgmFile: "",
   bgmEnabled: true,
   bgmVolume: 0.12,
-  speechDucking: 0.35,
   ttsProvider: "auto",
   titleVoice: "mms-kor",
   typecastVoiceId: "tc_5e4f7a5da82e1f000aca31af",
@@ -385,6 +392,7 @@ export const defaultNewsClipSettings: NewsClipSettings = {
   safeMarginPercent: 7,
   removeFillers: false,
   cutTransition: "hard",
+  youtubeAutoUpload: false,
 }
 
 export function freshNewsClipProject(profileId: string): NewsClipProject {
@@ -429,6 +437,8 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     previewSignature: "",
     renderSettingsKey: "",
     thumbnailUrl: "",
+    youtubeVideoId: "",
+    youtubeUploadUrl: "",
     metadata: { youtubeTitle: "", description: "", tags: [] },
   }
 }

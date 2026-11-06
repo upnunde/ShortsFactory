@@ -46,6 +46,18 @@ export async function listNewsChannels() {
   )
 }
 
+export async function readNewsChannel(id: string) {
+  const safe = newsChannelId(id)
+  if (!safe) return null
+  try {
+    return normalizeNewsChannelProfile(
+      JSON.parse(await readFile(path.join(root, safe, "profile.json"), "utf8"))
+    )
+  } catch {
+    return null
+  }
+}
+
 export async function createNewsChannel(name: string) {
   const id = `news-channel-${randomUUID().slice(0, 8)}`
   const profile: NewsChannelProfile = {
@@ -53,6 +65,7 @@ export async function createNewsChannel(name: string) {
     name: name.trim() || "새 뉴스 채널",
     language: "ko",
     avatarUrl: "",
+    youtubeChannelId: "",
     youtubeChannelCredentials: `config/credentials/${id}.json`,
     createdAt: new Date().toISOString(),
   }
@@ -105,6 +118,11 @@ export function normalizeNewsChannelProfile(
     avatarUrl:
       typeof raw.avatarUrl === "string" && raw.avatarUrl.trim()
         ? raw.avatarUrl.trim()
+        : "",
+    youtubeChannelId:
+      typeof raw.youtubeChannelId === "string" &&
+      /^UC[a-zA-Z0-9_-]{20,30}$/.test(raw.youtubeChannelId.trim())
+        ? raw.youtubeChannelId.trim()
         : "",
     youtubeChannelCredentials:
       typeof raw.youtubeChannelCredentials === "string" &&

@@ -1,6 +1,6 @@
 import type { NewsClipSettings } from "./types.ts"
 
-export const NEWS_RENDER_SCHEMA_VERSION = 26
+export const NEWS_RENDER_SCHEMA_VERSION = 31
 
 export function newsRenderSettingsKey(settings: NewsClipSettings) {
   const source = JSON.stringify({
@@ -10,7 +10,6 @@ export function newsRenderSettingsKey(settings: NewsClipSettings) {
     bgmFile: settings.bgmFile,
     bgmEnabled: settings.bgmEnabled,
     bgmVolume: settings.bgmVolume,
-    speechDucking: settings.speechDucking,
     ttsProvider: settings.ttsProvider,
     titleVoice: settings.titleVoice,
     typecastVoiceId: settings.typecastVoiceId,

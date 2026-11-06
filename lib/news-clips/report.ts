@@ -8,10 +8,27 @@ const EMPHASIS =
   /(?:\d[\d,.]*\s*(?:%|원|명|건|배|조|억|만)?|정부|국회|대통령|피해|세금|일자리|안보|외교|사법)/g
 
 export const NEWS_END_CTA_TEXT = "이건 어떻게 봐?\n댓글로 남겨줘."
-export const NEWS_END_CTA_SECONDS = 2.4
+export const NEWS_INTRO_GAP_SECONDS = 0.5
+export const NEWS_OUTRO_GAP_SECONDS = 0.5
+export const NEWS_TOTAL_GAP_SECONDS =
+  NEWS_INTRO_GAP_SECONDS + NEWS_OUTRO_GAP_SECONDS
 
-export function bodyDurationWithEndCta(narrationDuration: number) {
-  return round(Math.max(0, narrationDuration) + NEWS_END_CTA_SECONDS)
+export function reportHasEndCta(script: string) {
+  const tail = splitReportSentences(script).slice(-2).join(" ")
+  return /댓글/.test(tail) && /(남겨|달아|적어|알려|써|의견)/.test(tail)
+}
+
+export function ensureReportEndCta(
+  script: string,
+  title: string,
+  keywords: string[] = [],
+  preferredCtaText = ""
+) {
+  const normalized = script.trim()
+  if (!normalized || reportHasEndCta(normalized)) return normalized
+  const ctaText =
+    preferredCtaText.trim() || contextualEndCtaText(title, keywords, normalized)
+  return `${normalized}\n${ctaText}`
 }
 
 const CTA_GENERIC_TERMS = new Set([
@@ -58,6 +75,104 @@ export function estimateReportScenesDuration(
       0
     )
   )
+}
+
+export type TranscriptBySource = Record<string, TranscriptSegment[] | undefined>
+
+export function quoteNarrationMatchesTranscript(
+  scene: NewsReportScene,
+  transcript: TranscriptSegment[],
+  ratePercent = -4
+) {
+  if (scene.visual !== "quote") return true
+  const quoteDuration = scene.sourceEnd - scene.sourceStart
+  const narrationDuration = estimateReportDuration(scene.narration, ratePercent)
+  if (
+    !Number.isFinite(quoteDuration) ||
+    quoteDuration < Math.max(0.6, narrationDuration * 0.55 - 0.25) ||
+    quoteDuration > narrationDuration * 1.6 + 0.3
+  ) {
+    return false
+  }
+
+  const relevant = transcript.filter(
+    (segment) =>
+      segment.end > scene.sourceStart && segment.start < scene.sourceEnd
+  )
+  if (!relevant.length) return false
+  const candidates = relevant.flatMap((_, start) =>
+    Array.from({ length: Math.min(4, relevant.length - start) }, (__, offset) =>
+      relevant
+        .slice(start, start + offset + 1)
+        .map((segment) => segment.text)
+        .join(" ")
+    )
+  )
+  candidates.push(relevant.map((segment) => segment.text).join(" "))
+  return candidates.some(
+    (candidate) =>
+      ngramRecall(scene.narration, candidate, 2) >= 0.82 &&
+      ngramDice(scene.narration, candidate, 2) >= 0.56
+  )
+}
+
+export function normalizeQuoteScenes(
+  scenes: NewsReportScene[],
+  transcripts: TranscriptBySource,
+  primarySourceId: string,
+  ratePercent = -4
+) {
+  return scenes.map((scene) => {
+    if (scene.visual !== "quote") return scene
+    const sourceId = scene.sourceId || primarySourceId
+    const transcript = transcripts[sourceId]
+    return transcript?.length &&
+      quoteNarrationMatchesTranscript(scene, transcript, ratePercent)
+      ? scene
+      : { ...scene, visual: "source" as const }
+  })
+}
+
+export function quoteTranscriptAlignment(
+  scene: NewsReportScene,
+  transcript: TranscriptSegment[]
+) {
+  if (scene.visual !== "quote") return []
+  const words = transcript
+    .flatMap((segment) => segment.words)
+    .filter(
+      (word) =>
+        word.text.trim() &&
+        word.end > scene.sourceStart &&
+        word.start < scene.sourceEnd
+    )
+    .map((word) => ({
+      text: word.text,
+      start: round(Math.max(0, word.start - scene.sourceStart)),
+      end: round(
+        Math.max(0, Math.min(scene.sourceEnd, word.end) - scene.sourceStart)
+      ),
+    }))
+  if (words.length) return words
+
+  const overlapping = transcript.filter(
+    (segment) =>
+      segment.text.trim() &&
+      segment.end > scene.sourceStart &&
+      segment.start < scene.sourceEnd
+  )
+  const contained = overlapping.filter(
+    (segment) =>
+      segment.start >= scene.sourceStart - 0.15 &&
+      segment.end <= scene.sourceEnd + 0.15
+  )
+  return (contained.length ? contained : overlapping).map((segment) => ({
+    text: segment.text,
+    start: round(Math.max(0, segment.start - scene.sourceStart)),
+    end: round(
+      Math.max(0, Math.min(scene.sourceEnd, segment.end) - scene.sourceStart)
+    ),
+  }))
 }
 
 export function buildReportScenes(
@@ -328,72 +443,43 @@ function comparableLength(value: string) {
   return value.replace(/[\s\p{P}\p{S}]+/gu, "").length
 }
 
+function ngramRecall(left: string, right: string, size: number) {
+  const leftGrams = ngrams(left, size)
+  const rightGrams = new Set(ngrams(right, size))
+  if (!leftGrams.length) return 0
+  return (
+    leftGrams.filter((gram) => rightGrams.has(gram)).length / leftGrams.length
+  )
+}
+
+function ngramDice(left: string, right: string, size: number) {
+  const leftGrams = new Set(ngrams(left, size))
+  const rightGrams = new Set(ngrams(right, size))
+  if (!leftGrams.size || !rightGrams.size) return 0
+  let shared = 0
+  for (const gram of leftGrams) {
+    if (rightGrams.has(gram)) shared += 1
+  }
+  return (2 * shared) / (leftGrams.size + rightGrams.size)
+}
+
+function ngrams(value: string, size: number) {
+  const normalized = value
+    .normalize("NFKC")
+    .toLocaleLowerCase("ko-KR")
+    .replace(/[^0-9a-z가-힣]/g, "")
+  if (normalized.length < size) return normalized ? [normalized] : []
+  return Array.from({ length: normalized.length - size + 1 }, (_, index) =>
+    normalized.slice(index, index + size)
+  )
+}
+
 export function reportCaptionPhrases(script: string) {
   const phrases = script
     .split(/\r?\n+/)
     .map(cleanPhrase)
     .filter(Boolean)
   return phrases.length >= 2 ? phrases : []
-}
-
-export function withEndCta(
-  cues: SubtitleCue[],
-  duration: number,
-  text = NEWS_END_CTA_TEXT,
-  ctaStartAt?: number
-) {
-  const safeDuration = Math.max(0, duration)
-  if (safeDuration < 1) return cues
-  const ctaDuration = Math.min(3, Math.max(2.2, safeDuration * 0.07))
-  const ctaStart = round(
-    ctaStartAt === undefined
-      ? Math.max(0, safeDuration - ctaDuration)
-      : Math.max(0, Math.min(safeDuration - 0.1, ctaStartAt))
-  )
-  const trimmed = cues
-    .filter((cue) => !cue.id.startsWith("end-cta"))
-    .flatMap((cue) => {
-      if (cue.start >= ctaStart) return []
-      const end = Math.min(cue.end, ctaStart)
-      return end - cue.start >= 0.1 ? [{ ...cue, end: round(end) }] : []
-    })
-  const [question, action] = text
-    .split(/\r?\n+/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-  if (!action) {
-    return [
-      ...trimmed,
-      {
-        id: "end-cta-question",
-        start: ctaStart,
-        end: round(safeDuration),
-        text: question || NEWS_END_CTA_TEXT.replace(/\n/g, " "),
-        emphasis: [],
-        emphasisColor: "yellow" as const,
-      },
-    ]
-  }
-  const middle = round(ctaStart + (safeDuration - ctaStart) * 0.52)
-  return [
-    ...trimmed,
-    {
-      id: "end-cta-question",
-      start: ctaStart,
-      end: middle,
-      text: question,
-      emphasis: [],
-      emphasisColor: "yellow" as const,
-    },
-    {
-      id: "end-cta-action",
-      start: middle,
-      end: round(safeDuration),
-      text: action,
-      emphasis: ["댓글"],
-      emphasisColor: "yellow" as const,
-    },
-  ]
 }
 
 export function contextualEndCtaText(

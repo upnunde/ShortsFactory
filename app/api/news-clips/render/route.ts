@@ -11,6 +11,7 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     project?: NewsClipProject
     settings?: NewsClipSettings
+    force?: boolean
   } | null
   if (!body?.project || !body.settings) {
     return NextResponse.json(
@@ -19,11 +20,16 @@ export async function POST(request: Request) {
     )
   }
   try {
-    const result = await renderNewsClip(body.project, body.settings)
-    return NextResponse.json({
-      ...result,
-      message: "영상, 자막, 제목 프레임, 썸네일과 제작 기록을 생성했습니다.",
+    const result = await renderNewsClip(body.project, body.settings, "final", {
+      force: body.force === true,
     })
+    return NextResponse.json(
+      {
+        ...result,
+        message: "영상, 자막, 제목 프레임, 썸네일과 제작 기록을 생성했습니다.",
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    )
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
     const ttsMessage = newsTtsErrorMessage(code)

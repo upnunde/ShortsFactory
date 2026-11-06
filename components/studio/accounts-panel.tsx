@@ -43,18 +43,21 @@ const EMPTY: Record<AccountPlatform, AccountStatus> = {
   youtube: {
     hasApp: false,
     connected: false,
+    accountId: null,
     accountName: null,
     avatarUrl: null,
   },
   instagram: {
     hasApp: false,
     connected: false,
+    accountId: null,
     accountName: null,
     avatarUrl: null,
   },
   tiktok: {
     hasApp: false,
     connected: false,
+    accountId: null,
     accountName: null,
     avatarUrl: null,
   },
@@ -64,10 +67,14 @@ export function AccountsPanel({
   notice,
   initialStatus = EMPTY,
   profileId,
+  returnTo = "character",
+  expectedYoutubeChannelId = "",
 }: {
   notice: { kind: "connected" | "error"; platform: string } | null
   initialStatus?: Record<AccountPlatform, AccountStatus>
   profileId: string
+  returnTo?: "character" | "news"
+  expectedYoutubeChannelId?: string
 }) {
   const [status, setStatus] = useState(initialStatus)
   const [origin, setOrigin] = useState("")
@@ -102,6 +109,10 @@ export function AccountsPanel({
           status={status[platform.id]}
           origin={origin}
           profileId={profileId}
+          returnTo={returnTo}
+          expectedAccountId={
+            platform.id === "youtube" ? expectedYoutubeChannelId : ""
+          }
           onChanged={refresh}
         />
       ))}
@@ -114,12 +125,16 @@ function AccountCard({
   status,
   origin,
   profileId,
+  returnTo,
+  expectedAccountId,
   onChanged,
 }: {
   platform: (typeof PLATFORMS)[number]
   status: AccountStatus
   origin: string
   profileId: string
+  returnTo: "character" | "news"
+  expectedAccountId: string
   onChanged: () => Promise<void>
 }) {
   const [clientId, setClientId] = useState("")
@@ -145,9 +160,11 @@ function AccountCard({
         return
       }
     }
+    const query = new URLSearchParams({ profileId, returnTo })
+    if (expectedAccountId) query.set("expectedAccountId", expectedAccountId)
     // OAuth starts through an internal route and then leaves the application.
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination
-    window.location.href = `/api/accounts/${platform.id}/start?profileId=${encodeURIComponent(profileId)}`
+    window.location.href = `/api/accounts/${platform.id}/start?${query.toString()}`
   }
 
   async function disconnect() {
@@ -178,6 +195,9 @@ function AccountCard({
             ? "이 컴퓨터에 로그인되어 있습니다."
             : platform.hint}
         </p>
+        {status.connected && status.accountId ? (
+          <p className="text-sm break-all text-muted">{status.accountId}</p>
+        ) : null}
         <p className="text-sm">
           <a
             className="underline"

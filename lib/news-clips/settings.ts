@@ -51,7 +51,6 @@ export function normalizeNewsClipSettings(
     bgmFile: pathValue(raw.bgmFile),
     bgmEnabled: raw.bgmEnabled !== false,
     bgmVolume: number(raw.bgmVolume, 0, 0.4, 0.12),
-    speechDucking: number(raw.speechDucking, 0.1, 0.8, 0.35),
     ttsProvider:
       raw.ttsProvider === "free" || raw.ttsProvider === "typecast"
         ? raw.ttsProvider
@@ -112,6 +111,7 @@ export function normalizeNewsClipSettings(
     safeMarginPercent: number(raw.safeMarginPercent, 5, 12, 7),
     removeFillers: raw.removeFillers === true,
     cutTransition: raw.cutTransition === "dissolve" ? "dissolve" : "hard",
+    youtubeAutoUpload: raw.youtubeAutoUpload === true,
   }
 }
 

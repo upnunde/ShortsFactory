@@ -10,10 +10,16 @@ export async function GET(
   const origin = request.nextUrl.origin
   const state = request.nextUrl.searchParams.get("state")
   const profileId = state?.split(".")[1] || "default"
+  const returnTo =
+    request.cookies.get("oauth_return_to")?.value === "news"
+      ? "news"
+      : "character"
+  const expectedAccountId =
+    request.cookies.get("oauth_expected_account")?.value ?? ""
   const back = (query: string) =>
     NextResponse.redirect(
       new URL(
-        `/?channel=${encodeURIComponent(profileId)}&view=settings&tab=accounts&${query}`,
+        `${returnTo === "news" ? "/studio/news-clips" : "/studio/character"}?channel=${encodeURIComponent(profileId)}&view=settings&tab=accounts&${query}`,
         origin
       )
     )
@@ -29,11 +35,15 @@ export async function GET(
     return back(`error=denied&platform=${raw}`)
   }
   try {
-    await finishOauth(origin, raw, code, profileId)
-  } catch {
-    return back(`error=token&platform=${raw}`)
+    await finishOauth(origin, raw, code, profileId, expectedAccountId)
+  } catch (error) {
+    return back(
+      `error=${error instanceof Error && error.message === "youtube-channel-mismatch" ? "channel" : "token"}&platform=${raw}`
+    )
   }
   const response = back(`connected=${raw}`)
   response.cookies.delete("oauth_state")
+  response.cookies.delete("oauth_return_to")
+  response.cookies.delete("oauth_expected_account")
   return response
 }

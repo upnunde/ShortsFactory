@@ -16,12 +16,18 @@ export async function GET(
   }
   const origin = request.nextUrl.origin
   const profileId = request.nextUrl.searchParams.get("profileId") ?? "default"
+  const returnTo =
+    request.nextUrl.searchParams.get("returnTo") === "news"
+      ? "news"
+      : "character"
+  const expectedAccountId =
+    request.nextUrl.searchParams.get("expectedAccountId") ?? ""
   const state = createOauthState(raw, profileId)
   const url = await authorizationUrl(origin, raw, state, profileId)
   if (!url) {
     return NextResponse.redirect(
       new URL(
-        `/?channel=${encodeURIComponent(profileId)}&view=settings&tab=accounts&setup=${raw}`,
+        `${returnTo === "news" ? "/studio/news-clips" : "/studio/character"}?channel=${encodeURIComponent(profileId)}&view=settings&tab=accounts&setup=${raw}`,
         origin
       )
     )
@@ -33,5 +39,19 @@ export async function GET(
     path: "/",
     maxAge: 600,
   })
+  response.cookies.set("oauth_return_to", returnTo, {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 600,
+  })
+  if (expectedAccountId) {
+    response.cookies.set("oauth_expected_account", expectedAccountId, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 600,
+    })
+  }
   return response
 }

@@ -2,17 +2,19 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
-  bodyDurationWithEndCta,
   buildReportScenes,
   contextualEndCtaText,
+  ensureReportEndCta,
   estimateReportDuration,
   estimateReportScenesDuration,
+  normalizeQuoteScenes,
+  quoteNarrationMatchesTranscript,
+  quoteTranscriptAlignment,
   reportCaptionPhrases,
   reportSubtitles,
   retimeSubtitleCuesToScenes,
-  withEndCta,
 } from "./report.ts"
-import type { TranscriptSegment } from "./types.ts"
+import type { NewsReportScene, TranscriptSegment } from "./types.ts"
 
 const transcript: TranscriptSegment[] = [
   {
@@ -135,6 +137,138 @@ test("직접 발언 장면은 TTS 분량이 아닌 원본 구간 길이를 사�
   assert.equal(subtitles[1].end, 9.75)
 })
 
+test("원문과 발화 길이가 맞는 직접 발언은 원본 음성을 유지한다", () => {
+  const quoteTranscript: TranscriptSegment[] = [
+    {
+      id: "quote-1",
+      text: "대통령이 내란 한다라는 것 자체가 넌센스 아닙니까?",
+      start: 43,
+      end: 48.4,
+      speaker: "speaker-1",
+      words: [],
+    },
+  ]
+  const scene: NewsReportScene = {
+    id: "quote-scene",
+    narration: "대통령이 내란 한다라는 것 자체가 넌센스 아닙니까?",
+    visual: "quote",
+    sourceId: "primary",
+    sourceStart: 43,
+    sourceEnd: 48.4,
+  }
+
+  assert.equal(quoteNarrationMatchesTranscript(scene, quoteTranscript), true)
+  assert.equal(
+    normalizeQuoteScenes([scene], { primary: quoteTranscript }, "primary")[0]
+      .visual,
+    "quote"
+  )
+})
+
+test("직접 발언 자막을 원본 자막 타임코드에 맞춘다", () => {
+  const scene: NewsReportScene = {
+    id: "quote-scene",
+    narration: "대통령이 내란 한다라는 것 자체가 넌센스 아닙니까?",
+    visual: "quote",
+    sourceId: "primary",
+    sourceStart: 43.239,
+    sourceEnd: 51.84,
+  }
+  const quoteTranscript: TranscriptSegment[] = [
+    {
+      id: "quote-1",
+      text: "대통령이 내란 한다라는 것 자체가 넌",
+      start: 43.239,
+      end: 48.36,
+      speaker: "speaker-1",
+      words: [],
+    },
+    {
+      id: "quote-2",
+      text: "센스 아닙니까?",
+      start: 46.32,
+      end: 51.84,
+      speaker: "speaker-1",
+      words: [],
+    },
+    {
+      id: "next-sentence",
+      text: "그날 저는 현장에서 변론할 때",
+      start: 48.36,
+      end: 54.16,
+      speaker: "speaker-1",
+      words: [],
+    },
+  ]
+
+  const alignment = quoteTranscriptAlignment(scene, quoteTranscript)
+
+  assert.deepEqual(
+    alignment.map((item) => item.text),
+    ["대통령이 내란 한다라는 것 자체가 넌", "센스 아닙니까?"]
+  )
+  assert.equal(alignment[0].start, 0)
+  assert.equal(alignment[1].start, 3.081)
+  assert.equal(alignment[1].end, 8.601)
+})
+
+test("요약 대본보다 원본 음성이 지나치게 긴 직접 발언은 TTS 장면으로 바꾼다", () => {
+  const quoteTranscript: TranscriptSegment[] = [
+    {
+      id: "quote-1",
+      text: "대통령이 내란 한다라는 것 자체가 넌센스 아닙니까?",
+      start: 43.239,
+      end: 51.84,
+      speaker: "speaker-1",
+      words: [],
+    },
+  ]
+  const scene: NewsReportScene = {
+    id: "quote-scene",
+    narration: "대통령이 내란을 한다는 것 자체가 넌센스라고 주장했어.",
+    visual: "quote",
+    sourceId: "primary",
+    sourceStart: 43.239,
+    sourceEnd: 51.84,
+  }
+
+  assert.equal(quoteNarrationMatchesTranscript(scene, quoteTranscript), false)
+  assert.equal(
+    normalizeQuoteScenes([scene], { primary: quoteTranscript }, "primary")[0]
+      .visual,
+    "source"
+  )
+})
+
+test("자막 원문을 확인할 수 없는 보조 자료의 직접 발언은 TTS 장면으로 바꾼다", () => {
+  const scene: NewsReportScene = {
+    id: "supporting-quote",
+    narration: "직접 발언입니다.",
+    visual: "quote",
+    sourceId: "supporting",
+    sourceStart: 10,
+    sourceEnd: 13,
+  }
+
+  assert.equal(
+    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0].visual,
+    "source"
+  )
+})
+
+test("일반 자료 화면은 직접 발언 검증과 관계없이 유지한다", () => {
+  const scene: NewsReportScene = {
+    id: "source-scene",
+    narration: "아나운서가 설명하는 장면입니다.",
+    visual: "source",
+    sourceId: "supporting",
+    sourceStart: 10,
+    sourceEnd: 13,
+  }
+
+  assert.equal(normalizeQuoteScenes([scene], {}, "primary")[0], scene)
+})
+
 test("실제 장면별 오디오 길이에 맞춰 자막 싱크를 다시 계산한다", () => {
   const scenes = buildReportScenes(
     "첫 장면 설명입니다. 직접 발언을 확인합니다. 마지막 설명입니다.",
@@ -250,56 +384,6 @@ test("장면 정보가 없는 기존 자막도 문장 순서로 장면 싱크를
   assert.equal(retimed[2].sceneId, scenes[1].id)
 })
 
-test("마지막 일반 자막과 겹치지 않게 댓글 유도 문구를 자동 배치한다", () => {
-  const subtitles = withEndCta(
-    [
-      {
-        id: "report-caption-1",
-        start: 0,
-        end: 10,
-        text: "마지막 결론입니다.",
-        emphasis: [],
-        emphasisColor: "yellow",
-      },
-    ],
-    10
-  )
-  const cta = subtitles.at(-1)
-  assert.equal(cta?.id, "end-cta-action")
-  assert.match(cta?.text ?? "", /댓글/)
-  assert.equal(subtitles[0].end, subtitles.at(-2)?.start)
-  assert.equal(cta?.end, 10)
-  assert.equal(
-    withEndCta(subtitles, 10).filter((cue) => cue.id.startsWith("end-cta"))
-      .length,
-    2
-  )
-})
-
-test("댓글 유도 자막은 발화가 끝난 뒤 별도 구간에 표시한다", () => {
-  const narrationDuration = 10
-  const outputDuration = bodyDurationWithEndCta(narrationDuration)
-  const subtitles = withEndCta(
-    [
-      {
-        id: "report-caption-1",
-        start: 0,
-        end: narrationDuration,
-        text: "마지막 발화까지 자막이 일치합니다.",
-        emphasis: [],
-        emphasisColor: "yellow",
-      },
-    ],
-    outputDuration,
-    "쟁점, 어떻게 봐?\n댓글로 의견 남겨줘.",
-    narrationDuration
-  )
-
-  assert.equal(subtitles[0].end, narrationDuration)
-  assert.equal(subtitles[1].start, narrationDuration)
-  assert.equal(subtitles.at(-1)?.end, outputDuration)
-})
-
 test("선택한 이슈의 핵심어를 반영해 자연스러운 마지막 질문을 만든다", () => {
   const cta = contextualEndCtaText("민주당 조작기소 특검법 논란", [
     "민주당",
@@ -308,4 +392,24 @@ test("선택한 이슈의 핵심어를 반영해 자연스러운 마지막 질�
   ])
   assert.match(cta, /^조작기소, 어떻게 봐\?/)
   assert.match(cta, /댓글로 의견 남겨줘/)
+})
+
+test("댓글 유도 문구를 대본 마지막 발화와 장면에 포함한다", () => {
+  const script = ensureReportEndCta(
+    "지원 대상과 재원 부담을 함께 봐야 해.",
+    "농어촌 기본소득 논란",
+    ["농어촌 기본소득"]
+  )
+  const scenes = buildReportScenes(script, transcript, 10, 25)
+  const subtitles = reportSubtitles(
+    scenes,
+    undefined,
+    reportCaptionPhrases(script)
+  )
+
+  assert.match(script, /댓글로 의견 남겨줘\.$/)
+  assert.match(scenes.at(-1)?.narration ?? "", /댓글/)
+  assert.match(subtitles.at(-1)?.text ?? "", /댓글/)
+  assert.ok(!subtitles.at(-1)?.id.startsWith("end-cta"))
+  assert.equal(ensureReportEndCta(script, "다른 제목"), script)
 })

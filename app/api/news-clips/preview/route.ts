@@ -28,10 +28,13 @@ export async function POST(request: Request) {
         force: body.force === true,
       }
     )
-    return NextResponse.json({
-      ...result,
-      message: "540×960 저해상도 초안을 만들었습니다.",
-    })
+    return NextResponse.json(
+      {
+        ...result,
+        message: "540×960 저해상도 초안을 만들었습니다.",
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    )
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
     const ttsMessage = newsTtsErrorMessage(code)
