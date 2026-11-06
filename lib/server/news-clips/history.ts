@@ -1,0 +1,126 @@
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import path from "node:path"
+
+import {
+  isNewsHistoryId,
+  type NewsHistoryEntry,
+  type NewsHistorySnapshot,
+} from "@/lib/news-clips/history"
+
+const root = path.join(process.cwd(), "outputs", "news-clips", "history")
+const indexPath = path.join(root, "index.json")
+const publicOutputRoot = path.join(
+  process.cwd(),
+  "public",
+  "news-clips",
+  "output"
+)
+
+let chain: Promise<void> = Promise.resolve()
+
+export async function listNewsHistory(profileId: string) {
+  const index = await readIndex()
+  return index
+    .filter((entry) => entry.profileId === profileId)
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+}
+
+export async function saveNewsHistory(snapshot: NewsHistorySnapshot) {
+  const id = snapshot.project.id
+  if (!isNewsHistoryId(id)) return false
+  return enqueue(async () => {
+    const savedAt = new Date().toISOString()
+    const stored: NewsHistorySnapshot = { ...snapshot, savedAt }
+    const entry: NewsHistoryEntry = {
+      id,
+      profileId: snapshot.project.profileId,
+      title:
+        snapshot.project.title.replace(/\s*\n\s*/g, " ").trim() ||
+        snapshot.project.selectedIssue?.title ||
+        snapshot.project.source?.title ||
+        "제목 없음",
+      issueTitle: snapshot.project.selectedIssue?.title ?? "",
+      step: snapshot.step,
+      updatedAt: savedAt,
+      finalized: snapshot.finalized,
+      hasPreview: Boolean(snapshot.project.previewUrl),
+      hasFinal: Boolean(snapshot.project.outputUrl),
+      durationSeconds: snapshot.project.outputDurationSeconds,
+    }
+    const folder = path.join(root, id)
+    await mkdir(folder, { recursive: true })
+    await writeFile(
+      path.join(folder, "project.json"),
+      `${JSON.stringify(stored, null, 2)}\n`
+    )
+    const index = await readIndex()
+    await writeIndex([entry, ...index.filter((item) => item.id !== id)])
+    return true
+  })
+}
+
+export async function readNewsHistory(id: string, profileId: string) {
+  if (!isNewsHistoryId(id)) return null
+  return enqueue(async () => {
+    try {
+      const snapshot = JSON.parse(
+        await readFile(path.join(root, id, "project.json"), "utf8")
+      ) as NewsHistorySnapshot
+      return snapshot.project.profileId === profileId ? snapshot : null
+    } catch {
+      return null
+    }
+  })
+}
+
+export async function deleteNewsHistory(id: string, profileId: string) {
+  if (!isNewsHistoryId(id)) return false
+  return enqueue(async () => {
+    const index = await readIndex()
+    if (
+      !index.some((entry) => entry.id === id && entry.profileId === profileId)
+    )
+      return false
+    await writeIndex(index.filter((entry) => entry.id !== id))
+    await rm(path.join(root, id), { recursive: true, force: true })
+    await rm(path.join(publicOutputRoot, id), { recursive: true, force: true })
+    return true
+  })
+}
+
+async function readIndex(): Promise<NewsHistoryEntry[]> {
+  try {
+    const parsed = JSON.parse(await readFile(indexPath, "utf8")) as unknown
+    return Array.isArray(parsed)
+      ? parsed.filter(validEntry).map((entry) => entry as NewsHistoryEntry)
+      : []
+  } catch {
+    return []
+  }
+}
+
+function validEntry(value: unknown) {
+  if (!value || typeof value !== "object") return false
+  const entry = value as Partial<NewsHistoryEntry>
+  return (
+    typeof entry.id === "string" &&
+    isNewsHistoryId(entry.id) &&
+    typeof entry.profileId === "string" &&
+    typeof entry.title === "string" &&
+    typeof entry.updatedAt === "string"
+  )
+}
+
+async function writeIndex(index: NewsHistoryEntry[]) {
+  await mkdir(root, { recursive: true })
+  await writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`)
+}
+
+function enqueue<T>(job: () => Promise<T>) {
+  const run = chain.then(job, job)
+  chain = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}

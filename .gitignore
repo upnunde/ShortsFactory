@@ -32,14 +32,20 @@ pnpm-debug.log*
 .env*
 
 # local account tokens and app secrets
-config/credentials/*.json
+config/credentials/*
+/config/news-channels-archive/
+/config/news-channels/**/settings.backup.json
 
 # generated shorts, keep the saved project
 /outputs/*
 !/outputs/history/
+/public/news-clips/output/
 
 # local character generation cache
 assets/characters/**/.angle-cache/
+
+# project-local media tools
+/.tools/
 
 # vercel
 .vercel

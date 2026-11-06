@@ -199,7 +199,7 @@ export function HistoryPanel({
                   ? `"${confirmDelete.topic}" 대본과 저장된 영상이 함께 삭제됩니다.`
                   : "선택한 작업이 삭제됩니다."}
               </AlertDialog.Body>
-              <AlertDialog.Footer>
+              <AlertDialog.Footer className="justify-end">
                 <Button
                   variant="outline"
                   isDisabled={deleting}
@@ -249,13 +249,15 @@ export function HistoryPanel({
                       <p className="text-xs text-muted">{index + 1}</p>
                       <p className="text-sm break-keep">{line.ko}</p>
                       {line.en ? (
-                        <p className="text-sm text-muted break-keep">{line.en}</p>
+                        <p className="text-sm break-keep text-muted">
+                          {line.en}
+                        </p>
                       ) : null}
                     </li>
                   ))}
                 </ol>
               </Modal.Body>
-              <Modal.Footer>
+              <Modal.Footer className="justify-end">
                 <Button
                   variant="outline"
                   onPress={() => {

@@ -40,7 +40,7 @@ export function SequencePreview({
         title={title}
         layout={layout}
         caption={inlineCaption}
-        label="합치기 전 미리보기"
+        label="미리보기"
         className="w-48 ring-1 ring-white/25"
         onIndex={setInlineIndex}
         onCaption={setInlineCaption}
@@ -76,18 +76,25 @@ export function SequencePreview({
                 title={title}
                 layout={layout}
                 caption={largeCaption}
-                label="합치기 전 미리보기 크게"
+                label="크게 보기"
                 autoPlay
                 className="h-[min(78vh,960px)] w-auto max-w-[92vw] ring-1 ring-white/25"
                 onIndex={setLargeIndex}
                 onCaption={setLargeCaption}
                 onReady={(video) => {
-                  if (video.dataset.clip === String(resume.current.index) && resume.current.time > 0) {
+                  if (
+                    video.dataset.clip === String(resume.current.index) &&
+                    resume.current.time > 0
+                  ) {
                     video.currentTime = resume.current.time
                   }
                 }}
               />
-              <Button className="mt-4" variant="outline" onPress={() => setOpen(false)}>
+              <Button
+                className="mt-4"
+                variant="outline"
+                onPress={() => setOpen(false)}
+              >
                 닫기
               </Button>
             </Modal.Dialog>
@@ -153,7 +160,15 @@ function SequenceVideo({
             onReady?.(event.currentTarget)
             onCaption(captionAt(clip, 0, event.currentTarget.duration))
           }}
-          onTimeUpdate={(event) => onCaption(captionAt(clip, event.currentTarget.currentTime, event.currentTarget.duration))}
+          onTimeUpdate={(event) =>
+            onCaption(
+              captionAt(
+                clip,
+                event.currentTarget.currentTime,
+                event.currentTarget.duration
+              )
+            )
+          }
           onEnded={() => {
             if (index + 1 < clips.length) {
               onCaption("")
@@ -170,13 +185,17 @@ function captionAt(clip: PreviewClip, time: number, duration: number) {
   if (!Number.isFinite(duration) || duration <= 0) {
     return ""
   }
-  const weights = clip.parts.map((part) => Math.max(0.1, narrationSeconds(part.script)))
+  const weights = clip.parts.map((part) =>
+    Math.max(0.1, narrationSeconds(part.script))
+  )
   const total = weights.reduce((sum, weight) => sum + weight, 0)
   let cursor = 0
   for (let index = 0; index < clip.parts.length; index += 1) {
     const part = clip.parts[index]
     const length =
-      index === clip.parts.length - 1 ? duration - cursor : (duration * weights[index]) / total
+      index === clip.parts.length - 1
+        ? duration - cursor
+        : (duration * weights[index]) / total
     if (time < cursor + length || index === clip.parts.length - 1) {
       const cues = cueSlices(part?.subtitle || "", length)
       let cueCursor = 0

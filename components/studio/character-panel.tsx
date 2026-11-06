@@ -230,7 +230,7 @@ export function CharacterPanel({ profileId }: { profileId: string }) {
                   ? `${deleteOutfit.name}과 그 안의 정면, 나머지 각도 이미지가 삭제됩니다.`
                   : "이 인물과 그 안의 이미지가 삭제됩니다."}
               </AlertDialog.Body>
-              <AlertDialog.Footer>
+              <AlertDialog.Footer className="justify-end">
                 <Button
                   variant="outline"
                   isDisabled={pending}

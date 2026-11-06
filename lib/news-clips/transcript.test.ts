@@ -1,0 +1,330 @@
+import assert from "node:assert/strict"
+import test from "node:test"
+
+import { buildSubtitles } from "./subtitles.ts"
+import {
+  fitTitleToLineLayouts,
+  fitTitleToTwoLines,
+  normalizeSubtitleCues,
+  updateEditedSubtitleCue,
+  retimeSubtitleCues,
+  resolveTextBox,
+  splitIntroTitleLines,
+  splitIntoSubtitleChunks,
+  titleLineCharacterLimit,
+  titleLineFontSize,
+  titleLineFits,
+  titleLineRenderMetrics,
+} from "./text-layout.ts"
+import { parseTranscript } from "./transcript.ts"
+import { defaultNewsClipSettings } from "./types.ts"
+
+test("SRT 시간 코드와 단어 시간을 읽는다", () => {
+  const segments = parseTranscript(`1
+00:00:10,000 --> 00:00:12,000
+세금이 20% 늘었습니다.
+
+2
+00:00:13,000 --> 00:00:15,000
+국민 부담으로 이어집니다.`)
+  assert.equal(segments.length, 2)
+  assert.equal(segments[0].start, 10)
+  assert.equal(segments[1].end, 15)
+  assert.ok(segments[0].words.length > 0)
+})
+
+test("삭제된 시간을 반영해 자막을 다시 맞춘다", () => {
+  const segments = parseTranscript(`1
+00:00:10,000 --> 00:00:12,000
+세금이 20% 늘었습니다.
+
+2
+00:00:14,000 --> 00:00:16,000
+국민 피해가 커집니다.`)
+  const captions = buildSubtitles(segments, [
+    { sourceStart: 10, sourceEnd: 12, outputStart: 0, outputEnd: 2 },
+    { sourceStart: 14, sourceEnd: 16, outputStart: 2, outputEnd: 4 },
+  ])
+  assert.ok(captions.length >= 2)
+  assert.equal(captions.at(-1)?.end, 4)
+  assert.ok(captions.flatMap((caption) => caption.emphasis).includes("20%"))
+})
+
+test("인트로 제목은 의미가 분리된 두 개의 한 줄 제목으로 맞춘다", () => {
+  const original = "세금 인상 배경\n국민 부담 두 배"
+  const fitted = fitTitleToTwoLines(
+    original,
+    defaultNewsClipSettings.titleCardText
+  )
+  const lines = splitIntroTitleLines(
+    fitted,
+    defaultNewsClipSettings.titleCardText
+  )
+
+  assert.equal(fitted, original)
+  assert.deepEqual(lines, ["세금 인상 배경", "국민 부담 두 배"])
+})
+
+test("사용자가 수정한 인트로 제목은 두 단으로 유지한다", () => {
+  const title = "농어촌 기본소득!\n지방 재정 예산 비상!!"
+  const lines = splitIntroTitleLines(
+    title,
+    defaultNewsClipSettings.titleCardText
+  )
+
+  assert.deepEqual(lines, ["농어촌 기본소득!", "지방 재정 예산 비상!!"])
+})
+
+test("인트로 각 단은 설정한 글자 크기를 그대로 쓴다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.titleCardText,
+    fontSize: 150,
+    letterSpacing: -4,
+    width: 972,
+  }
+  const fitted = titleLineFontSize("지방 재정 예산 비상!!", layout, 0.35)
+
+  const metrics = titleLineRenderMetrics("지방 재정 예산 비상!!", layout, 0.35)
+  assert.equal(fitted, layout.fontSize)
+  assert.equal(metrics.scaleX, 1)
+  assert.equal(titleLineCharacterLimit(layout), 7)
+  assert.equal(titleLineFits("지방 재정 예산 비상!!", layout), false)
+  assert.equal(titleLineFits("예산 비상!!", layout), true)
+})
+
+test("제목 허용 글자 수는 폭·크기·자간 변경을 함께 반영한다", () => {
+  const base = {
+    ...defaultNewsClipSettings.titleCardText,
+    fontSize: 100,
+    letterSpacing: 0,
+    width: 1008,
+  }
+
+  assert.equal(titleLineCharacterLimit(base), 11)
+  assert.equal(titleLineCharacterLimit({ ...base, fontSize: 125 }), 8)
+  assert.equal(titleLineCharacterLimit({ ...base, width: 808 }), 8)
+  assert.equal(titleLineCharacterLimit({ ...base, letterSpacing: 10 }), 10)
+})
+
+test("자동 제목은 1단과 2단의 서로 다른 크기에 맞춰 짧게 쓴다", () => {
+  const firstLayout = {
+    ...defaultNewsClipSettings.titleCardText,
+    fontSize: 114,
+    letterSpacing: -4,
+    width: 972,
+  }
+  const secondLayout = { ...firstLayout, fontSize: 150 }
+  const fitted = fitTitleToLineLayouts(
+    "농어촌 기본소득!\n지방 재정 예산 비상!!",
+    firstLayout,
+    secondLayout
+  )
+  const [firstLine, secondLine] = splitIntroTitleLines(fitted, firstLayout)
+
+  assert.equal(firstLine, "농어촌 기본소득!")
+  assert.equal(secondLine, "예산 비상!!")
+  assert.equal(titleLineFits(firstLine, firstLayout), true)
+  assert.equal(titleLineFits(secondLine, secondLayout), true)
+})
+
+test("긴 본문 자막은 자연스러운 의미 단위와 최대 두 줄로 나눈다", () => {
+  const cues = normalizeSubtitleCues(
+    [
+      {
+        id: "caption-long",
+        start: 0,
+        end: 8,
+        text: "정부는 세금을 올렸습니다. 국민 부담은 예상보다 훨씬 커졌습니다. 기업과 일자리에도 직접적인 영향이 이어지고 있습니다.",
+        emphasis: ["세금", "국민 부담", "일자리"],
+        emphasisColor: "yellow",
+      },
+    ],
+    defaultNewsClipSettings.bodySubtitleText
+  )
+
+  assert.ok(cues.length >= 2)
+  assert.equal(cues[0].start, 0)
+  assert.equal(cues.at(-1)?.end, 8)
+  assert.ok(cues.every((cue) => cue.text.split("\n").length <= 2))
+  assert.ok(
+    cues.every((cue, index) => index === 0 || cue.start >= cues[index - 1].end)
+  )
+})
+
+test("한 줄을 넘는 문장은 단어를 보존한 두 줄 자막으로 구성한다", () => {
+  const cues = normalizeSubtitleCues(
+    [
+      {
+        id: "caption-sentences",
+        start: 0,
+        end: 6,
+        text: "정부가 대책을 발표했습니다. 시행 시점은 아직 정해지지 않았습니다.",
+        emphasis: ["정부"],
+        emphasisColor: "yellow",
+      },
+    ],
+    defaultNewsClipSettings.bodySubtitleText
+  )
+
+  assert.equal(cues.length, 2)
+  assert.equal(cues[0].text, "정부가 대책을 발표했습니다.")
+  assert.equal(
+    cues[1].text.replace(/\n/g, " "),
+    "시행 시점은 아직 정해지지 않았습니다."
+  )
+  assert.ok(cues.every((cue) => cue.text.split("\n").length <= 2))
+  assert.equal(cues[0].start, 0)
+  assert.equal(cues[1].end, 6)
+})
+
+test("실제 글리프 폭으로 들어가는 짧은 문장은 한 줄로 유지한다", () => {
+  const cues = normalizeSubtitleCues(
+    [
+      {
+        id: "caption-one-line",
+        start: 0,
+        end: 2,
+        text: "2년간 시범 시행됩니다.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    {
+      ...defaultNewsClipSettings.bodySubtitleText,
+      fontSize: 95,
+      letterSpacing: -2,
+      width: 972,
+    }
+  )
+
+  assert.equal(cues.length, 1)
+  assert.equal(cues[0].text, "2년간 시범 시행됩니다.")
+})
+
+test("사용자가 제거한 불필요한 줄바꿈은 편집 완료 후 다시 생기지 않는다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    fontSize: 95,
+    letterSpacing: -2,
+    width: 972,
+  }
+  const original = [
+    {
+      id: "caption-7",
+      start: 12,
+      end: 15,
+      text: "이 결정은\n논란을 키웠습니다.",
+      emphasis: ["논란"],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+
+  const updated = updateEditedSubtitleCue(
+    original,
+    "caption-7",
+    "2년간 시범 시행됩니다.",
+    layout
+  )
+
+  assert.equal(updated[0].text, "2년간 시범 시행됩니다.")
+  assert.equal(updated[0].text.includes("\n"), false)
+  assert.equal(updated[0].start, 12)
+  assert.deepEqual(updated[0].emphasis, ["논란"])
+})
+
+test("짧은 문장도 단어를 자르지 않는 한 줄 자막으로 유지한다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    width: 464,
+    fontSize: 58,
+  }
+  const chunks = splitIntoSubtitleChunks(
+    "정부 정책 변화 이후 국민 부담 증가 우려가 계속 커지고 있습니다. 끝입니다.",
+    layout
+  )
+
+  assert.ok(chunks.length >= 2)
+  assert.ok(chunks.every((chunk) => !chunk.includes("\n")))
+  assert.ok(chunks.at(-1)?.endsWith("끝입니다."))
+})
+
+test("숫자 뒤 조사를 다음 자막으로 분리하지 않는다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    width: 540,
+    fontSize: 96,
+  }
+  const cues = normalizeSubtitleCues(
+    [
+      {
+        id: "caption-particle-1",
+        start: 0,
+        end: 1.8,
+        text: "다만 정부는 사업비의 40%",
+        emphasis: ["40%"],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "caption-particle-2",
+        start: 1.8,
+        end: 4,
+        text: "만 지원해 나머지 60%는 부담합니다.",
+        emphasis: ["60%"],
+        emphasisColor: "yellow",
+      },
+    ],
+    layout
+  )
+
+  assert.ok(cues.some((cue) => cue.text.includes("40%만")))
+  assert.ok(
+    cues.every((cue) => !cue.text.replace(/\n/g, " ").startsWith("만 "))
+  )
+  assert.ok(cues.every((cue) => cue.text.split("\n").length <= 2))
+})
+
+test("수동 편집한 자막 구간은 실제 음성 길이에 맞춰 비율을 유지한다", () => {
+  const cues = retimeSubtitleCues(
+    [
+      {
+        id: "caption-1",
+        start: 0,
+        end: 2,
+        text: "첫 번째 자막입니다.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "caption-2",
+        start: 2,
+        end: 6,
+        text: "두 번째 자막입니다.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    9
+  )
+
+  assert.equal(cues[0].start, 0)
+  assert.equal(cues[0].end, 3)
+  assert.equal(cues[1].start, 3)
+  assert.equal(cues[1].end, 9)
+})
+
+test("텍스트 폭과 정렬을 화면 대비 좌우 여백으로 계산한다", () => {
+  const centered = resolveTextBox(
+    defaultNewsClipSettings.titleCardText,
+    defaultNewsClipSettings.safeMarginPercent
+  )
+  const left = resolveTextBox(
+    { ...defaultNewsClipSettings.titleCardText, alignment: "left" },
+    defaultNewsClipSettings.safeMarginPercent
+  )
+
+  assert.equal(centered.widthPercent, 80)
+  assert.equal(centered.leftPercent, 10)
+  assert.equal(centered.rightPercent, 10)
+  assert.equal(left.leftPercent, 7)
+  assert.equal(left.rightPercent, 13)
+})

@@ -2,14 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 
-import {
-  Button,
-  Card,
-  Chip,
-  Label,
-  TextArea,
-  TextField,
-} from "@heroui/react"
+import { Button, Card, Chip, Label, TextArea, TextField } from "@heroui/react"
 import { LoaderCircle, Pause, Play } from "lucide-react"
 import { StepActions, StepHeader } from "@/components/studio/chrome"
 import {
@@ -17,16 +10,9 @@ import {
   projectSeconds,
   scriptBlocked,
 } from "@/lib/scene-status"
-import {
-  defaultSubtitle,
-  formatSeconds,
-  narrationSeconds,
-} from "@/lib/timing"
+import { defaultSubtitle, formatSeconds, narrationSeconds } from "@/lib/timing"
 import type { Project, Scene } from "@/lib/types"
-import {
-  defaultVideoSettings,
-  type VideoSettings,
-} from "@/lib/video-settings"
+import { defaultVideoSettings, type VideoSettings } from "@/lib/video-settings"
 
 export function ScriptStep({
   project,
@@ -224,7 +210,7 @@ export function ScriptStep({
           <div className="flex items-center justify-between gap-3 text-sm">
             <div className="flex items-center gap-2">
               <PlayButton
-                label="전체 대본 듣기"
+                label="전체 듣기"
                 text={voiceBusy === "all" ? "만드는 중" : "전체 듣기"}
                 busy={voiceBusy === "all"}
                 playing={playing === "all"}
@@ -269,7 +255,11 @@ export function ScriptStep({
               value={`${shownTotal.toFixed(1)}초 / ${videoSettings.targetDurationSeconds}±${videoSettings.durationToleranceSeconds}초`}
               danger={shownOver}
             />
-            <Metric label="대본 상태" value={blocked || "확정 가능"} danger={blocked !== ""} />
+            <Metric
+              label="대본 상태"
+              value={blocked || "확정 가능"}
+              danger={blocked !== ""}
+            />
           </div>
         </Card.Content>
       </Card>
@@ -313,9 +303,7 @@ export function ScriptStep({
         onBack={onBack}
         nextLabel="대본 완성 및 화면 연출 만들기"
         onNext={() => void completeScript()}
-        nextDisabled={
-          blocked !== "" || busy !== "" || voiceBusy !== ""
-        }
+        nextDisabled={blocked !== "" || busy !== "" || voiceBusy !== ""}
         note={
           blocked ||
           (shownOver
@@ -410,10 +398,6 @@ function SceneScriptCard({
           <section className="flex min-h-[19rem] flex-col rounded-xl border border-separator bg-default/20 p-4">
             <div className="shrink-0">
               <p className="text-sm font-medium">한국어 원문</p>
-              <p className="mt-1 text-xs text-muted">
-                내용을 수정하면 번역, 자막, 제목과 게시 문구를 함께 맞춥니다.
-                화면 연출은 대본 완성 후 별도로 생성됩니다.
-              </p>
             </div>
             <TextField
               className="mt-4 min-h-0 flex-1"
@@ -429,7 +413,6 @@ function SceneScriptCard({
           <section className="flex min-h-[19rem] flex-col rounded-xl border border-separator bg-default/20 p-4">
             <div>
               <p className="text-sm font-medium">영어 나레이션</p>
-              <p className="mt-1 text-xs text-muted">TTS가 읽는 확정 문장입니다.</p>
             </div>
             <div className="mt-4 min-h-20 rounded-lg bg-background/70 p-3 text-sm leading-6 ring-1 ring-separator">
               {scene.scriptTarget}
@@ -447,9 +430,6 @@ function SceneScriptCard({
               <Label>영문 자막 구간</Label>
               <TextArea rows={3} />
             </TextField>
-            <p className="mt-2 text-xs leading-5 text-muted">
-              한 줄이 한 구간이며, 음성 길이에 맞춰 최대 2줄씩 표시됩니다.
-            </p>
           </section>
         </div>
 
@@ -472,7 +452,7 @@ function SceneScriptCard({
                 isDisabled={rewriteDisabled}
                 onPress={onRevertKorean}
               >
-                한국어 되돌리기
+                되돌리기
               </Button>
             </div>
           </div>

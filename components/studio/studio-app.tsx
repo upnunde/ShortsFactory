@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 
 import { Button, ScrollShadow, Separator } from "@heroui/react"
-import { Pencil } from "lucide-react"
+import { ArrowLeftRight, Home } from "lucide-react"
 import { ChannelHub } from "@/components/studio/channel-hub"
 import { DirectionStep } from "@/components/studio/direction-step"
 import { FilmStep } from "@/components/studio/film-step"
@@ -139,7 +139,9 @@ function normalizeProject(project: Project): Project {
         ? project.directionSignature
         : "",
     voicePreviewKey:
-      typeof project.voicePreviewKey === "string" ? project.voicePreviewKey : "",
+      typeof project.voicePreviewKey === "string"
+        ? project.voicePreviewKey
+        : "",
     sceneDurations:
       project.sceneDurations && typeof project.sceneDurations === "object"
         ? project.sceneDurations
@@ -395,7 +397,7 @@ export function StudioApp({
     setStudio((current) => ({ ...current, step }))
     if (showSide) {
       router.replace(
-        `/?channel=${encodeURIComponent(studio.project.profileId)}`
+        `/studio/character?channel=${encodeURIComponent(studio.project.profileId)}`
       )
     }
   }
@@ -501,7 +503,7 @@ export function StudioApp({
       }))
       if (showSide) {
         router.replace(
-          `/?channel=${encodeURIComponent(profile?.id ?? "default")}`
+          `/studio/character?channel=${encodeURIComponent(profile?.id ?? "default")}`
         )
       }
     } catch {
@@ -681,7 +683,8 @@ export function StudioApp({
           youtube: { ...current.project.youtube, ...body.youtube },
           instagram: {
             ...current.project.instagram,
-            caption: body.instagram?.caption ?? current.project.instagram.caption,
+            caption:
+              body.instagram?.caption ?? current.project.instagram.caption,
           },
           tiktok: {
             ...current.project.tiktok,
@@ -805,7 +808,9 @@ export function StudioApp({
           message?: string
         }
         if (!voiceResponse.ok || !voiceBody.key || !voiceBody.clips) {
-          setScriptError(voiceBody.message || "수정된 대본의 음성을 측정하지 못했습니다.")
+          setScriptError(
+            voiceBody.message || "수정된 대본의 음성을 측정하지 못했습니다."
+          )
           return
         }
         workingPreview = voiceBody
@@ -951,7 +956,9 @@ export function StudioApp({
         project.finalSignature = body.signature
       }
       setStudio({ step: saved.step, project })
-      router.push(`/?channel=${encodeURIComponent(project.profileId)}`)
+      router.push(
+        `/studio/character?channel=${encodeURIComponent(project.profileId)}`
+      )
     } catch {
       setScriptError("작업을 불러오지 못했습니다.")
     }
@@ -976,35 +983,41 @@ export function StudioApp({
       <ChannelHub
         profiles={profiles}
         onOpen={(profileId) =>
-          router.push(`/?channel=${encodeURIComponent(profileId)}`)
+          router.push(
+            `/studio/character?channel=${encodeURIComponent(profileId)}`
+          )
         }
         onCreated={(created) => {
           setProfiles((current) => [...current, created])
-          router.push(`/?channel=${encodeURIComponent(created.id)}`)
+          router.push(
+            `/studio/character?channel=${encodeURIComponent(created.id)}`
+          )
         }}
+        onBack={() => router.push("/")}
       />
     )
   }
 
   return (
     <div className="flex h-svh bg-background text-foreground">
-      <aside className="flex w-56 shrink-0 flex-col border-r border-separator bg-surface">
-        <div className="px-4 py-5">
-          <p className="text-xs tracking-wide text-muted">현재 채널</p>
-          <div className="mt-1 flex items-center gap-1">
-            <h1 className="min-w-0 flex-1 truncate text-base font-medium">
+      <aside className="sticky top-0 flex h-svh w-56 shrink-0 flex-col border-r border-separator bg-surface">
+        <div className="flex items-center gap-2 px-4 py-4">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs tracking-wide text-muted">캐릭터·AI 생성형</p>
+            <h1 className="mt-1 truncate text-base font-medium">
               {profile.name}
             </h1>
-            <Button
-              size="sm"
-              variant="ghost"
-              isIconOnly
-              aria-label="채널 바꾸기"
-              onPress={() => router.push("/")}
-            >
-              <Pencil className="size-4" />
-            </Button>
           </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            isIconOnly
+            aria-label="캐릭터 채널 변경"
+            className="shrink-0"
+            onPress={() => router.push("/studio/character")}
+          >
+            <ArrowLeftRight className="size-4" />
+          </Button>
         </div>
         <Separator />
         <nav className="flex flex-1 flex-col gap-1 p-3">
@@ -1031,7 +1044,7 @@ export function StudioApp({
             fullWidth
             onPress={() =>
               router.push(
-                `/?channel=${encodeURIComponent(profile.id)}&view=history`
+                `/studio/character?channel=${encodeURIComponent(profile.id)}&view=history`
               )
             }
           >
@@ -1044,11 +1057,18 @@ export function StudioApp({
             fullWidth
             onPress={() =>
               router.push(
-                `/?channel=${encodeURIComponent(profile.id)}&view=settings`
+                `/studio/character?channel=${encodeURIComponent(profile.id)}&view=settings`
               )
             }
           >
-            <span className="flex w-full items-center justify-start">설정</span>
+            <span className="flex w-full items-center justify-start">
+              채널 설정
+            </span>
+          </Button>
+          <Button variant="ghost" fullWidth onPress={() => router.push("/")}>
+            <span className="flex w-full items-center gap-2 text-left">
+              <Home className="size-4" /> 홈
+            </span>
           </Button>
         </div>
       </aside>
@@ -1226,7 +1246,6 @@ export function StudioApp({
               ) : null}
             </>
           )}
-
         </main>
       </ScrollShadow>
     </div>
@@ -1240,9 +1259,7 @@ function settingsTab(view: string | null, tab: string | null) {
   if (view === "accounts" || tab === "accounts") {
     return "accounts" as const
   }
-  if (tab === "keys" || tab === "frame") {
-    return tab
-  }
+  if (tab === "frame") return tab
   return "frame" as const
 }
 

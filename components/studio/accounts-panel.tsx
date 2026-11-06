@@ -40,9 +40,24 @@ const PLATFORMS: {
 ]
 
 const EMPTY: Record<AccountPlatform, AccountStatus> = {
-  youtube: { hasApp: false, connected: false, accountName: null },
-  instagram: { hasApp: false, connected: false, accountName: null },
-  tiktok: { hasApp: false, connected: false, accountName: null },
+  youtube: {
+    hasApp: false,
+    connected: false,
+    accountName: null,
+    avatarUrl: null,
+  },
+  instagram: {
+    hasApp: false,
+    connected: false,
+    accountName: null,
+    avatarUrl: null,
+  },
+  tiktok: {
+    hasApp: false,
+    connected: false,
+    accountName: null,
+    avatarUrl: null,
+  },
 }
 
 export function AccountsPanel({

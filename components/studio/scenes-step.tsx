@@ -237,7 +237,7 @@ function SceneClipCard({
           isDisabled={!ready || busy}
           onPress={onRedo}
         >
-          이 영상만 다시 만들기
+          다시 만들기
         </Button>
       </Card.Content>
     </Card>

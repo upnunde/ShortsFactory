@@ -3,16 +3,19 @@
 import { useState } from "react"
 
 import { Button, Card, Input, Label, TextField } from "@heroui/react"
+import { ArrowLeft } from "lucide-react"
 import type { ChannelProfile } from "@/lib/types"
 
 export function ChannelHub({
   profiles,
   onOpen,
   onCreated,
+  onBack,
 }: {
   profiles: ChannelProfile[]
   onOpen: (profileId: string) => void
   onCreated: (profile: ChannelProfile) => void
+  onBack: () => void
 }) {
   const [name, setName] = useState("")
   const [pending, setPending] = useState(false)
@@ -44,14 +47,21 @@ export function ChannelHub({
   return (
     <main className="min-h-svh bg-background px-6 py-12 text-foreground">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-8">
+        <nav className="flex items-center gap-2 text-sm text-muted">
+          <Button size="sm" variant="ghost" onPress={onBack}>
+            <ArrowLeft className="size-4" /> 제작 모드
+          </Button>
+          <span aria-hidden="true">/</span>
+          <span>캐릭터·AI 생성형</span>
+        </nav>
         <div>
           <p className="text-sm text-muted">쇼츠 팩토리</p>
           <h1 className="mt-2 text-3xl font-semibold">
             작업할 채널을 선택하세요
           </h1>
           <p className="mt-2 text-sm text-muted">
-            채널마다 캐릭터, 말투, TTS, 배경음악, 영상 폼과 업로드 계정을 따로
-            관리합니다.
+            캐릭터 제작 전용 채널만 표시됩니다. 뉴스 채널과 정보·설정·작업
+            내역을 공유하지 않습니다.
           </p>
         </div>
 
@@ -70,9 +80,7 @@ export function ChannelHub({
                 </p>
               </Card.Content>
               <Card.Footer className="justify-end">
-                <Button onPress={() => onOpen(profile.id)}>
-                  이 채널 작업실 열기
-                </Button>
+                <Button onPress={() => onOpen(profile.id)}>열기</Button>
               </Card.Footer>
             </Card>
           ))}
@@ -82,7 +90,8 @@ export function ChannelHub({
           <Card.Header>
             <Card.Title>새 채널</Card.Title>
             <Card.Description>
-              기본 채널의 설정과 캐릭터 소스를 복사한 뒤 독립적으로 관리합니다.
+              기본 캐릭터 채널의 설정과 소스를 복사한 뒤 이 모드 안에서만
+              관리합니다.
             </Card.Description>
           </Card.Header>
           <Card.Content className="flex items-end gap-3">

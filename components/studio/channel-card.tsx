@@ -130,7 +130,7 @@ export function ChannelSettingsCard({
 
         <div className="flex items-center justify-end gap-3">
           {note ? <p className="text-sm text-muted">{note}</p> : null}
-          <Button onPress={() => void save()}>기본값 저장</Button>
+          <Button onPress={() => void save()}>저장</Button>
         </div>
       </Card.Content>
     </Card>

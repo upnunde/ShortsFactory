@@ -1,0 +1,82 @@
+{
+  "profileId": "news-channel-30cfb65e",
+  "preferredChannels": [],
+  "issueSearchGuidance": "현 정부와 민주당의 정책·발언·수사·권력 행사는 모순과 국민 피해를 근거로 비판한다. 보수 진영 인사와 그들이 제시하는 근거·해명·문제 제기는 원본에서 확인되는 범위에서 긍정적·옹호적으로 다룬다. 주장은 확정 사실과 구분하고 공식 자료·직접 발언·복수 매체 근거를 우선한다.",
+  "communitySignalsEnabled": false,
+  "communityCacheMinutes": 30,
+  "targetMinSeconds": 45,
+  "targetMaxSeconds": 58,
+  "idealMinSeconds": 50,
+  "idealMaxSeconds": 55,
+  "hardMaxSeconds": 59,
+  "titleCardSeconds": 2.5,
+  "titleFrameImage": "/news-clips/news-channel-30cfb65e/titleFrame-62fb41391ae2.png",
+  "bodyFrameImage": "/news-clips/news-channel-30cfb65e/bodyFrame-e4ca6faeb41f.png",
+  "bgmFile": "/news-clips/news-channel-30cfb65e/bgm-4aca5ede8b0f.mp3",
+  "bgmEnabled": true,
+  "bgmVolume": 0.12,
+  "speechDucking": 0.35,
+  "ttsProvider": "auto",
+  "titleVoice": "mms-kor",
+  "typecastVoiceId": "tc_66ab0e26ec23f325b7ad51df",
+  "typecastVoices": [
+    {
+      "id": "typecast-default",
+      "name": "아나운서",
+      "voiceId": "tc_5e4f7a5da82e1f000aca31af"
+    },
+    {
+      "id": "typecast-voice-2",
+      "name": "얘슬",
+      "voiceId": "tc_66ab0e26ec23f325b7ad51df"
+    }
+  ],
+  "titleVoiceRate": -4,
+  "titleVolume": 1,
+  "sourceVolume": 1,
+  "quoteVolume": 1,
+  "fontFamily": "Black Han Sans",
+  "titleCardText": {
+    "fontSize": 130,
+    "fontWeight": 900,
+    "letterSpacing": -4,
+    "x": 108,
+    "y": 1095,
+    "width": 1080,
+    "alignment": "center"
+  },
+  "titleCardSecondFontSize": 155,
+  "titleCardLineHeightPercent": 100,
+  "titleCardColor": "#ffffff",
+  "titleCardSecondColor": "#ffd84d",
+  "bodyTitleText": {
+    "fontSize": 70,
+    "fontWeight": 800,
+    "letterSpacing": -2,
+    "x": 72,
+    "y": 315,
+    "width": 972,
+    "alignment": "center"
+  },
+  "bodyTitleColor": "#ffd84d",
+  "bodySubtitleText": {
+    "fontSize": 92,
+    "fontWeight": 900,
+    "letterSpacing": -4,
+    "x": 22,
+    "y": 1182,
+    "width": 1037,
+    "alignment": "center"
+  },
+  "subtitleColor": "#ffffff",
+  "emphasisColor": "#ffd84d",
+  "videoRect": {
+    "x": 0,
+    "y": 420,
+    "width": 1080,
+    "height": 720
+  },
+  "safeMarginPercent": 5,
+  "removeFillers": false,
+  "cutTransition": "hard"
+}

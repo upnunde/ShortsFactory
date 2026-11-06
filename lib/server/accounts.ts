@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto"
-import { YOUTUBE_UPLOAD_SCOPES } from "@/lib/youtube-metadata"
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
+
+import { YOUTUBE_UPLOAD_SCOPES } from "../youtube-metadata.ts"
 
 export const ACCOUNT_PLATFORMS = ["youtube", "instagram", "tiktok"] as const
 
@@ -11,6 +12,7 @@ export type AccountStatus = {
   hasApp: boolean
   connected: boolean
   accountName: string | null
+  avatarUrl: string | null
 }
 
 type AppCredentials = {
@@ -22,6 +24,7 @@ type StoredToken = {
   accessToken: string
   refreshToken?: string
   accountName: string
+  avatarUrl?: string
   connectedAt: string
 }
 
@@ -138,11 +141,12 @@ export async function finishOauth(
       : platform === "instagram"
         ? await exchangeFacebook(app, callback, code)
         : await exchangeTikTok(app, callback, code)
-  const accountName = await accountNameFor(platform, token.accessToken)
+  const identity = await accountIdentityFor(platform, token.accessToken)
   const stored: StoredToken = {
     accessToken: token.accessToken,
     refreshToken: token.refreshToken,
-    accountName,
+    accountName: identity.name,
+    avatarUrl: identity.avatarUrl,
     connectedAt: new Date().toISOString(),
   }
   await mkdir(credentialsDir, { recursive: true })
@@ -219,6 +223,7 @@ async function statusFor(
     hasApp: app !== null,
     connected: token !== null,
     accountName: token?.accountName ?? null,
+    avatarUrl: token?.avatarUrl ?? null,
   }
 }
 
@@ -321,7 +326,10 @@ async function exchangeTikTok(
   return { accessToken: json.access_token, refreshToken: json.refresh_token }
 }
 
-async function accountNameFor(platform: AccountPlatform, accessToken: string) {
+async function accountIdentityFor(
+  platform: AccountPlatform,
+  accessToken: string
+) {
   try {
     if (platform === "youtube") {
       const response = await fetch(
@@ -329,9 +337,22 @@ async function accountNameFor(platform: AccountPlatform, accessToken: string) {
         { headers: { Authorization: `Bearer ${accessToken}` } }
       )
       const json = (await response.json()) as {
-        items?: { snippet?: { title?: string } }[]
+        items?: {
+          snippet?: {
+            title?: string
+            thumbnails?: Record<string, { url?: string }>
+          }
+        }[]
       }
-      return json.items?.[0]?.snippet?.title || "유튜브 채널"
+      const snippet = json.items?.[0]?.snippet
+      return {
+        name: snippet?.title || "유튜브 채널",
+        avatarUrl:
+          snippet?.thumbnails?.high?.url ||
+          snippet?.thumbnails?.medium?.url ||
+          snippet?.thumbnails?.default?.url ||
+          "",
+      }
     }
     if (platform === "instagram") {
       const response = await fetch(
@@ -341,7 +362,10 @@ async function accountNameFor(platform: AccountPlatform, accessToken: string) {
         }
       )
       const json = (await response.json()) as { name?: string }
-      return json.name || "인스타그램 계정"
+      return {
+        name: json.name || "인스타그램 계정",
+        avatarUrl: "",
+      }
     }
     const response = await fetch(
       "https://open.tiktokapis.com/v2/user/info/?fields=display_name",
@@ -352,8 +376,11 @@ async function accountNameFor(platform: AccountPlatform, accessToken: string) {
     const json = (await response.json()) as {
       data?: { user?: { display_name?: string } }
     }
-    return json.data?.user?.display_name || "틱톡 계정"
+    return {
+      name: json.data?.user?.display_name || "틱톡 계정",
+      avatarUrl: "",
+    }
   } catch {
-    return "연결된 계정"
+    return { name: "연결된 계정", avatarUrl: "" }
   }
 }
