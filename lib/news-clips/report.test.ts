@@ -3,8 +3,10 @@ import test from "node:test"
 
 import {
   buildReportScenes,
+  appendEndCtaScenes,
   contextualEndCtaText,
   ensureReportEndCta,
+  splitEndCtaFromScript,
   estimateReportDuration,
   estimateReportScenesDuration,
   normalizeQuoteScenes,
@@ -72,6 +74,34 @@ test("문장별 장면에 핵심 원본 식별자를 기본 저장하고 보조 
   assert.equal(scenes[0].sourceStart, 2)
   assert.equal(scenes[0].sourceEnd, 7)
   assert.equal(scenes[1].sourceId, "primary-source")
+})
+
+test("장면 재구성 시 구간별 crop을 보존한다", () => {
+  const scenes = buildReportScenes(
+    "첫 문장입니다. 두 번째 문장입니다.",
+    transcript,
+    10,
+    30,
+    [
+      {
+        id: "saved-scene",
+        narration: "첫 문장입니다.",
+        visual: "source",
+        sourceId: "primary-source",
+        sourceStart: 10,
+        sourceEnd: 15,
+        crop: { x: 30, y: 40, zoom: 1.4, faceTracking: false },
+      },
+    ],
+    "primary-source"
+  )
+  assert.deepEqual(scenes[0].crop, {
+    x: 30,
+    y: 40,
+    zoom: 1.4,
+    faceTracking: false,
+  })
+  assert.equal(scenes[1].crop, undefined)
 })
 
 test("문장별 TTS 길이를 기준으로 자막 타임라인을 연속 배치한다", () => {
@@ -385,31 +415,85 @@ test("장면 정보가 없는 기존 자막도 문장 순서로 장면 싱크를
 })
 
 test("선택한 이슈의 핵심어를 반영해 자연스러운 마지막 질문을 만든다", () => {
-  const cta = contextualEndCtaText("민주당 조작기소 특검법 논란", [
-    "민주당",
+  const issueCta = contextualEndCtaText("민주당 조작기소 특검법 논란", [
     "조작기소",
     "특검법",
   ])
-  assert.match(cta, /^조작기소, 어떻게 봐\?/)
-  assert.match(cta, /댓글로 의견 남겨줘/)
+  assert.match(issueCta, /^조작기소에 대해 어떻게 생각해\?/)
+  assert.match(issueCta, /댓글로 남겨줘/)
+
+  const personCta = contextualEndCtaText("김계리 발언 논란", ["김계리"])
+  assert.match(personCta, /^김계리의 의견에 어떻게 생각해\?/)
 })
 
-test("댓글 유도 문구를 대본 마지막 발화와 장면에 포함한다", () => {
+test("댓글 유도 문구는 본편 다음 별도 장면으로 분리한다", () => {
   const script = ensureReportEndCta(
     "지원 대상과 재원 부담을 함께 봐야 해.",
     "농어촌 기본소득 논란",
     ["농어촌 기본소득"]
   )
-  const scenes = buildReportScenes(script, transcript, 10, 25)
+  const { body, cta } = splitEndCtaFromScript(script)
+  const scenes = appendEndCtaScenes(
+    buildReportScenes(body, transcript, 10, 25),
+    cta
+  )
   const subtitles = reportSubtitles(
     scenes,
     undefined,
-    reportCaptionPhrases(script)
+    reportCaptionPhrases(body)
   )
 
-  assert.match(script, /댓글로 의견 남겨줘\.$/)
+  assert.match(script, /댓글로 남겨줘\.$/)
+  assert.equal(scenes.at(-1)?.id, "end-cta")
   assert.match(scenes.at(-1)?.narration ?? "", /댓글/)
+  assert.ok(
+    scenes
+      .slice(0, -1)
+      .every((scene) => !/댓글/.test(scene.narration))
+  )
   assert.match(subtitles.at(-1)?.text ?? "", /댓글/)
-  assert.ok(!subtitles.at(-1)?.id.startsWith("end-cta"))
+  assert.ok(subtitles.at(-1)?.id.startsWith("end-cta"))
   assert.equal(ensureReportEndCta(script, "다른 제목"), script)
+})
+
+test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않는다", () => {
+  const phrases = [
+    "국민이 진실이라고 믿던 그 보도,",
+    "알고 보니 불러주는 대로 받아쓴 거라는데?",
+    "언론한테 반성하라는 이 발언, 직접 들어봐.",
+    "김계리 발언에 대해 어떻게 생각해?",
+    "댓글로 의견 남겨줘.",
+  ]
+  const scenes = [
+    {
+      id: "buildup-teaser",
+      narration: phrases.slice(0, 3).join("\n"),
+      visual: "source" as const,
+      sourceStart: 10,
+      sourceEnd: 13,
+    },
+    {
+      id: "buildup-highlight",
+      narration: "공수처가 현직 대통령을 체포하는 장면을 연출한다",
+      visual: "quote" as const,
+      sourceStart: 20,
+      sourceEnd: 70,
+    },
+    {
+      id: "end-cta",
+      narration: phrases.slice(3).join("\n"),
+      visual: "source" as const,
+      sourceStart: 68,
+      sourceEnd: 70,
+    },
+  ]
+  const subtitles = reportSubtitles(scenes, [9, 50, 4], phrases)
+  const quoteSubs = subtitles.filter(
+    (cue) => cue.sceneId === "buildup-highlight"
+  )
+  const ctaSubs = subtitles.filter((cue) => cue.sceneId === "end-cta")
+
+  assert.ok(quoteSubs.every((cue) => !/댓글|어떻게 생각/.test(cue.text)))
+  assert.ok(quoteSubs.some((cue) => /공수처|대통령/.test(cue.text)))
+  assert.ok(ctaSubs.some((cue) => /댓글/.test(cue.text)))
 })

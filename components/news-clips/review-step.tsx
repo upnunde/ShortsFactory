@@ -155,13 +155,13 @@ export function NewsClipReviewStep({
   const scriptFrameVideoRef = useRef<HTMLVideoElement | null>(null)
   const directionVideoRef = useRef<HTMLVideoElement | null>(null)
   const renderedVideoRef = useRef<HTMLVideoElement | null>(null)
-  const [selectedDirectionSceneId, setSelectedDirectionSceneId] = useState(
-    project.reportScenes[0]?.id ?? ""
+  const [selectedDirectionSceneId, setSelectedDirectionSceneId] = useState("")
+  const selectedDirectionScene = project.reportScenes.find(
+    (scene) => scene.id === selectedDirectionSceneId
   )
-  const selectedDirectionScene =
-    project.reportScenes.find(
-      (scene) => scene.id === selectedDirectionSceneId
-    ) ?? project.reportScenes[0]
+  // 미리보기 seek용 폴백. 보정 패널 노출은 selectedDirectionScene만 사용.
+  const previewDirectionScene =
+    selectedDirectionScene ?? project.reportScenes[0]
   const bodyPreviewCrop = selectedDirectionScene?.crop ?? project.crop
   const automaticIntroRange = selectIntroStillRange({
     ...project,
@@ -266,27 +266,27 @@ export function NewsClipReviewStep({
     video.currentTime =
       frameMode === "title"
         ? introCursor
-        : Math.max(0, selectedDirectionScene?.sourceStart ?? 0)
+        : Math.max(0, previewDirectionScene?.sourceStart ?? 0)
   }, [
     frameMode,
     introCursor,
     introVideoUrl,
     mode,
-    selectedDirectionScene?.id,
-    selectedDirectionScene?.sourceStart,
+    previewDirectionScene?.id,
+    previewDirectionScene?.sourceStart,
     scriptBodyVideoUrl,
   ])
 
   useEffect(() => {
     const video = directionVideoRef.current
     if (mode === "direction" && video?.readyState) {
-      video.currentTime = Math.max(0, selectedDirectionScene?.sourceStart ?? 0)
+      video.currentTime = Math.max(0, previewDirectionScene?.sourceStart ?? 0)
     }
   }, [
     mode,
-    selectedDirectionScene?.id,
-    selectedDirectionScene?.sourceStart,
-    selectedDirectionScene?.visual,
+    previewDirectionScene?.id,
+    previewDirectionScene?.sourceStart,
+    previewDirectionScene?.visual,
     directionSourceVideoUrl,
   ])
 
@@ -500,7 +500,7 @@ export function NewsClipReviewStep({
 
     onProject({ subtitles })
     setSelectedSubtitleId(id)
-    setFrameMode("body")
+    setCompositionPane("body")
   }
 
   function removeSubtitle(captionId: string) {
@@ -835,7 +835,7 @@ export function NewsClipReviewStep({
                     onLoadedMetadata={(event) => {
                       event.currentTarget.currentTime = Math.max(
                         0,
-                        selectedDirectionScene?.sourceStart ?? 0
+                        previewDirectionScene?.sourceStart ?? 0
                       )
                     }}
                   />
@@ -845,7 +845,7 @@ export function NewsClipReviewStep({
           ) : mode === "direction" && directionSourceVideoUrl ? (
             <video
               ref={directionVideoRef}
-              key={`${directionSourceVideoUrl}-${selectedDirectionScene?.id ?? "scene"}`}
+              key={`${directionSourceVideoUrl}-${previewDirectionScene?.id ?? "scene"}`}
               src={directionSourceVideoUrl}
               controls
               playsInline
@@ -860,7 +860,7 @@ export function NewsClipReviewStep({
                 }
                 event.currentTarget.currentTime = Math.max(
                   0,
-                  selectedDirectionScene?.sourceStart ?? 0
+                  previewDirectionScene?.sourceStart ?? 0
                 )
               }}
             />
@@ -929,7 +929,7 @@ export function NewsClipReviewStep({
                     onLoadedMetadata={(event) => {
                       event.currentTarget.currentTime = Math.max(
                         0,
-                        selectedDirectionScene?.sourceStart ?? 0
+                        previewDirectionScene?.sourceStart ?? 0
                       )
                     }}
                   />
@@ -965,7 +965,7 @@ export function NewsClipReviewStep({
                       ...current,
                       [mode]: tab.id,
                     }))
-                    if (tab.id === "captions") setFrameMode("body")
+                    if (tab.id === "captions") setCompositionPane("body")
                     if (tab.id === "scenes") {
                       setFrameMode(
                         compositionPane === "intro" ? "title" : "body"
@@ -1238,7 +1238,7 @@ export function NewsClipReviewStep({
                           className={field}
                           onFocus={() => {
                             setSelectedSubtitleId(caption.id)
-                            setFrameMode("body")
+                            setCompositionPane("body")
                           }}
                           onChange={(event) =>
                             updateSubtitleText(
@@ -1446,7 +1446,7 @@ export function NewsClipReviewStep({
                   <div className="flex flex-col gap-3">
                     {project.reportScenes.length ? (
                       project.reportScenes.map((scene, index) => {
-                        const selected = scene.id === selectedDirectionScene?.id
+                        const selected = scene.id === selectedDirectionSceneId
                         const crop = scene.crop ?? project.crop
                         const patchCrop = (partial: Partial<typeof crop>) =>
                           updateReportScene(scene.id, {
@@ -1606,7 +1606,7 @@ export function NewsClipReviewStep({
                           value={caption.text}
                           onFocus={() => {
                             setSelectedSubtitleId(caption.id)
-                            setFrameMode("body")
+                            setCompositionPane("body")
                           }}
                           onChange={(event) =>
                             onProject({
@@ -1639,7 +1639,7 @@ export function NewsClipReviewStep({
                           value={caption.emphasis.join(", ")}
                           onFocus={() => {
                             setSelectedSubtitleId(caption.id)
-                            setFrameMode("body")
+                            setCompositionPane("body")
                           }}
                           onChange={(event) =>
                             onProject({
