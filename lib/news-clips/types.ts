@@ -168,6 +168,7 @@ export type NewsReportScene = {
   sourceId?: string
   sourceStart: number
   sourceEnd: number
+  crop?: CropPosition
 }
 
 export type CropPosition = {

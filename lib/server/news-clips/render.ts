@@ -995,9 +995,6 @@ async function makeBodyVideo(
   const background = publicFile(settings.bodyFrameImage)
   const backgroundIndex = background ? sourceInputs.length : -1
   const reportAudioIndex = sourceInputs.length + (background ? 1 : 0)
-  const zoom = Math.max(1.02, Math.min(1.8, project.crop.zoom))
-  const cropX = Math.max(0, Math.min(100, project.crop.x)) / 100
-  const cropY = Math.max(0, Math.min(100, project.crop.y)) / 100
   const sceneFilters = scenes.map((scene, index) => {
     const sceneSourceId = scene.sourceId || primarySourceId
     const sourceInputIndex =
@@ -1011,9 +1008,10 @@ async function makeBodyVideo(
     const duration = Math.max(0.1, scene.duration)
     const renderDuration =
       duration + (index === scenes.length - 1 ? endCardDuration : 0)
-    const sceneZoom = zoom
-    const sceneCropX = `(iw-ow)*${cropX}`
-    const sceneCropY = `(ih-oh)*${cropY}`
+    const crop = scene.crop ?? project.crop
+    const sceneZoom = Math.max(1.02, Math.min(1.8, crop.zoom))
+    const sceneCropX = `(iw-ow)*${Math.max(0, Math.min(100, crop.x)) / 100}`
+    const sceneCropY = `(ih-oh)*${Math.max(0, Math.min(100, crop.y)) / 100}`
     const sceneWidth = Math.round(scaledRect.width * sceneZoom)
     const sceneHeight = Math.round(scaledRect.height * sceneZoom)
     const baseSourceRange = fitSceneSourceRange(
