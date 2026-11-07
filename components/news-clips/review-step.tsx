@@ -5,17 +5,28 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { Button, Card, Modal } from "@heroui/react"
 import { Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react"
 import { NewsFramePreview } from "@/components/news-clips/frame-preview"
-import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label"
+import {
+  LoadingButtonLabel,
+  busyMatches,
+  buttonBusyDisabled,
+} from "@/components/news-clips/loading-button-label"
 import { introStillTime, selectIntroStillRange } from "@/lib/news-clips/intro"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import {
+  buildBuildupScenes,
+  expandScenesWithSilenceCuts,
+} from "@/lib/news-clips/buildup"
+import {
   NEWS_TOTAL_GAP_SECONDS,
+  appendEndCtaScenes,
   buildReportScenes,
   ensureReportEndCta,
   estimateReportScenesDuration,
   reportCaptionPhrases,
   reportSubtitles,
+  splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
+import { bodySourceCreditText } from "@/lib/news-clips/source-credit"
 import {
   fitTitleToLineLayouts,
   normalizeSubtitleCues,
@@ -40,8 +51,8 @@ const cardDescriptionClass = "mt-1 text-sm leading-5 text-muted"
 const sectionHeaderClass = "flex min-h-10 items-center justify-between gap-4"
 const sectionTitleClass = "text-base font-semibold leading-6"
 
-type ReviewMode = Exclude<NewsClipStep, "issue" | "source">
-type EditorTab = "script" | "captions" | "intro" | "scenes" | "media"
+type ReviewMode = Exclude<NewsClipStep, "issue" | "source" | "angles">
+type EditorTab = "script" | "captions" | "scenes" | "media"
 
 const EDITOR_TABS: Record<
   ReviewMode,
@@ -57,7 +68,6 @@ const EDITOR_TABS: Record<
   ],
   preview: [
     { id: "script", label: "제목·대본" },
-    { id: "intro", label: "인트로" },
     { id: "captions", label: "자막" },
     { id: "scenes", label: "화면 구성" },
     { id: "media", label: "음향 설정" },
@@ -159,31 +169,27 @@ export function NewsClipReviewStep({
   const sourceVideoUrl = project.source?.id
     ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(project.source.id)}`
     : ""
-  const sourceVideoUrlFor = (sourceId?: string) =>
-    sourceId
-      ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(sourceId)}`
+  const sourceVideoUrlFor = (sourceId?: string) => {
+    const resolvedId =
+      sourceId && sourceId === project.source?.id
+        ? sourceId
+        : project.source?.id
+    return resolvedId
+      ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(resolvedId)}`
       : sourceVideoUrl
-  const directionSourceVideoUrl = sourceVideoUrlFor(
-    selectedDirectionScene?.sourceId || project.source?.id
-  )
-  const scriptBodyVideoUrl = sourceVideoUrlFor(
-    project.reportScenes[0]?.sourceId || project.source?.id
-  )
-  const introVideoUrl = sourceVideoUrlFor(
-    project.introStillTimeSeconds === null
-      ? automaticIntroRange.sourceId || project.source?.id
-      : project.source?.id
-  )
-  const minimum = settings.targetMinSeconds
-  const maximum = settings.targetMaxSeconds
-  const durationRecommended =
-    project.outputDurationSeconds >= minimum &&
-    project.outputDurationSeconds <= maximum
-  const durationRenderable =
-    project.outputDurationSeconds > 0 &&
-    project.outputDurationSeconds < settings.hardMaxSeconds
+  }
+  const directionSourceVideoUrl = sourceVideoUrl
+  const scriptBodyVideoUrl = sourceVideoUrl
+  const introVideoUrl = sourceVideoUrl
   const titleDraft = composeIntroTitle(titleLine1Draft, titleLine2Draft)
-  const titleDirty = titleDraft !== project.title
+  const baselineTitle = composeIntroTitle(
+    ...fittedTitleLines(
+      project.title,
+      settings.titleCardText,
+      settings.titleCardSecondFontSize
+    )
+  )
+  const titleDirty = titleDraft !== baselineTitle
   const titleComplete =
     titleLine1Draft.trim().length > 0 && titleLine2Draft.trim().length > 0
   const firstTitleCharacterLimit = titleLineCharacterLimit(
@@ -200,6 +206,13 @@ export function NewsClipReviewStep({
   })
   const titleValid = titleComplete && firstTitleFits && secondTitleFits
   const reportScriptDirty = reportScriptDraft !== project.reportScript
+  const previewBlockedReason = previewButtonBlockedReason({
+    busy,
+    titleValid,
+    titleComplete,
+    titleDirty,
+    reportScriptDirty,
+  })
   const previewSubtitles = project.subtitles
   const selectedSubtitle =
     previewSubtitles.find((caption) => caption.id === selectedSubtitleId) ??
@@ -310,11 +323,14 @@ export function NewsClipReviewStep({
   }
 
   function finishReportScript(reportScript: string) {
+    const isBuildup = project.productionMode === "buildup"
     const completeReportScript = ensureReportEndCta(
       reportScript,
       project.title,
       project.selectedIssue?.keywords
     )
+    const { body: bodyScript, cta: endCtaText } =
+      splitEndCtaFromScript(completeReportScript)
     const candidate = project.candidates.find(
       (item) => item.id === project.selectedCandidateId
     )
@@ -322,13 +338,31 @@ export function NewsClipReviewStep({
       onProject({ reportScript: completeReportScript })
       return
     }
-    const reportScenes = buildReportScenes(
-      completeReportScript,
-      project.transcript,
-      candidate.sourceStart,
-      candidate.sourceEnd,
-      project.reportScenes,
-      project.source?.id ?? ""
+    const quoteScene = project.reportScenes.find(
+      (scene) => scene.visual === "quote"
+    )
+    const bodyScenes = isBuildup
+      ? buildBuildupScenes(
+          bodyScript || completeReportScript,
+          quoteScene?.sourceStart ?? candidate.sourceStart,
+          quoteScene?.sourceEnd ?? candidate.sourceEnd,
+          project.transcript,
+          project.source?.id ?? "",
+          project.reportScenes
+        )
+      : buildReportScenes(
+          bodyScript || completeReportScript,
+          project.transcript,
+          candidate.sourceStart,
+          candidate.sourceEnd,
+          project.reportScenes,
+          project.source?.id ?? ""
+        )
+    const reportScenes = expandScenesWithSilenceCuts(
+      appendEndCtaScenes(bodyScenes, endCtaText, project.source?.id ?? ""),
+      project.detectedSilences,
+      0.2,
+      project.transcript
     )
     const outputBodyDuration = estimateReportScenesDuration(
       reportScenes,
@@ -341,7 +375,7 @@ export function NewsClipReviewStep({
         reportSubtitles(
           reportScenes,
           undefined,
-          reportCaptionPhrases(completeReportScript)
+          reportCaptionPhrases(bodyScript || completeReportScript)
         ),
         settings.bodySubtitleText
       ),
@@ -685,13 +719,7 @@ export function NewsClipReviewStep({
   return (
     <>
       <header>
-        <p className="text-sm font-medium text-muted">{heading.eyebrow}</p>
-        <h2 className="mt-1 text-xl font-semibold">{heading.title}</h2>
-        <p className="mt-1 text-sm text-muted">{heading.description}</p>
-        <div className="mt-3 rounded-xl border border-separator bg-default px-4 py-3 text-sm">
-          <span className="font-medium">완료 기준</span>
-          <span className="ml-2 text-muted">{heading.completion}</span>
-        </div>
+        <h2 className="text-xl font-semibold">{heading.title}</h2>
       </header>
       <div className="grid items-start gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
         <div className="sticky top-6 flex flex-col gap-3">
@@ -755,6 +783,7 @@ export function NewsClipReviewStep({
                 selectedSubtitle?.text ||
                 "아나운서 음성에 맞춰 자막이 표시됩니다"
               }
+              sourceCredit={bodySourceCreditText(project.source)}
               settings={settings}
               zoom={project.crop.zoom}
               backgroundContent={
@@ -848,24 +877,53 @@ export function NewsClipReviewStep({
                 selectedSubtitle?.text ||
                 "아나운서 음성에 맞춰 자막이 표시됩니다"
               }
+              sourceCredit={bodySourceCreditText(project.source)}
               settings={settings}
               zoom={project.crop.zoom}
+              backgroundContent={
+                frameMode === "title" && introVideoUrl ? (
+                  <video
+                    ref={sourceVideoRef}
+                    src={introVideoUrl}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    className="size-full object-cover"
+                    style={{
+                      transform: `scale(${project.introStillZoom})`,
+                      transformOrigin: `${project.introStillX}% ${project.introStillY}%`,
+                    }}
+                    onLoadedMetadata={(event) => {
+                      event.currentTarget.currentTime = introCursor
+                    }}
+                  />
+                ) : undefined
+              }
+              videoContent={
+                frameMode === "body" && scriptBodyVideoUrl ? (
+                  <video
+                    ref={scriptFrameVideoRef}
+                    src={scriptBodyVideoUrl}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    className="size-full object-cover"
+                    style={{
+                      transform: `scale(${Math.max(1.22, project.crop.zoom)})`,
+                      transformOrigin: `${project.crop.x}% ${project.crop.y}%`,
+                    }}
+                    onLoadedMetadata={(event) => {
+                      event.currentTarget.currentTime = Math.max(
+                        0,
+                        project.reportScenes[0]?.sourceStart ?? 0
+                      )
+                    }}
+                  />
+                ) : undefined
+              }
             />
           )}
-          {mode === "preview" && !project.previewSignature ? (
-            <p className="text-xs text-warning">
-              수정 내용은 초안을 갱신한 뒤 영상에 반영됩니다.
-            </p>
-          ) : null}
-          <div
-            className={`rounded-xl p-3 text-sm ${
-              durationRecommended
-                ? "bg-success/10 text-success"
-                : durationRenderable
-                  ? "bg-warning/10 text-warning"
-                  : "bg-danger/10 text-danger"
-            }`}
-          >
+          <div className="rounded-xl border border-separator bg-default p-3 text-sm">
             예상 길이 {project.outputDurationSeconds.toFixed(1)}초
           </div>
         </div>
@@ -893,8 +951,10 @@ export function NewsClipReviewStep({
                       ...current,
                       [mode]: tab.id,
                     }))
-                    if (tab.id === "intro") setFrameMode("title")
                     if (tab.id === "captions") setFrameMode("body")
+                    if (tab.id === "scenes") {
+                      // Task 2 will set compositionPane; for now leave frameMode unchanged
+                    }
                   }}
                 >
                   {tab.label}
@@ -909,21 +969,25 @@ export function NewsClipReviewStep({
               <Card.Header className="min-h-16 flex-row items-end justify-between gap-4 border-b border-separator pb-4">
                 <div>
                   <Card.Title className={cardTitleClass}>
-                    제목·시사 논평 대본
+                    {project.productionMode === "buildup"
+                      ? "제목·빌드업 서두"
+                      : "제목·시사 논평 대본"}
                   </Card.Title>
                   <Card.Description className={cardDescriptionClass}>
-                    논평은 TTS로 읽고, 직접 발언은 원본 음성을 씁니다.
+                    {project.productionMode === "buildup"
+                      ? "서두는 TTS로 읽고, 본편은 원본 하이라이트 음성을 씁니다."
+                      : "논평은 TTS로 읽고, 직접 발언은 원본 음성을 씁니다."}
                   </Card.Description>
                 </div>
                 <div className="ml-auto flex shrink-0 items-center justify-end gap-2">
                   <Button
                     size="sm"
                     variant="outline"
-                    isDisabled={busy !== ""}
+                    isDisabled={buttonBusyDisabled(busy, "reselect")}
                     onPress={() => void onReselect("all")}
                   >
                     <LoadingButtonLabel
-                      loading={busy === "reselect"}
+                      loading={busyMatches(busy, "reselect")}
                       label="전체 재작성"
                       loadingLabel="재작성 중"
                     />
@@ -963,11 +1027,11 @@ export function NewsClipReviewStep({
                       <Button
                         size="sm"
                         variant="outline"
-                        isDisabled={busy !== ""}
+                        isDisabled={buttonBusyDisabled(busy, "rewrite-title")}
                         onPress={() => void onReselect("title")}
                       >
                         <LoadingButtonLabel
-                          loading={busy === "rewrite-title"}
+                          loading={busyMatches(busy, "rewrite-title")}
                           label="다시 작성"
                           loadingLabel="작성 중"
                         />
@@ -1038,7 +1102,9 @@ export function NewsClipReviewStep({
                         htmlFor="news-clip-report-script"
                         className={sectionTitleClass}
                       >
-                        시사 논평 대본
+                        {project.productionMode === "buildup"
+                          ? "빌드업 서두"
+                          : "시사 논평 대본"}
                       </label>
                       {reportScriptDirty ? (
                         <span className="text-xs text-warning">저장 전</span>
@@ -1055,11 +1121,11 @@ export function NewsClipReviewStep({
                       <Button
                         size="sm"
                         variant="outline"
-                        isDisabled={busy !== ""}
+                        isDisabled={buttonBusyDisabled(busy, "rewrite-script")}
                         onPress={() => void onReselect("script")}
                       >
                         <LoadingButtonLabel
-                          loading={busy === "rewrite-script"}
+                          loading={busyMatches(busy, "rewrite-script")}
                           label="다시 작성"
                           loadingLabel="작성 중"
                         />
@@ -1069,7 +1135,11 @@ export function NewsClipReviewStep({
                   <textarea
                     ref={reportScriptTextareaRef}
                     id="news-clip-report-script"
-                    aria-label="시사 논평 대본"
+                    aria-label={
+                      project.productionMode === "buildup"
+                        ? "빌드업 서두"
+                        : "시사 논평 대본"
+                    }
                     rows={1}
                     value={reportScriptDraft}
                     onFocus={() => {
@@ -1089,7 +1159,7 @@ export function NewsClipReviewStep({
             </Card>
           ) : null}
 
-          {mode === "preview" && editorTab === "intro" && introVideoUrl ? (
+          {false && mode === "preview" && introVideoUrl ? (
             <Card>
               <Card.Header className="min-h-16 flex-row items-start justify-between gap-4">
                 <div>
@@ -1331,8 +1401,7 @@ export function NewsClipReviewStep({
             <Card>
               <Card.Header>
                 <Card.Title className={cardTitleClass}>
-                  문장별 화면 구성 · 핵심 {project.source ? 1 : 0}개 + 보조{" "}
-                  {project.supportingSources.length}개
+                  문장별 화면 구성
                 </Card.Title>
                 <Card.Description className={cardDescriptionClass}>
                   자료는 TTS 유지, 직접 발언만 원본 음성입니다.
@@ -1428,14 +1497,9 @@ export function NewsClipReviewStep({
                               >
                                 {project.source ? (
                                   <option value={project.source.id}>
-                                    핵심 · {project.source.title}
+                                    {project.source.title}
                                   </option>
                                 ) : null}
-                                {project.supportingSources.map((source) => (
-                                  <option key={source.id} value={source.id}>
-                                    보조 · {source.title}
-                                  </option>
-                                ))}
                               </select>
                             </label>
                             <label className="flex w-full flex-col gap-2">
@@ -1613,9 +1677,6 @@ export function NewsClipReviewStep({
             <Card>
               <Card.Header className="min-h-16">
                 <Card.Title className={cardTitleClass}>음향 설정</Card.Title>
-                <Card.Description className={cardDescriptionClass}>
-                  TTS 목소리와 영상에 적용할 음량을 설정합니다.
-                </Card.Description>
               </Card.Header>
               <Card.Content className="flex flex-col gap-6">
                 <section className="flex flex-col gap-4">
@@ -1689,7 +1750,7 @@ export function NewsClipReviewStep({
                     <Button
                       variant="outline"
                       className="h-[42px] w-full justify-center"
-                      isDisabled={voiceBusy}
+                      isDisabled={voiceBusy && !voicePlaying}
                       onPress={() => {
                         if (voicePlaying) {
                           stopVoicePreview()
@@ -1699,72 +1760,24 @@ export function NewsClipReviewStep({
                         }
                       }}
                     >
-                      {voicePlaying ? (
-                        <Square className="size-4 fill-current" />
+                      {voiceBusy ? (
+                        <LoadingButtonLabel
+                          loading
+                          label="음성 미리듣기"
+                          loadingLabel="음성 생성 중"
+                        />
+                      ) : voicePlaying ? (
+                        <span className="inline-flex items-center gap-2">
+                          <Square className="size-4 fill-current" />
+                          미리듣기 멈추기
+                        </span>
                       ) : (
-                        <Play className="size-4" />
+                        <span className="inline-flex items-center gap-2">
+                          <Play className="size-4" />
+                          음성 미리듣기
+                        </span>
                       )}
-                      {voiceBusy
-                        ? "음성 생성 중"
-                        : voicePlaying
-                          ? "미리듣기 멈추기"
-                          : "음성 미리듣기"}
                     </Button>
-                  </div>
-                </section>
-                <section className="flex flex-col gap-4 border-t border-separator pt-5">
-                  <div className={sectionHeaderClass}>
-                    <h4 className={sectionTitleClass}>음량·BGM</h4>
-                    <label className="ml-auto flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={project.bgmEnabled}
-                        onChange={(event) =>
-                          onProject({
-                            bgmEnabled: event.currentTarget.checked,
-                          })
-                        }
-                      />
-                      BGM 적용
-                    </label>
-                  </div>
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <RangeInput
-                      label="BGM 음량"
-                      value={project.bgmVolume}
-                      min={0}
-                      max={0.4}
-                      step={0.01}
-                      formatValue={ratioPercent}
-                      onChange={(bgmVolume) => onProject({ bgmVolume })}
-                    />
-                    <RangeInput
-                      label="제목 TTS 음량"
-                      value={project.titleVolume}
-                      min={0}
-                      max={2}
-                      step={0.05}
-                      formatValue={ratioPercent}
-                      onChange={(titleVolume) => onProject({ titleVolume })}
-                    />
-                    <RangeInput
-                      label="아나운서 TTS 음량"
-                      value={project.sourceVolume}
-                      min={0}
-                      max={2}
-                      step={0.05}
-                      formatValue={ratioPercent}
-                      onChange={(sourceVolume) => onProject({ sourceVolume })}
-                    />
-                    <RangeInput
-                      label="원본 직접 발언 음량"
-                      value={project.quoteVolume}
-                      min={0}
-                      max={2}
-                      step={0.05}
-                      formatValue={ratioPercent}
-                      onChange={(quoteVolume) => onProject({ quoteVolume })}
-                    />
                   </div>
                 </section>
               </Card.Content>
@@ -1815,13 +1828,16 @@ export function NewsClipReviewStep({
                 <Button
                   size="sm"
                   isDisabled={
-                    youtubeBusy ||
-                    !project.outputUrl ||
+                    (youtubeBusy ? false : !project.outputUrl) ||
                     !!project.youtubeUploadUrl
                   }
                   onPress={() => void uploadFinalToYoutube()}
                 >
-                  {youtubeBusy ? "업로드 중" : "YouTube 업로드"}
+                  <LoadingButtonLabel
+                    loading={youtubeBusy}
+                    label="YouTube 업로드"
+                    loadingLabel="업로드 중"
+                  />
                 </Button>
               </Card.Content>
             </Card>
@@ -1837,7 +1853,7 @@ export function NewsClipReviewStep({
         {mode === "script" ? (
           <Button
             isDisabled={
-              busy !== "" ||
+              buttonBusyDisabled(busy, "preview") ||
               !project.title ||
               !project.reportScript ||
               !titleValid ||
@@ -1847,7 +1863,7 @@ export function NewsClipReviewStep({
             onPress={() => void createPreviewAndContinue()}
           >
             <LoadingButtonLabel
-              loading={busy === "preview"}
+              loading={busyMatches(busy, "preview")}
               label="다음"
               loadingLabel="초안 만드는 중"
             />
@@ -1855,11 +1871,14 @@ export function NewsClipReviewStep({
         ) : null}
         {mode === "direction" ? (
           <Button
-            isDisabled={busy !== "" || project.reportScenes.length === 0}
+            isDisabled={
+              buttonBusyDisabled(busy, "preview") ||
+              project.reportScenes.length === 0
+            }
             onPress={() => void createPreviewAndContinue()}
           >
             <LoadingButtonLabel
-              loading={busy === "preview"}
+              loading={busyMatches(busy, "preview")}
               label="초안 만들기"
               loadingLabel="만드는 중"
             />
@@ -1870,16 +1889,14 @@ export function NewsClipReviewStep({
             <Button
               variant="outline"
               isDisabled={
-                busy !== "" ||
-                !durationRenderable ||
-                !titleValid ||
-                titleDirty ||
-                reportScriptDirty
+                busyMatches(busy, "preview")
+                  ? false
+                  : Boolean(previewBlockedReason)
               }
               onPress={() => void onPreview(true)}
             >
               <LoadingButtonLabel
-                loading={busy === "preview"}
+                loading={busyMatches(busy, "preview")}
                 label={
                   project.previewUrl
                     ? "미리보기 다시 만들기"
@@ -1890,18 +1907,16 @@ export function NewsClipReviewStep({
             </Button>
             <Button
               isDisabled={
-                busy !== "" ||
-                !durationRenderable ||
-                !project.previewUrl ||
-                !project.previewSignature ||
-                !titleValid ||
-                titleDirty ||
-                reportScriptDirty
+                busyMatches(busy, "render")
+                  ? false
+                  : Boolean(previewBlockedReason) ||
+                    !project.previewUrl ||
+                    !project.previewSignature
               }
               onPress={() => void renderAndContinue()}
             >
               <LoadingButtonLabel
-                loading={busy === "render"}
+                loading={busyMatches(busy, "render")}
                 label="최종본 만들기"
                 loadingLabel="최종본 만드는 중"
               />
@@ -1911,11 +1926,11 @@ export function NewsClipReviewStep({
         {mode === "final" ? (
           <Button
             variant="outline"
-            isDisabled={busy !== "" || !durationRenderable}
+            isDisabled={buttonBusyDisabled(busy, "render")}
             onPress={() => void render(true)}
           >
             <LoadingButtonLabel
-              loading={busy === "render"}
+              loading={busyMatches(busy, "render")}
               label="최종본 다시 만들기 · 720×1280"
               loadingLabel="최종본 만드는 중"
             />
@@ -1973,32 +1988,20 @@ export function NewsClipReviewStep({
 
 const REVIEW_STEP_COPY = {
   script: {
-    eyebrow: "3단계 · 편집 책임: 대본",
-    title: "시사 논평 대본 검수·완성",
-    description: "제목·논평·자막을 검수해 확정합니다.",
-    completion: "제목·낭독 문장·자막이 확정된 상태",
+    title: "대본 검수",
   },
   direction: {
-    eyebrow: "자동 처리 · 화면 연출",
-    title: "화면 연출·직접 발언 구성",
-    description: "문장별 화면·음성 방식을 확정합니다.",
-    completion: "문장별 화면과 원본 구간이 확정된 상태",
+    title: "화면 연출",
   },
   preview: {
-    eyebrow: "3단계 · 편집 책임: 통합 검수",
-    title: "대본·화면 검수와 영상 제작",
-    description: "제목·대본·자막·화면·음성을 확인한 뒤 영상을 만듭니다.",
-    completion: "전체 내용을 검수하고 영상 제작을 시작할 수 있는 상태",
+    title: "검수 · 영상 제작",
   },
   final: {
-    eyebrow: "4단계 · 편집 책임: 납품",
-    title: "최종 제작·결과 확인",
-    description: "최종 영상과 썸네일을 확인합니다.",
-    completion: "최종 결과물을 받을 수 있는 상태",
+    title: "최종 결과",
   },
 } satisfies Record<
-  Exclude<NewsClipStep, "issue" | "source">,
-  { eyebrow: string; title: string; description: string; completion: string }
+  Exclude<NewsClipStep, "issue" | "source" | "angles">,
+  { title: string }
 >
 
 function SourceRangeTimeline({
@@ -2179,6 +2182,27 @@ function sceneSourceDuration(
 
 function composeIntroTitle(firstLine: string, secondLine: string) {
   return [firstLine.trim(), secondLine.trim()].filter(Boolean).join("\n")
+}
+
+function previewButtonBlockedReason({
+  busy,
+  titleValid,
+  titleComplete,
+  titleDirty,
+  reportScriptDirty,
+}: {
+  busy: string
+  titleValid: boolean
+  titleComplete: boolean
+  titleDirty: boolean
+  reportScriptDirty: boolean
+}) {
+  if (busy !== "") return "다른 작업이 끝나길 기다려 주세요."
+  if (!titleComplete) return "인트로 제목 1단·2단을 모두 입력해 주세요."
+  if (!titleValid) return "인트로 제목 폭이 초과됐습니다. 길이를 줄여 주세요."
+  if (titleDirty) return "제목 변경을 먼저 저장해 주세요."
+  if (reportScriptDirty) return "대본 변경을 먼저 저장해 주세요."
+  return ""
 }
 
 function fittedTitleLines(
