@@ -27,6 +27,28 @@ const GENERIC_TERMS = new Set([
   "에도",
 ])
 
+// 여러 이슈에 공통으로 붙는 기관·절차어. 제목 앵커로는 쓰지 않는다.
+const WEAK_TITLE_ANCHORS = new Set([
+  ...GENERIC_TERMS,
+  "공수처",
+  "검찰",
+  "경찰",
+  "법원",
+  "대통령",
+  "장관",
+  "의원",
+  "체포",
+  "수사",
+  "재판",
+  "항소",
+  "내란",
+  "발언",
+  "연출",
+  "조사",
+  "예산",
+  "복지",
+])
+
 export type SourceRelevanceContext = {
   title: string
   keywords: string[]
@@ -77,7 +99,7 @@ export function scoreSourceRelevance(
   const corePoints = 50 * Math.min(1, coverage)
   const titlePoints = 25 * Math.min(1, titleCoverage)
   const evidencePoints = 20 * Math.min(1, evidenceCoverage)
-  const recencyPoints = recentWithinDays(source.publishedAt, 7) ? 5 : 0
+  const recencyPoints = recentWithinDays(source.publishedAt, 2) ? 5 : 0
   const score = Math.min(
     100,
     Math.round(
@@ -87,15 +109,27 @@ export function scoreSourceRelevance(
       )
     )
   )
+  // 이슈 제목의 고유 핵심어(인물·고유명)가 영상 제목에 없으면
+  // 같은 기관·절차어(예: 공수처)만 겹치는 다른 영상을 걸러낸다.
+  const titleAnchors = topicTerms
+    .filter((term) => !WEAK_TITLE_ANCHORS.has(term) && term.length >= 2)
+    .slice(0, 4)
+  const anchorMatches = matchingTerms(titleAnchors, source.title)
+  const hasTitleAnchor = titleAnchors.length === 0 || anchorMatches.length > 0
   const passes =
-    (matchedCore.size >= 2 && titleMatches.length >= 1 && score >= 55) ||
-    (titleMatches.length >= 1 && transcriptMatches.length >= 1 && score >= 48)
-  const reason = passes
-    ? `핵심어 ${matchedCore.size}개 일치 · 제목 ${titleMatches.length}개 · 근거 ${descriptionMatches.length + transcriptMatches.length}개`
-    : `주제 연관도 부족 · 핵심어 ${matchedCore.size}개 · 제목 ${titleMatches.length}개`
+    hasTitleAnchor &&
+    ((matchedCore.size >= 2 && titleMatches.length >= 1 && score >= 55) ||
+      (titleMatches.length >= 1 &&
+        transcriptMatches.length >= 1 &&
+        score >= 48))
+  const reason = !hasTitleAnchor
+    ? `이슈 제목 핵심어(${titleAnchors.slice(0, 2).join(", ")})가 영상 제목에 없음`
+    : passes
+      ? `핵심어 ${matchedCore.size}개 일치 · 제목 ${titleMatches.length}개 · 근거 ${descriptionMatches.length + transcriptMatches.length}개`
+      : `주제 연관도 부족 · 핵심어 ${matchedCore.size}개 · 제목 ${titleMatches.length}개`
 
   return {
-    score,
+    score: hasTitleAnchor ? score : Math.min(score, 40),
     passes,
     reason,
     coreTerms: effectiveCore,

@@ -4,15 +4,16 @@ export function resolveTextBox(
   layout: NewsTextLayout,
   safeMarginPercent: number
 ) {
-  const width = Math.max(120, Math.min(1080, layout.width))
   const safe = Math.round(
     (1080 * Math.max(0, Math.min(20, safeMarginPercent))) / 100
   )
+  // 텍스트 폭은 설정값을 따르고, 화면(1080)만 넘지 않게 한다.
+  const width = Math.max(120, Math.min(layout.width, 1080))
   const x =
     layout.alignment === "left"
-      ? Math.min(safe, 1080 - width)
+      ? Math.max(0, Math.min(safe, 1080 - width))
       : layout.alignment === "right"
-        ? Math.max(0, 1080 - safe - width)
+        ? Math.max(0, 1080 - Math.min(safe, Math.max(0, 1080 - width)) - width)
         : Math.round((1080 - width) / 2)
   return {
     x,
@@ -119,6 +120,7 @@ export function titleLineRenderMetrics(
 ) {
   void line
   void minimumFontScale
+  // 글자 크기는 설정값 유지. 폭 초과는 UI 검증(titleLineFits)으로 막는다.
   const configuredFontSize = Math.max(1, Math.round(layout.fontSize))
   return { fontSize: configuredFontSize, scaleX: 1 }
 }
@@ -145,7 +147,8 @@ export function titleLineFits(line: string, layout: NewsTextLayout) {
 }
 
 function titleAvailableWidth(layout: NewsTextLayout) {
-  return Math.max(1, layout.width - 8)
+  const boxed = resolveTextBox(layout, 0)
+  return Math.max(1, boxed.width - 8)
 }
 
 const TEXT_GLYPH_WIDTH_RATIO = 0.9
@@ -154,7 +157,22 @@ export function normalizeSubtitleCues(
   cues: SubtitleCue[],
   layout: NewsTextLayout
 ): SubtitleCue[] {
-  return mergeSubtitleSentenceCues(cues).flatMap((cue) => {
+  return layoutSubtitleCues(mergeSubtitleSentenceCues(cues), layout)
+}
+
+/**
+ * 싱크가 맞춰진 자막의 시작·끝은 유지하고, 줄바꿈·폭만 다시 맞춘다.
+ * 렌더 직전 재타이밍 결과를 merge/재분할로 깨지 않기 위함.
+ */
+export function layoutTimedSubtitleCues(
+  cues: SubtitleCue[],
+  layout: NewsTextLayout
+): SubtitleCue[] {
+  return layoutSubtitleCues(cues, layout)
+}
+
+function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
+  return cues.flatMap((cue) => {
     const chunks = splitIntoSubtitleChunks(cue.text, layout)
     if (chunks.length === 0) return []
     const weights = chunks.map((chunk) => Math.max(1, visualUnits(chunk)))
@@ -205,13 +223,16 @@ function mergeSubtitleSentenceCues(cues: SubtitleCue[]) {
     const text = normalizeText(cue.text)
     if (!text) continue
     const previous = merged.at(-1)
-    const preservesBoundary =
-      cue.id.startsWith("report-phrase-") || cue.id.startsWith("end-cta")
-    const previousPreservesBoundary =
-      previous?.id.startsWith("report-phrase-") ||
-      previous?.id.startsWith("end-cta")
+    // 원본 음성 자막·문구 경계는 타임코드를 유지한다. 문장부호 없으면 합치면 싱크가 깨진다.
+    const preservesBoundary = cuePreservesTimingBoundary(cue)
+    const previousPreservesBoundary = previous
+      ? cuePreservesTimingBoundary(previous)
+      : false
+    const sameScene =
+      (previous?.sceneId || "") === (cue.sceneId || "")
     if (
       previous &&
+      sameScene &&
       !preservesBoundary &&
       !previousPreservesBoundary &&
       !/[.!?。！？]$/.test(previous.text)
@@ -224,6 +245,16 @@ function mergeSubtitleSentenceCues(cues: SubtitleCue[]) {
     merged.push({ ...cue, text, emphasis: [...cue.emphasis] })
   }
   return merged
+}
+
+function cuePreservesTimingBoundary(cue: SubtitleCue) {
+  return (
+    Boolean(cue.sceneId) ||
+    cue.id.startsWith("report-phrase-") ||
+    cue.id.startsWith("end-cta") ||
+    cue.id.startsWith("quote-caption-") ||
+    cue.id.startsWith("report-caption-")
+  )
 }
 
 function joinSubtitleText(left: string, right: string) {

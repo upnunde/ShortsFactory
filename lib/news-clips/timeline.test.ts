@@ -94,12 +94,14 @@ test("제목 프레임을 포함해 50~55초로 낮은 핵심도 문장을 제�
   )
 })
 
-test("45~58초는 권장 범위이며 59초 미만이면 제작할 수 있다", () => {
+test("길이가 양수면 초안·최종 제작이 가능하다", () => {
   assert.equal(finalDurationAllowed(30), true)
   assert.equal(finalDurationAllowed(45), true)
   assert.equal(finalDurationAllowed(58), true)
-  assert.equal(finalDurationAllowed(58.99), true)
-  assert.equal(finalDurationAllowed(59), false)
+  assert.equal(finalDurationAllowed(59), true)
+  assert.equal(finalDurationAllowed(120), true)
+  assert.equal(finalDurationAllowed(0), false)
+  assert.equal(finalDurationAllowed(-1), false)
 })
 
 test("45초보다 짧은 핵심 구간은 인접 문장으로 70~100초까지 확장한다", () => {

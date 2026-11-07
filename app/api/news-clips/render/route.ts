@@ -41,11 +41,9 @@ export async function POST(request: Request) {
           ? "이 컴퓨터에서 무료 한국어 음성 기능을 사용할 수 없습니다."
           : code === "local-tts-failed"
             ? "무료 한국어 아나운서 음성을 만들지 못했습니다."
-            : code === "invalid-duration"
-              ? "제목 프레임을 포함한 최종 길이는 59초 미만이어야 합니다."
-              : code === "invalid-project"
-                ? "제목, 보도 대본과 문장별 화면 구성을 먼저 확인해 주세요."
-                : "FFmpeg 최종 렌더링을 완료하지 못했습니다.")
+            : code === "invalid-project"
+              ? "제목, 보도 대본과 문장별 화면 구성을 먼저 확인해 주세요."
+              : "FFmpeg 최종 렌더링을 완료하지 못했습니다.")
     return NextResponse.json({ message }, { status: 422 })
   }
 }

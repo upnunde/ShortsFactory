@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 
 import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
-import { parseSilenceOutput } from "@/lib/news-clips/vad"
+import { parseSilenceOutput, silenceDetectFilter } from "@/lib/news-clips/vad"
 
 export async function detectAudioSilence(sourceFile: string) {
   const output = await run(ffmpegBin(), [
@@ -9,7 +9,7 @@ export async function detectAudioSilence(sourceFile: string) {
     "-i",
     sourceFile,
     "-af",
-    "silencedetect=n=-38dB:d=0.25",
+    silenceDetectFilter(),
     "-f",
     "null",
     "-",

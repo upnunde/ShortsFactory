@@ -65,6 +65,23 @@ test("기존 프로젝트의 핵심어가 어긋나도 현재 이슈 제목을 �
   assert.equal(result.titleMatches.includes("홍콩"), false)
 })
 
+test("이슈 제목의 인물명이 영상 제목에 없으면 같은 키워드여도 탈락한다", () => {
+  const result = scoreSourceRelevance(
+    {
+      title: "김계리 공수처 대통령 체포 연출 발언",
+      keywords: ["김계리", "공수처", "대통령", "체포"],
+    },
+    {
+      title: '공수처는 삼류라던 윤석열…박범계 "조사 거부?"',
+      description: "공수처와 대통령 수사 공방을 다룹니다.",
+      publishedAt: new Date().toISOString(),
+    }
+  )
+
+  assert.equal(result.passes, false)
+  assert.match(result.reason, /김계리/)
+})
+
 test("같은 정책의 일반 영상보다 선택 이슈의 구체 논점이 맞는 영상을 높게 평가한다", () => {
   const financeContext = {
     title: "월 15만원 농어촌 기본소득 확대 지자체 재정 부담 커지나",

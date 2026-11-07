@@ -1,3 +1,7 @@
+import {
+  quoteOutputDurationSeconds,
+  scaleQuoteTimelineSeconds,
+} from "./playback.ts"
 import { snapSourceRangeToSpeech } from "./speech-bounds.ts"
 import type {
   NewsReportScene,
@@ -66,23 +70,35 @@ export function appendEndCtaScenes(
   primarySourceId = ""
 ): NewsReportScene[] {
   const text = cta.trim()
-  if (!text) return scenes
+  if (!text) return scenes.filter((scene) => !isEndCtaScene(scene))
+  const existingCta = scenes.find((scene) => isEndCtaScene(scene))
   const bodyScenes = scenes.filter((scene) => !isEndCtaScene(scene))
   if (!bodyScenes.length) return scenes
   const anchor =
     [...bodyScenes].reverse().find((scene) => scene.visual === "source") ??
     bodyScenes.at(-1)!
-  const start = Math.max(0, anchor.sourceEnd - 2.5)
-  const end = Math.max(start + 0.8, anchor.sourceEnd)
+  const defaultStart = Math.max(0, anchor.sourceEnd - 2.5)
+  const defaultEnd = Math.max(defaultStart + 0.8, anchor.sourceEnd)
+  const sourceStart = Number.isFinite(existingCta?.sourceStart)
+    ? existingCta!.sourceStart
+    : defaultStart
+  const sourceEnd = Number.isFinite(existingCta?.sourceEnd)
+    ? Math.max(sourceStart + 0.8, existingCta!.sourceEnd)
+    : defaultEnd
   return [
     ...bodyScenes,
     {
       id: "end-cta",
       narration: text,
       visual: "source",
-      sourceId: anchor.sourceId || primarySourceId || undefined,
-      sourceStart: round(start),
-      sourceEnd: round(end),
+      sourceId:
+        existingCta?.sourceId ||
+        anchor.sourceId ||
+        primarySourceId ||
+        undefined,
+      sourceStart: round(sourceStart),
+      sourceEnd: round(sourceEnd),
+      ...(existingCta?.crop ? { crop: existingCta.crop } : {}),
     },
   ]
 }
@@ -126,7 +142,7 @@ export function estimateReportScenesDuration(
       (total, scene) =>
         total +
         (scene.visual === "quote"
-          ? Math.max(0.5, scene.sourceEnd - scene.sourceStart)
+          ? quoteOutputDurationSeconds(scene.sourceStart, scene.sourceEnd)
           : estimateReportDuration(scene.narration, ratePercent)),
       0
     )
@@ -180,6 +196,8 @@ export function normalizeQuoteScenes(
 ) {
   return scenes.map((scene) => {
     if (scene.visual !== "quote") return scene
+    // 무음컷 조각은 원본 음성을 유지한다. (빈 narration 또는 …-cut-N id)
+    if (!scene.narration.trim() || /-cut-\d+/i.test(scene.id)) return scene
     const sourceId = scene.sourceId || primarySourceId
     const transcript = transcripts[sourceId]
     return transcript?.length &&
@@ -194,23 +212,9 @@ export function quoteTranscriptAlignment(
   transcript: TranscriptSegment[]
 ) {
   if (scene.visual !== "quote") return []
-  const words = transcript
-    .flatMap((segment) => segment.words)
-    .filter(
-      (word) =>
-        word.text.trim() &&
-        word.end > scene.sourceStart &&
-        word.start < scene.sourceEnd
-    )
-    .map((word) => ({
-      text: word.text,
-      start: round(Math.max(0, word.start - scene.sourceStart)),
-      end: round(
-        Math.max(0, Math.min(scene.sourceEnd, word.end) - scene.sourceStart)
-      ),
-    }))
-  if (words.length) return words
-
+  // 단어 타임스탬프를 전 구간 flat 정렬하면, 겹친 ASR 구간 단어가 섞여
+  // "2026년 11월 대한민국은 / 1일 죽고…"처럼 문장이 깨지고 자막이 겹친다.
+  // 전사 문장(segment) 단위로 맞추고 시간 겹침만 정리한다.
   const overlapping = transcript.filter(
     (segment) =>
       segment.text.trim() &&
@@ -222,11 +226,52 @@ export function quoteTranscriptAlignment(
       segment.start >= scene.sourceStart - 0.15 &&
       segment.end <= scene.sourceEnd + 0.15
   )
-  return (contained.length ? contained : overlapping).map((segment) => ({
+  const pool = (contained.length ? contained : overlapping)
+    .slice()
+    .sort((left, right) => left.start - right.start || left.end - right.end)
+
+  const resolved: Array<{ text: string; start: number; end: number }> = []
+  for (const segment of pool) {
+    const text = segment.text.replace(/\s+/g, " ").trim()
+    if (!text) continue
+    const start = Math.max(scene.sourceStart, segment.start)
+    const end = Math.max(start + 0.08, Math.min(scene.sourceEnd, segment.end))
+    const previous = resolved.at(-1)
+    if (!previous) {
+      resolved.push({ text, start, end })
+      continue
+    }
+    if (start < previous.end - 0.05) {
+      if (previous.text.includes(text) || text.includes(previous.text)) {
+        previous.end = Math.max(previous.end, end)
+        if (text.length > previous.text.length) previous.text = text
+        continue
+      }
+      if (!/[.!?。！？]$/.test(previous.text)) {
+        previous.text = `${previous.text} ${text}`.replace(/\s+/g, " ").trim()
+        previous.end = Math.max(previous.end, end)
+        continue
+      }
+      const clampedStart = previous.end
+      if (end - clampedStart < 0.12) {
+        previous.text = `${previous.text} ${text}`.replace(/\s+/g, " ").trim()
+        previous.end = Math.max(previous.end, end)
+        continue
+      }
+      resolved.push({ text, start: clampedStart, end })
+      continue
+    }
+    resolved.push({ text, start, end })
+  }
+
+  return resolved.map((segment) => ({
     text: segment.text,
     start: round(Math.max(0, segment.start - scene.sourceStart)),
     end: round(
-      Math.max(0, Math.min(scene.sourceEnd, segment.end) - scene.sourceStart)
+      Math.max(
+        segment.start - scene.sourceStart + 0.12,
+        segment.end - scene.sourceStart
+      )
     ),
   }))
 }
@@ -279,14 +324,15 @@ export function buildReportScenes(
 export function reportSubtitles(
   scenes: NewsReportScene[],
   durations?: number[],
-  captionPhrases?: string[]
+  captionPhrases?: string[],
+  transcript: TranscriptSegment[] = []
 ) {
   const sceneWeights = scenes.map((scene, index) =>
     Math.max(
       0.5,
       durations?.[index] ??
         (scene.visual === "quote"
-          ? Math.max(0.5, scene.sourceEnd - scene.sourceStart)
+          ? quoteOutputDurationSeconds(scene.sourceStart, scene.sourceEnd)
           : estimateReportDuration(scene.narration))
     )
   )
@@ -295,15 +341,34 @@ export function reportSubtitles(
   let cursor = 0
   let phraseIndex = 0
   return scenes.flatMap((scene, sceneIndex) => {
-    const texts = phraseGroups[sceneIndex] ?? []
     const duration = sceneWeights[sceneIndex]
+    const sceneStart = cursor
+    cursor += duration
+
+    // 직접 발언: 원본 전사 타임코드를 배속 출력 타임라인에 맞춰 붙인다.
+    if (scene.visual === "quote" && transcript.length) {
+      const alignment = quoteTranscriptAlignment(scene, transcript).map(
+        (item) => ({
+          ...item,
+          start: scaleQuoteTimelineSeconds(item.start),
+          end: scaleQuoteTimelineSeconds(item.end),
+        })
+      )
+      const quoteCues = subtitleCuesFromQuoteAlignment({
+        ...scene,
+        start: sceneStart,
+        end: sceneStart + duration,
+        alignment,
+      })
+      if (quoteCues.length) return quoteCues
+    }
+
+    const texts = phraseGroups[sceneIndex] ?? []
     const weights = texts.map((text) =>
       Math.max(0.5, estimateReportDuration(text))
     )
     const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
     let elapsedWeight = 0
-    const sceneStart = cursor
-    cursor += duration
     return texts.map((text, textIndex) => {
       const start =
         sceneStart + (duration * elapsedWeight) / Math.max(0.5, totalWeight)
@@ -483,43 +548,67 @@ function subtitleCuesFromQuoteAlignment(
     .sort((left, right) => left.start - right.start)
   if (!segments.length) return [] as SubtitleCue[]
 
+  const sceneDuration = Math.max(0.2, scene.end - scene.start)
   const chunks: Array<{ text: string; start: number; end: number }> = []
-  let currentText = ""
-  let currentStart = segments[0].start
-  let currentEnd = segments[0].end
   for (const segment of segments) {
-    const token = segment.text.trim()
-    const next = currentText ? `${currentText} ${token}` : token
-    if (currentText && comparableLength(next) > 24) {
-      chunks.push({
-        text: cleanPhrase(currentText),
-        start: currentStart,
-        end: currentEnd,
-      })
-      currentText = token
-      currentStart = segment.start
-      currentEnd = segment.end
-    } else {
-      currentText = next
-      currentEnd = segment.end
+    const text = cleanPhrase(segment.text)
+    if (!text) continue
+    const localStart = Math.max(0, segment.start)
+    const localEnd = Math.max(
+      localStart + 0.16,
+      Math.min(sceneDuration, segment.end)
+    )
+    const pieces = chunkCaptionText(text, 14)
+    if (!pieces.length) continue
+    if (pieces.length === 1) {
+      chunks.push({ text: pieces[0]!, start: localStart, end: localEnd })
+      continue
     }
-  }
-  if (currentText.trim()) {
-    chunks.push({
-      text: cleanPhrase(currentText),
-      start: currentStart,
-      end: currentEnd,
+    const duration = Math.max(0.16, localEnd - localStart)
+    const weights = pieces.map((piece) =>
+      Math.max(1, comparableLength(piece))
+    )
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
+    let cursor = localStart
+    pieces.forEach((piece, index) => {
+      const span =
+        index === pieces.length - 1
+          ? localEnd - cursor
+          : (duration * weights[index]!) / totalWeight
+      const end = index === pieces.length - 1 ? localEnd : cursor + span
+      chunks.push({ text: piece, start: cursor, end })
+      cursor = end
     })
   }
 
-  return chunks.map((chunk, index) => ({
+  const nonOverlapping: typeof chunks = []
+  for (const chunk of chunks) {
+    const previous = nonOverlapping.at(-1)
+    if (!previous) {
+      nonOverlapping.push(chunk)
+      continue
+    }
+    if (chunk.start < previous.end - 0.02) {
+      const start = previous.end
+      if (chunk.end - start < 0.12) {
+        previous.end = Math.max(previous.end, chunk.end)
+        previous.text = cleanPhrase(`${previous.text} ${chunk.text}`)
+        continue
+      }
+      nonOverlapping.push({ ...chunk, start })
+      continue
+    }
+    nonOverlapping.push(chunk)
+  }
+
+  return nonOverlapping.map((chunk, index) => ({
     id: `quote-caption-${scene.id}-${index + 1}`,
     sceneId: scene.id,
     start: round(scene.start + Math.max(0, chunk.start)),
     end: round(
       Math.max(
         scene.start + chunk.start + 0.2,
-        scene.start + Math.min(scene.end - scene.start, chunk.end)
+        scene.start + Math.min(sceneDuration, chunk.end)
       )
     ),
     text: chunk.text,

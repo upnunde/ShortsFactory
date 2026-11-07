@@ -2,16 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
-import { X } from "lucide-react"
 
 import { Button, Card, Chip } from "@heroui/react"
-import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label"
-import { isYouTubeUrl } from "@/lib/news-clips/youtube-url"
+import {
+  LoadingButtonLabel,
+  busyMatches,
+  buttonBusyDisabled,
+} from "@/components/news-clips/loading-button-label"
+import { SegmentedTabs } from "@/components/news-clips/segmented-tabs"
+import { extractYouTubeUrl } from "@/lib/news-clips/youtube-url"
 import type {
   NewsIssueSearchState,
   RecommendedNewsIssue,
 } from "@/lib/news-clips/issues"
 import type {
+  KeepRange,
   NewsClipCandidate,
   NewsReportScene,
   RemovedRange,
@@ -26,20 +31,20 @@ const field =
 export function NewsClipSourceStep({
   mode,
   profileId,
+  productionMode = "report",
   selectedIssue,
   source,
-  supportingSources,
   transcript,
   issueSearch,
   sourceSearch,
   note,
   busy,
   autoMode,
+  onProductionMode,
   onTranscript,
   onIssueSearch,
   onSourceSearch,
   onSource,
-  onSupportingSources,
   onIssueSelected,
   onIssueStepRequested,
   onNote,
@@ -51,20 +56,20 @@ export function NewsClipSourceStep({
 }: {
   mode: "issue" | "source"
   profileId: string
+  productionMode?: "report" | "buildup"
   selectedIssue: RecommendedNewsIssue | null
   source: NewsSource | null
-  supportingSources: NewsSource[]
   transcript: string
   issueSearch: NewsIssueSearchState
   sourceSearch: NewsSourceSearchState
   note: string
   busy: string
   autoMode: boolean
+  onProductionMode: (mode: "report" | "buildup") => void
   onTranscript: (value: string) => void
   onIssueSearch: (patch: Partial<NewsIssueSearchState>) => void
   onSourceSearch: (patch: Partial<NewsSourceSearchState>) => void
   onSource: (source: NewsSource) => void
-  onSupportingSources: (sources: NewsSource[]) => void
   onIssueSelected: (issue: RecommendedNewsIssue) => void
   onIssueStepRequested: () => void
   onNote: (value: string) => void
@@ -80,7 +85,10 @@ export function NewsClipSourceStep({
     mode: "claude" | "local",
     detectedSilences: RemovedRange[],
     reportScript: string,
-    reportScenes: NewsReportScene[]
+    reportScenes: NewsReportScene[],
+    removedRanges?: RemovedRange[],
+    keepRanges?: KeepRange[],
+    sourceMeta?: { channel?: string; title?: string }
   ) => void | Promise<void>
 }) {
   const { query, issues, dismissedIssueKeys } = issueSearch
@@ -93,11 +101,11 @@ export function NewsClipSourceStep({
   const [video, setVideo] = useState<File | null>(null)
   const [subtitle, setSubtitle] = useState<File | null>(null)
   const directVideoInputRef = useRef<HTMLInputElement>(null)
-  const directYoutubeUrl = isYouTubeUrl(query)
+  const directYoutubeUrl = extractYouTubeUrl(query)
 
   function runIssueAction() {
     if (directYoutubeUrl) {
-      onYoutubeUrl(query.trim())
+      onYoutubeUrl(directYoutubeUrl)
     } else if (autoMode) {
       onAutomaticGeneration(query)
     } else {
@@ -266,14 +274,11 @@ export function NewsClipSourceStep({
     sourceSearch.status,
   ])
 
-  async function approveRemote(
-    item?: NewsSource,
-    target: "primary" | "supporting" = "primary"
-  ) {
+  async function approveRemote(item?: NewsSource) {
     const selectedUrl = item?.originalUrl || url
     if (!selectedUrl.trim()) return
     onBusy("source")
-    setPendingSourceId(`${target}:${item?.id ?? "manual"}`)
+    setPendingSourceId(`primary:${item?.id ?? "manual"}`)
     onNote("")
     try {
       const response = await fetch("/api/news-clips/source", {
@@ -297,28 +302,8 @@ export function NewsClipSourceStep({
         onNote(body.message || "원본을 승인하지 못했습니다.")
         return
       }
-      if (target === "supporting") {
-        const next = [
-          ...supportingSources.filter(
-            (candidate) => candidate.originalUrl !== body.originalUrl
-          ),
-          body,
-        ]
-        onSupportingSources(next)
-        onNote(
-          "보조 자료를 추가했습니다. 대본 생성 시 문장별로 자동 배치합니다."
-        )
-      } else {
-        onSupportingSources(
-          supportingSources.filter(
-            (candidate) => candidate.originalUrl !== body.originalUrl
-          )
-        )
-        onSource(body)
-        onNote(
-          "핵심 원본을 선택했습니다. 보조 자료를 추가한 뒤 대본을 생성하세요."
-        )
-      }
+      onSource(body)
+      onNote("원본을 선택했습니다. 대본을 만들 수 있습니다.")
     } catch {
       onNote("원본을 승인하지 못했습니다.")
     } finally {
@@ -327,7 +312,7 @@ export function NewsClipSourceStep({
     }
   }
 
-  async function upload(target: "primary" | "supporting" = "primary") {
+  async function upload() {
     if (!video) return
     onBusy("upload")
     onNote("")
@@ -347,27 +332,8 @@ export function NewsClipSourceStep({
         onNote(body.message || "업로드하지 못했습니다.")
         return
       }
-      if (target === "supporting") {
-        onSupportingSources([
-          ...supportingSources.filter(
-            (candidate) => candidate.originalUrl !== body.originalUrl
-          ),
-          body,
-        ])
-        onNote(
-          "보조 자료를 추가했습니다. 대본 생성 시 문장별로 자동 배치합니다."
-        )
-      } else {
-        onSupportingSources(
-          supportingSources.filter(
-            (candidate) => candidate.originalUrl !== body.originalUrl
-          )
-        )
-        onSource(body)
-        onNote(
-          "핵심 원본을 선택했습니다. 보조 자료를 추가한 뒤 대본을 생성하세요."
-        )
-      }
+      onSource(body)
+      onNote("원본을 추가했습니다. 대본을 만들 수 있습니다.")
     } catch {
       onNote("업로드하지 못했습니다.")
     } finally {
@@ -375,24 +341,11 @@ export function NewsClipSourceStep({
     }
   }
 
-  async function analyze(
-    approvedSource = source,
-    approvedSupportingSources = supportingSources
-  ) {
+  async function analyze(approvedSource = source) {
     if (!approvedSource) return
     onBusy("analyze")
     onNote("")
     try {
-      const enrichedSupportingSources = await enrichSupportingSources(
-        approvedSource,
-        approvedSupportingSources
-      )
-      if (
-        enrichedSupportingSources.map((item) => item.id).join(":") !==
-        approvedSupportingSources.map((item) => item.id).join(":")
-      ) {
-        onSupportingSources(enrichedSupportingSources)
-      }
       const response = await fetch("/api/news-clips/analyze", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -405,7 +358,8 @@ export function NewsClipSourceStep({
           issueReason: selectedIssue?.recommendationReason ?? "",
           issueArticleTitles:
             selectedIssue?.articles.map((article) => article.title) ?? [],
-          supportingSourceIds: enrichedSupportingSources.map((item) => item.id),
+          supportingSourceIds: [],
+          productionMode,
         }),
       })
       const body = (await response.json()) as {
@@ -414,8 +368,12 @@ export function NewsClipSourceStep({
         selectedCandidate?: NewsClipCandidate
         analysisMode?: "claude" | "local"
         detectedSilences?: RemovedRange[]
+        removedRanges?: RemovedRange[]
+        keepRanges?: KeepRange[]
         reportScript?: string
         reportScenes?: NewsReportScene[]
+        sourceChannel?: string
+        sourceTitle?: string
         message?: string
       }
       if (
@@ -435,7 +393,13 @@ export function NewsClipSourceStep({
         body.analysisMode ?? "local",
         body.detectedSilences ?? [],
         body.reportScript ?? "",
-        body.reportScenes ?? []
+        body.reportScenes ?? [],
+        body.removedRanges ?? [],
+        body.keepRanges ?? [],
+        {
+          channel: body.sourceChannel,
+          title: body.sourceTitle,
+        }
       )
     } catch {
       onNote("전체 발언을 분석하지 못했습니다.")
@@ -444,72 +408,37 @@ export function NewsClipSourceStep({
     }
   }
 
-  async function enrichSupportingSources(
-    primarySource: NewsSource,
-    currentSources: NewsSource[]
-  ) {
-    const next = currentSources.filter(
-      (item) => item.originalUrl !== primarySource.originalUrl
-    )
-    const selectedUrls = new Set([
-      primarySource.originalUrl,
-      ...next.map((item) => item.originalUrl),
-    ])
-    for (const candidate of sourceSearch.results) {
-      if (next.length >= 2) break
-      if (!candidate.originalUrl || selectedUrls.has(candidate.originalUrl))
-        continue
-      try {
-        const response = await fetch("/api/news-clips/source", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            url: candidate.originalUrl,
-            title: candidate.title,
-            channel: candidate.channel,
-            summary: candidate.summary,
-            kind: "search",
-            publishedAt: candidate.publishedAt,
-            durationSeconds: candidate.durationSeconds,
-            viewCount: candidate.viewCount,
-            commentCount: candidate.commentCount,
-            searchMetrics: candidate.searchMetrics,
-          }),
-        })
-        const stored = (await response.json()) as NewsSource
-        if (
-          response.ok &&
-          stored.localFile &&
-          !stored.requiresUpload &&
-          !selectedUrls.has(stored.originalUrl)
-        ) {
-          next.push(stored)
-          selectedUrls.add(stored.originalUrl)
-        }
-      } catch {
-        // 접근할 수 없는 후보는 건너뛰고 다음 관련 영상을 시도합니다.
-      }
-    }
-    return next.slice(0, 2)
-  }
-
   return (
     <>
       {mode === "issue" ? (
         <>
-          <Heading
-            title="1. 이슈 탐색·승인"
-            description="제작할 이슈를 먼저 고릅니다."
-          />
+          <Heading title="이슈 고르기" />
           <Card>
-            <Card.Header>
-              <div>
-                <Card.Title>추천 이슈 찾기</Card.Title>
-                <Card.Description>
-                  비워두면 우선 탐색 주제 기준으로 추천합니다.
-                </Card.Description>
-              </div>
-            </Card.Header>
+            <Card.Content className="flex flex-col gap-5">
+              <SegmentedTabs
+                ariaLabel="제작 형식"
+                className="w-fit"
+                equalWidth={false}
+                value={productionMode === "buildup" ? "buildup" : "report"}
+                onChange={(modeId) => {
+                  if (busy.startsWith("auto:")) return
+                  onProductionMode(modeId)
+                }}
+                items={[
+                  {
+                    id: "buildup",
+                    label: "빌드업형",
+                    disabled: busy.startsWith("auto:"),
+                  },
+                  {
+                    id: "report",
+                    label: "보도형",
+                    disabled: busy.startsWith("auto:"),
+                  },
+                ]}
+              />
+              <Card.Title>추천 이슈</Card.Title>
+            </Card.Content>
             <Card.Content className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
                 <input
@@ -538,24 +467,35 @@ export function NewsClipSourceStep({
                 />
                 <Button
                   variant="outline"
-                  isDisabled={busy !== ""}
+                  isDisabled={buttonBusyDisabled(busy, "file-source")}
                   onPress={() => directVideoInputRef.current?.click()}
                 >
                   <LoadingButtonLabel
-                    loading={busy === "file-source"}
+                    loading={busyMatches(busy, "file-source")}
                     label="영상 파일"
-                    loadingLabel="업로드 중"
+                    loadingLabel={
+                      busy === "file-source:script"
+                        ? "핵심 정리 중"
+                        : "영상 확인 중"
+                    }
                   />
                 </Button>
               </div>
               <div className="flex justify-end">
-                <Button isDisabled={busy !== ""} onPress={runIssueAction}>
+                <Button
+                  isDisabled={buttonBusyDisabled(busy, [
+                    "issues",
+                    "url-source",
+                    "auto",
+                  ])}
+                  onPress={runIssueAction}
+                >
                   <LoadingButtonLabel
-                    loading={
-                      busy === "issues" ||
-                      busy === "url-source" ||
-                      busy.startsWith("auto:")
-                    }
+                    loading={busyMatches(busy, [
+                      "issues",
+                      "url-source",
+                      "auto",
+                    ])}
                     label={
                       directYoutubeUrl
                         ? "URL로 시작"
@@ -566,13 +506,15 @@ export function NewsClipSourceStep({
                             : "이슈 자동 검색"
                     }
                     loadingLabel={
-                      busy === "url-source"
-                        ? "영상 분석 중"
-                        : busy.startsWith("auto:")
-                          ? automaticProgressLabel(busy)
-                          : query.trim()
-                            ? "이슈 검색 중"
-                            : "이슈 자동 검색 중"
+                      busy === "url-source:script"
+                        ? "핵심 정리 중"
+                        : busy.startsWith("url-source")
+                          ? "영상 확인 중"
+                          : busy.startsWith("auto:")
+                            ? automaticProgressLabel(busy)
+                            : query.trim()
+                              ? "이슈 검색 중"
+                              : "이슈 자동 검색 중"
                     }
                   />
                 </Button>
@@ -583,107 +525,129 @@ export function NewsClipSourceStep({
                   이어서 진행합니다.
                 </p>
               ) : null}
-              {note ? (
-                <div className="rounded-xl border border-separator bg-default p-3 text-sm">
-                  {note}
-                </div>
-              ) : null}
               {issueMessage ? (
                 <div className="rounded-xl border border-separator bg-default p-3 text-sm">
                   <p>{issueMessage}</p>
                 </div>
               ) : null}
+              {note && busy === "" ? (
+                <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm">
+                  {note}
+                </div>
+              ) : null}
             </Card.Content>
             {issues.length ? (
               <Card.Content className="grid gap-3 border-t border-separator pt-4 md:grid-cols-2">
-                {issues.map((issue) => (
-                  <div
-                    key={issue.id}
-                    className={`rounded-xl border p-4 ${
-                      selectedIssue?.id === issue.id
-                        ? "border-foreground bg-default"
-                        : "border-separator"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="leading-6 font-medium">{issue.title}</p>
-                      <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-                        <Chip size="sm" variant="soft" color="success">
-                          적합도 {issue.score}점
-                        </Chip>
-                        <Chip size="sm" variant="soft" color="warning">
-                          화제성 {issue.trendScore ?? 0}점
-                        </Chip>
+                {issues.map((issue) => {
+                  const selecting = busy.startsWith(
+                    `select-issue:${issue.id}`
+                  )
+                  return (
+                    <div
+                      key={issue.id}
+                      className={`rounded-xl border p-4 ${
+                        selectedIssue?.id === issue.id
+                          ? "border-foreground bg-default"
+                          : "border-separator"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="leading-6 font-medium">{issue.title}</p>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+                          <Chip size="sm" variant="soft" color="success">
+                            적합도 {issue.score}점
+                          </Chip>
+                          <Chip size="sm" variant="soft" color="warning">
+                            화제성 {issue.trendScore ?? 0}점
+                          </Chip>
+                        </div>
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-muted">
+                        {issue.recommendationReason}
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted">
+                        <span>기사 {issue.articleCount}건</span>
+                        <span>·</span>
+                        <span>매체 {issue.sourceCount}곳</span>
+                        {issue.communityMentionCount > 0 ? (
+                          <>
+                            <span>·</span>
+                            <span>
+                              커뮤니티 {issue.communityMentionCount}건
+                            </span>
+                          </>
+                        ) : null}
+                      </div>
+                      <div className="mt-3 flex flex-col gap-1 text-xs text-muted">
+                        {issue.articles.map((article) => (
+                          <a
+                            key={article.url}
+                            href={article.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="line-clamp-1 underline"
+                          >
+                            {article.source || "웹 뉴스"} · {article.title}
+                          </a>
+                        ))}
+                      </div>
+                      <div className="mt-4 flex flex-wrap justify-end gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          isDisabled={buttonBusyDisabled(
+                            busy,
+                            `replace-issue:${issue.id}`
+                          )}
+                          onPress={() => void replaceIssue(issue)}
+                        >
+                          <LoadingButtonLabel
+                            loading={busyMatches(
+                              busy,
+                              `replace-issue:${issue.id}`
+                            )}
+                            label="다른 이슈"
+                            loadingLabel="검색 중"
+                          />
+                        </Button>
+                        <Button
+                          size="sm"
+                          isDisabled={
+                            selecting
+                              ? false
+                              : buttonBusyDisabled(
+                                  busy,
+                                  `select-issue:${issue.id}`
+                                )
+                          }
+                          onPress={() => chooseIssue(issue)}
+                        >
+                          <LoadingButtonLabel
+                            loading={selecting}
+                            label="선택"
+                            loadingLabel={
+                              busy === `select-issue:${issue.id}:script`
+                                ? "핵심 정리 중"
+                                : "영상 확인 중"
+                            }
+                          />
+                        </Button>
                       </div>
                     </div>
-                    <p className="mt-2 text-xs leading-5 text-muted">
-                      {issue.recommendationReason}
-                    </p>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted">
-                      <span>기사 {issue.articleCount}건</span>
-                      <span>·</span>
-                      <span>매체 {issue.sourceCount}곳</span>
-                      {issue.communityMentionCount > 0 ? (
-                        <>
-                          <span>·</span>
-                          <span>커뮤니티 {issue.communityMentionCount}건</span>
-                        </>
-                      ) : null}
-                    </div>
-                    <div className="mt-3 flex flex-col gap-1 text-xs text-muted">
-                      {issue.articles.map((article) => (
-                        <a
-                          key={article.url}
-                          href={article.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="line-clamp-1 underline"
-                        >
-                          {article.source || "웹 뉴스"} · {article.title}
-                        </a>
-                      ))}
-                    </div>
-                    <div className="mt-4 flex flex-wrap justify-end gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        isDisabled={busy !== ""}
-                        onPress={() => void replaceIssue(issue)}
-                      >
-                        <LoadingButtonLabel
-                          loading={busy === `replace-issue:${issue.id}`}
-                          label="다른 이슈"
-                          loadingLabel="검색 중"
-                        />
-                      </Button>
-                      <Button
-                        size="sm"
-                        isDisabled={busy !== ""}
-                        onPress={() => chooseIssue(issue)}
-                      >
-                        선택
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </Card.Content>
             ) : null}
           </Card>
         </>
       ) : (
-        <Heading
-          title="2. 원본 영상 선택·승인"
-          description="이슈에 맞는 원본·보조 자료를 고릅니다."
-        />
+        <Heading title="원본 고르기" />
       )}
 
       {mode === "source" && selectedIssue ? (
         <Card>
           <Card.Header>
-            <Card.Title>AI 자동 자료 탐색</Card.Title>
-            <Card.Description>
-              핵심 원본 1개와 필요한 보조 자료를 고릅니다.
-            </Card.Description>
+            <Card.Title>원본 찾기</Card.Title>
           </Card.Header>
           {selectedIssue ? (
             <Card.Content>
@@ -695,11 +659,11 @@ export function NewsClipSourceStep({
                 <Button
                   size="sm"
                   variant="outline"
-                  isDisabled={busy !== ""}
+                  isDisabled={buttonBusyDisabled(busy, "search")}
                   onPress={() => void searchSources(selectedIssue)}
                 >
                   <LoadingButtonLabel
-                    loading={busy === "search"}
+                    loading={busyMatches(busy, "search")}
                     label="자료 다시 찾기"
                     loadingLabel="자료 찾는 중"
                   />
@@ -741,9 +705,6 @@ export function NewsClipSourceStep({
             <Card.Content className="grid gap-3 border-t border-separator pt-4 md:grid-cols-2">
               {sourceSearch.results.map((item, index) => {
                 const isPrimary = source?.originalUrl === item.originalUrl
-                const isSupporting = supportingSources.some(
-                  (candidate) => candidate.originalUrl === item.originalUrl
-                )
                 return (
                   <div
                     key={item.id}
@@ -824,35 +785,21 @@ export function NewsClipSourceStep({
                     <div className="mt-4 flex justify-end">
                       <Button
                         size="sm"
-                        variant="outline"
-                        isDisabled={busy !== "" || isSupporting || isPrimary}
-                        onPress={() => void approveRemote(item, "supporting")}
-                      >
-                        <LoadingButtonLabel
-                          loading={
-                            pendingSourceId === `supporting:${item.id}` &&
-                            busy === "source"
-                          }
-                          label={
-                            isSupporting ? "보조 자료 추가됨" : "보조 자료 추가"
-                          }
-                          loadingLabel="저장 중"
-                        />
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="ml-2"
-                        isDisabled={busy !== "" || isPrimary}
-                        onPress={() => void approveRemote(item, "primary")}
+                        isDisabled={
+                          isPrimary &&
+                          pendingSourceId === `primary:${item.id}` &&
+                          busyMatches(busy, ["source", "analyze"])
+                            ? false
+                            : busy !== "" || isPrimary
+                        }
+                        onPress={() => void approveRemote(item)}
                       >
                         <LoadingButtonLabel
                           loading={
                             pendingSourceId === `primary:${item.id}` &&
-                            (busy === "source" || busy === "analyze")
+                            busyMatches(busy, ["source", "analyze"])
                           }
-                          label={
-                            isPrimary ? "핵심 원본 선택됨" : "핵심 원본 선택"
-                          }
+                          label={isPrimary ? "원본 선택됨" : "원본 선택"}
                           loadingLabel="저장 중"
                         />
                       </Button>
@@ -866,10 +813,7 @@ export function NewsClipSourceStep({
       ) : mode === "source" ? (
         <Card>
           <Card.Header>
-            <Card.Title>AI 자동 자료 탐색</Card.Title>
-            <Card.Description>
-              이슈를 먼저 선택하면 관련 원본을 찾습니다.
-            </Card.Description>
+            <Card.Title>원본 찾기</Card.Title>
           </Card.Header>
           <Card.Footer className="justify-end">
             <Button onPress={onIssueStepRequested}>이슈 선택</Button>
@@ -880,47 +824,27 @@ export function NewsClipSourceStep({
       {mode === "source" ? (
         <>
           {source && selectedIssue ? <SourceSummary source={source} /> : null}
-          {supportingSources.length ? (
-            <SupportingSourceSummary
-              sources={supportingSources}
-              onRemove={(sourceId) =>
-                onSupportingSources(
-                  supportingSources.filter((item) => item.id !== sourceId)
-                )
-              }
-            />
-          ) : null}
 
           <Card>
             <Card.Header>
-              <Card.Title>원본 직접 추가 · 선택 사항</Card.Title>
-              <Card.Description>
-                URL·파일로 직접 넣을 때만 사용합니다.
-              </Card.Description>
+              <Card.Title>직접 추가</Card.Title>
             </Card.Header>
             <Card.Content className="flex flex-col gap-4">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant={manualMode === "url" ? "secondary" : "outline"}
-                  onPress={() =>
-                    setManualMode((current) =>
-                      current === "url" ? "none" : "url"
-                    )
-                  }
-                >
-                  URL 추가
-                </Button>
-                <Button
-                  variant={manualMode === "file" ? "secondary" : "outline"}
-                  onPress={() =>
-                    setManualMode((current) =>
-                      current === "file" ? "none" : "file"
-                    )
-                  }
-                >
-                  파일 추가
-                </Button>
-              </div>
+              <SegmentedTabs
+                ariaLabel="직접 추가 방식"
+                equalWidth={false}
+                className="w-fit"
+                value={manualMode === "none" ? null : manualMode}
+                onChange={(modeId) =>
+                  setManualMode((current) =>
+                    current === modeId ? "none" : modeId
+                  )
+                }
+                items={[
+                  { id: "url", label: "URL 추가" },
+                  { id: "file", label: "파일 추가" },
+                ]}
+              />
 
               {manualMode === "url" ? (
                 <div className="flex flex-col gap-3 rounded-xl border border-separator bg-default p-4">
@@ -948,22 +872,19 @@ export function NewsClipSourceStep({
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
                     <Button
-                      variant="outline"
-                      isDisabled={!url.trim() || busy !== ""}
-                      onPress={() =>
-                        void approveRemote(undefined, "supporting")
+                      isDisabled={
+                        !url.trim() ||
+                        (pendingSourceId === "primary:manual" &&
+                        busyMatches(busy, ["source", "analyze"])
+                          ? false
+                          : busy !== "")
                       }
-                    >
-                      자료 추가
-                    </Button>
-                    <Button
-                      isDisabled={!url.trim() || busy !== ""}
-                      onPress={() => void approveRemote(undefined, "primary")}
+                      onPress={() => void approveRemote()}
                     >
                       <LoadingButtonLabel
                         loading={
                           pendingSourceId === "primary:manual" &&
-                          (busy === "source" || busy === "analyze")
+                          busyMatches(busy, ["source", "analyze"])
                         }
                         label="원본 선택"
                         loadingLabel="원본 저장 중"
@@ -997,18 +918,13 @@ export function NewsClipSourceStep({
                   </label>
                   <div className="flex flex-wrap justify-end gap-2">
                     <Button
-                      variant="outline"
-                      isDisabled={!video || busy !== ""}
-                      onPress={() => void upload("supporting")}
-                    >
-                      자료 추가
-                    </Button>
-                    <Button
-                      isDisabled={!video || busy !== ""}
-                      onPress={() => void upload("primary")}
+                      isDisabled={
+                        !video || buttonBusyDisabled(busy, "upload")
+                      }
+                      onPress={() => void upload()}
                     >
                       <LoadingButtonLabel
-                        loading={busy === "upload"}
+                        loading={busyMatches(busy, "upload")}
                         label="파일 추가"
                         loadingLabel="업로드 중"
                       />
@@ -1021,10 +937,7 @@ export function NewsClipSourceStep({
 
           <Card>
             <Card.Header>
-              <Card.Title>전체 자막 또는 음성 분석</Card.Title>
-              <Card.Description>
-                붙여넣기가 업로드 자막보다 우선합니다.
-              </Card.Description>
+              <Card.Title>자막</Card.Title>
             </Card.Header>
             <Card.Content>
               <textarea
@@ -1032,7 +945,7 @@ export function NewsClipSourceStep({
                 onChange={(event) => onTranscript(event.currentTarget.value)}
                 rows={9}
                 className={field}
-                placeholder="SRT/VTT 자막이나 전체 녹취를 붙여넣으세요."
+                placeholder="SRT / VTT / 녹취"
               />
             </Card.Content>
           </Card>
@@ -1044,11 +957,13 @@ export function NewsClipSourceStep({
               이전
             </Button>
             <Button
-              isDisabled={!source?.approved || busy !== ""}
-              onPress={() => void analyze(source, supportingSources)}
+              isDisabled={
+                !source?.approved || buttonBusyDisabled(busy, "analyze")
+              }
+              onPress={() => void analyze(source)}
             >
               <LoadingButtonLabel
-                loading={busy === "analyze"}
+                loading={busyMatches(busy, "analyze")}
                 label="대본 만들기"
                 loadingLabel="만드는 중"
               />
@@ -1089,70 +1004,17 @@ function SourceSummary({ source }: { source: NewsSource }) {
           {source.originalUrl || source.localFile}
         </p>
         {source.requiresUpload ? (
-          <p className="mt-3 text-sm text-warning">
-            URL 자동 저장에 실패했습니다. 영상 접근 권한을 확인하거나 합법적으로
-            보유한 원본을 올려 주세요.
-          </p>
+          <p className="mt-3 text-sm text-warning">원본 파일을 올려 주세요.</p>
         ) : null}
       </Card.Content>
     </Card>
   )
 }
 
-function SupportingSourceSummary({
-  sources,
-  onRemove,
-}: {
-  sources: NewsSource[]
-  onRemove: (sourceId: string) => void
-}) {
-  return (
-    <Card>
-      <Card.Header>
-        <Card.Title>보조 자료 {sources.length}개</Card.Title>
-        <Card.Description>
-          자료 화면은 음소거하고 TTS를 유지합니다.
-        </Card.Description>
-      </Card.Header>
-      <Card.Content className="flex flex-col gap-2">
-        {sources.map((source) => (
-          <div
-            key={source.id}
-            className="flex items-center justify-between gap-3 rounded-xl border border-separator p-3"
-          >
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">{source.title}</p>
-              <p className="truncate text-xs text-muted">
-                {source.channel || "채널 정보 없음"}
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              isIconOnly
-              aria-label={`${source.title} 보조 자료에서 제거`}
-              onPress={() => onRemove(source.id)}
-            >
-              <X className="size-4" />
-            </Button>
-          </div>
-        ))}
-      </Card.Content>
-    </Card>
-  )
-}
-
-function Heading({
-  title,
-  description,
-}: {
-  title: string
-  description: string
-}) {
+function Heading({ title }: { title: string }) {
   return (
     <header>
       <h2 className="text-xl font-semibold">{title}</h2>
-      <p className="mt-1 text-sm text-muted">{description}</p>
     </header>
   )
 }

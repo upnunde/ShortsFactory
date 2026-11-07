@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto"
-import { cp, mkdir, readFile, readdir, writeFile } from "node:fs/promises"
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  writeFile,
+} from "node:fs/promises"
 import path from "node:path"
 
 import defaultProfile from "@/config/profiles/default.json"
@@ -13,6 +20,7 @@ import { readWritingGuide, saveWritingGuide } from "@/lib/server/writing-guide"
 import type { ChannelProfile } from "@/lib/types"
 
 const profilesDir = path.join(process.cwd(), "config", "profiles")
+const archiveRoot = path.join(process.cwd(), "config", "profiles-archive")
 
 export async function listProfiles() {
   let files: string[] = []
@@ -126,6 +134,19 @@ export async function updateProfile(
   })
   await writeProfile(profile)
   return profile
+}
+
+export async function archiveProfile(profileId: string) {
+  const safe = safeId(profileId)
+  if (!safe || safe === "default") return false
+  const profiles = await listProfiles()
+  if (profiles.length <= 1) return false
+  if (!profiles.some((profile) => profile.id === safe)) return false
+  const source = path.join(profilesDir, `${safe}.json`)
+  await mkdir(archiveRoot, { recursive: true })
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+  await rename(source, path.join(archiveRoot, `${safe}-${timestamp}.json`))
+  return true
 }
 
 async function writeProfile(profile: ChannelProfile) {

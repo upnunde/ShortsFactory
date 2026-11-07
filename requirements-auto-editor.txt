@@ -1,0 +1,3 @@
+# Optional: preferred silence jump-cut engine for quote scenes.
+# Falls back to ffmpeg silencedetect when unavailable.
+auto-editor>=29.3.1

@@ -11,6 +11,7 @@ export function NewsFramePreview({
   mode,
   title,
   subtitle,
+  sourceCredit = "",
   settings,
   zoom = 1,
   showGuides = false,
@@ -21,6 +22,7 @@ export function NewsFramePreview({
   mode: "title" | "body"
   title: string
   subtitle: string
+  sourceCredit?: string
   settings: NewsClipSettings
   zoom?: number
   showGuides?: boolean
@@ -37,11 +39,14 @@ export function NewsFramePreview({
     (mode === "title" ? "1단 핵심 제목\n2단 보조 제목" : "본문 제목")
   const previewSubtitle =
     subtitle.trim() || "아나운서 음성에 맞춰 자막이 표시됩니다"
+  const previewSourceCredit =
+    sourceCredit.trim() || "출처 · 원본 채널"
   const fullFramePreview = !backgroundContent && !videoContent
   const overlayRequestKey = JSON.stringify({
     mode,
     title: previewTitle,
     subtitle: previewSubtitle,
+    sourceCredit: previewSourceCredit,
     settings: {
       profileId: settings.profileId,
       fontFamily: settings.fontFamily,
@@ -54,6 +59,8 @@ export function NewsFramePreview({
       bodyTitleColor: settings.bodyTitleColor,
       bodySubtitleText: settings.bodySubtitleText,
       subtitleColor: settings.subtitleColor,
+      bodySourceText: settings.bodySourceText,
+      sourceColor: settings.sourceColor,
       emphasisColor: settings.emphasisColor,
       safeMarginPercent: settings.safeMarginPercent,
       titleFrameImage: settings.titleFrameImage,

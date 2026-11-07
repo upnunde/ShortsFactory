@@ -1,5 +1,8 @@
 import { claudeText } from "@/lib/server/anthropic"
-import { buildCandidateWindows } from "@/lib/news-clips/timeline"
+import {
+  buildCandidateWindows,
+  fitEditPlan,
+} from "@/lib/news-clips/timeline"
 import {
   issueAngleTerms,
   scriptMatchesIssueFocus,
@@ -11,14 +14,23 @@ import {
 } from "@/lib/news-clips/text-layout"
 import { parseTranscript } from "@/lib/news-clips/transcript"
 import {
+  buildBuildupScenes,
+  localBuildupDraft,
+} from "@/lib/news-clips/buildup"
+import {
+  appendEndCtaScenes,
   buildReportScenes,
   ensureReportEndCta,
+  isEndCtaScene,
   normalizeQuoteScenes,
+  splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
 import type {
   NewsClipCandidate,
+  NewsClipProductionMode,
   NewsClipSettings,
   NewsReportScene,
+  RemovedRange,
   TranscriptSegment,
 } from "@/lib/news-clips/types"
 
@@ -41,6 +53,7 @@ export type NewsAnalysisSourceContext = {
   issue: NewsIssueFocus
   supplementalContext: string
   channelDirection: string
+  directSource?: boolean
 }
 
 export async function analyzeNewsTranscript(
@@ -55,7 +68,9 @@ export async function analyzeNewsTranscript(
     issue: { title: "", keywords: [] },
     supplementalContext: "",
     channelDirection: "",
-  }
+  },
+  productionMode: NewsClipProductionMode = "report",
+  detectedSilences: RemovedRange[] = []
 ) {
   const transcript = parseTranscript(transcriptText)
   if (transcript.length === 0) throw new Error("empty-transcript")
@@ -71,7 +86,11 @@ export async function analyzeNewsTranscript(
           localCandidates,
           settings,
           sourceContext.issue,
-          sourceContext.supplementalContext
+          sourceContext.supplementalContext,
+          sourceContext.directSource === true
+            ? ""
+            : sourceContext.channelDirection,
+          sourceContext.directSource === true
         ),
         settings
       )
@@ -81,12 +100,47 @@ export async function analyzeNewsTranscript(
     }
   }
   const selectedCandidate = bestCandidate(candidates, sourceContext.issue)
-  let report = localReport(transcript, selectedCandidate)
+  if (productionMode === "buildup") {
+    return analyzeBuildupTranscript(
+      transcript,
+      selectedCandidate,
+      candidates,
+      settings,
+      sourceContext,
+      useClaude,
+      analysisMode,
+      detectedSilences
+    )
+  }
+  const editPlan = fitEditPlan({
+    segments: transcript,
+    start: selectedCandidate.sourceStart,
+    end: selectedCandidate.sourceEnd,
+    silenceRanges: detectedSilences,
+    titleSeconds: settings.titleCardSeconds,
+    targetMinSeconds: settings.targetMinSeconds,
+    targetMaxSeconds: settings.targetMaxSeconds,
+    idealMinSeconds: settings.idealMinSeconds,
+    idealMaxSeconds: settings.idealMaxSeconds,
+  })
+  const windowStart =
+    editPlan.keepRanges[0]?.sourceStart ?? selectedCandidate.sourceStart
+  const windowEnd =
+    editPlan.keepRanges.at(-1)?.sourceEnd ?? selectedCandidate.sourceEnd
+  let report = localReport(transcript, {
+    ...selectedCandidate,
+    sourceStart: windowStart,
+    sourceEnd: windowEnd,
+  })
   try {
     if (useClaude) {
       report = await reportWithClaude(
         transcript,
-        selectedCandidate,
+        {
+          ...selectedCandidate,
+          sourceStart: windowStart,
+          sourceEnd: windowEnd,
+        },
         settings,
         sourceContext
       )
@@ -96,19 +150,29 @@ export async function analyzeNewsTranscript(
     if (error instanceof Error && error.message === "issue-focus-mismatch") {
       throw error
     }
-    report = localReport(transcript, selectedCandidate)
+    report = localReport(transcript, {
+      ...selectedCandidate,
+      sourceStart: windowStart,
+      sourceEnd: windowEnd,
+    })
   }
   const reportScript = ensureReportEndCta(
     report.script,
     sourceContext.issue.title,
     sourceContext.issue.keywords
   )
-  const reportScenes = buildReportScenes(
-    reportScript,
-    transcript,
-    selectedCandidate.sourceStart,
-    selectedCandidate.sourceEnd,
-    report.preferred,
+  const { body: bodyScript, cta: endCtaText } =
+    splitEndCtaFromScript(reportScript)
+  const reportScenes = appendEndCtaScenes(
+    buildReportScenes(
+      bodyScript || reportScript,
+      transcript,
+      windowStart,
+      windowEnd,
+      report.preferred,
+      sourceContext.primarySourceId
+    ),
+    endCtaText,
     sourceContext.primarySourceId
   )
   const distributedScenes = distributeSupportingSources(
@@ -121,10 +185,17 @@ export async function analyzeNewsTranscript(
       (source) => [source.id, source.transcript] as const
     ),
   ])
+  // 인트로 제목은 refineWithClaude titleOptions를 유지한다.
+  // 대본 생성 후 제목을 다시 쓰면 주제고르기에서 고른 톤이 바뀐다.
+  const rangedCandidate = {
+    ...selectedCandidate,
+    sourceStart: windowStart,
+    sourceEnd: windowEnd,
+  }
   return {
     transcript,
-    candidates,
-    selectedCandidate,
+    candidates: replaceCandidate(candidates, rangedCandidate),
+    selectedCandidate: rangedCandidate,
     reportScript,
     reportScenes: normalizeQuoteScenes(
       distributedScenes,
@@ -132,7 +203,169 @@ export async function analyzeNewsTranscript(
       sourceContext.primarySourceId,
       settings.titleVoiceRate
     ),
+    removedRanges: editPlan.removedRanges,
+    keepRanges: editPlan.keepRanges,
     analysisMode,
+  }
+}
+
+async function analyzeBuildupTranscript(
+  transcript: TranscriptSegment[],
+  selectedCandidate: NewsClipCandidate,
+  candidates: NewsClipCandidate[],
+  settings: NewsClipSettings,
+  sourceContext: NewsAnalysisSourceContext,
+  useClaude: boolean,
+  analysisMode: "claude" | "local",
+  detectedSilences: RemovedRange[]
+) {
+  let draft = localBuildupDraft(
+    transcript,
+    selectedCandidate,
+    settings,
+    detectedSilences,
+    sourceContext.primarySourceId
+  )
+  let mode = analysisMode
+  if (useClaude) {
+    try {
+      const claudeDraft = await buildupWithClaude(
+        transcript,
+        selectedCandidate,
+        settings,
+        sourceContext
+      )
+      draft = {
+        ...draft,
+        script: claudeDraft.script,
+        preferred: buildBuildupScenes(
+          claudeDraft.script,
+          claudeDraft.highlightStart,
+          claudeDraft.highlightEnd,
+          transcript,
+          sourceContext.primarySourceId,
+          claudeDraft.preferred
+        ),
+      }
+      mode = "claude"
+    } catch {
+      // keep local draft
+    }
+  }
+  const reportScript = ensureReportEndCta(
+    draft.script,
+    sourceContext.issue.title,
+    sourceContext.issue.keywords
+  )
+  const { body: bodyScript, cta: endCtaText } =
+    splitEndCtaFromScript(reportScript)
+  const highlightStart =
+    draft.preferred[1]?.sourceStart ?? selectedCandidate.sourceStart
+  const highlightEnd =
+    draft.preferred[1]?.sourceEnd ?? selectedCandidate.sourceEnd
+  const reportScenes = appendEndCtaScenes(
+    buildBuildupScenes(
+      bodyScript || reportScript,
+      highlightStart,
+      highlightEnd,
+      transcript,
+      sourceContext.primarySourceId,
+      draft.preferred
+    ),
+    endCtaText,
+    sourceContext.primarySourceId
+  )
+  const rangedCandidate = {
+    ...selectedCandidate,
+    sourceStart: highlightStart,
+    sourceEnd: highlightEnd,
+  }
+  return {
+    transcript,
+    candidates: replaceCandidate(candidates, rangedCandidate),
+    selectedCandidate: rangedCandidate,
+    reportScript,
+    reportScenes,
+    removedRanges: draft.removedRanges,
+    keepRanges: draft.keepRanges,
+    analysisMode: mode,
+  }
+}
+
+async function buildupWithClaude(
+  transcript: TranscriptSegment[],
+  candidate: NewsClipCandidate,
+  settings: NewsClipSettings,
+  sourceContext: NewsAnalysisSourceContext
+) {
+  const relevant = sourceContext.directSource
+    ? transcript.slice(0, 180)
+    : transcript.filter(
+        (segment) =>
+          segment.end >= candidate.sourceStart - 15 &&
+          segment.start <= candidate.sourceEnd + 15
+      )
+  const response = await claudeText(
+    [
+      "너는 정치/시사 쇼츠의 빌드업형 오프닝 멘트를 쓰는 작가다.",
+      "결과 영상은 제목 TTS 인트로 다음에, 짧은 서두 TTS를 읽고 바로 원본 하이라이트 발언을 들려준다.",
+      "원문 밖의 사실을 만들지 않는다.",
+      sourceContext.directSource
+        ? "사용자가 지정한 원본 영상이 기준이다. selectedIssue(고른 핵심 각도)와 transcript만으로 서두를 쓰고 다른 이슈로 바꾸지 않는다."
+        : "selectedIssue(고른 핵심 각도)와 원본 발언을 함께 보고 서두를 만든다.",
+      "teaser는 시청자 호기심을 끄는 시니컬한 한국어 반말 1~2문장이다. 존댓말을 쓰지 않는다.",
+      "teaser 끝은 '들어봐', '직접 들어봐'처럼 원본으로 넘기는 연결로 마무리한다.",
+      "highlight_start와 highlight_end는 가장 화제성 높은 연속 발언 구간이며 약 45~55초 분량을 우선한다.",
+      "JSON 객체만 출력한다: {teaser:string,highlight_start:number,highlight_end:number}",
+    ].join("\n"),
+    JSON.stringify({
+      channelDirection: sourceContext.directSource
+        ? ""
+        : sourceContext.channelDirection,
+      directSource: sourceContext.directSource === true,
+      selectedIssue: sourceContext.issue,
+      supplementalContext: sourceContext.supplementalContext,
+      selectedRange: {
+        start: candidate.sourceStart,
+        end: candidate.sourceEnd,
+      },
+      targetSeconds: {
+        min: settings.targetMinSeconds,
+        max: settings.targetMaxSeconds,
+      },
+      transcript: relevant.map((segment) => ({
+        start: segment.start,
+        end: segment.end,
+        text: segment.text,
+      })),
+    }),
+    900
+  )
+  const value = JSON.parse(stripFence(response)) as {
+    teaser?: unknown
+    highlight_start?: unknown
+    highlight_end?: unknown
+  }
+  const script = typeof value.teaser === "string" ? value.teaser.trim() : ""
+  if (!script) throw new Error("empty-buildup")
+  const highlightStart = Number(value.highlight_start)
+  const highlightEnd = Number(value.highlight_end)
+  const start = Number.isFinite(highlightStart)
+    ? highlightStart
+    : candidate.sourceStart
+  const end = Number.isFinite(highlightEnd) ? highlightEnd : candidate.sourceEnd
+  const preferred = buildBuildupScenes(
+    script,
+    Math.min(start, end),
+    Math.max(start, end),
+    transcript,
+    sourceContext.primarySourceId
+  )
+  return {
+    script,
+    highlightStart: Math.min(start, end),
+    highlightEnd: Math.max(start, end),
+    preferred,
   }
 }
 
@@ -143,7 +376,7 @@ function distributeSupportingSources(
   if (!context.supportingSources.length) return scenes
   let previousSourceId = ""
   return scenes.map((scene, index) => {
-    if (scene.visual === "quote") {
+    if (scene.visual === "quote" || isEndCtaScene(scene)) {
       previousSourceId = scene.sourceId || context.primarySourceId
       return scene
     }
@@ -212,22 +445,35 @@ async function reportWithClaude(
 ) {
   const captionLineLimit = titleLineCharacterLimit(settings.bodySubtitleText)
   const captionChunkLimit = captionLineLimit * 2
-  const relevant = transcript.filter(
-    (segment) =>
-      segment.end >= candidate.sourceStart - 15 &&
-      segment.start <= candidate.sourceEnd + 15
-  )
+  const relevant = sourceContext.directSource
+    ? transcript.slice(0, 180)
+    : transcript.filter(
+        (segment) =>
+          segment.end >= candidate.sourceStart - 15 &&
+          segment.start <= candidate.sourceEnd + 15
+      )
+  const focusRules = sourceContext.directSource
+    ? [
+        "사용자가 URL이나 파일로 직접 지정한 원본 영상이다. 대본의 절대 기준은 제공된 transcript(원본 발언)다.",
+        "원본 자막에 실제로 나온 인물·사건·주장만 다룬다. 원본에 없는 다른 정치 이슈·정책·사건을 끌어와 주제를 바꾸지 않는다.",
+        "channelDirection은 말투와 논평 어조만 참고하고, 원본 내용과 무관한 주제로 재구성하지 않는다.",
+        "selectedIssue는 사용자가 고른 핵심 각도다. 이 각도의 title·reason·keywords만 중심으로 쓰고, 다른 각도로 주제를 바꾸지 않는다.",
+        "원본 발언자의 핵심 주장과 근거를 먼저 전달하고, 확인된 범위에서만 짧게 평가한다.",
+      ]
+    : [
+        "대본을 쓰기 전 channelDirection, selectedIssue, supplementalContext, 원본 발언을 함께 보고 이번 콘텐츠가 누구의 주장을 지지하고 누구를 비판해야 하는지 먼저 판단한다.",
+        "selectedIssue나 원본의 주인공이라는 이유로 그 인물을 자동으로 비판 대상으로 삼지 마라. 채널 방향과 맞는 발언자나 주장은 의미와 근거를 살려 옹호하고, 그 발언이 지적하는 조치·수사·보도·반박의 모순을 비판한다.",
+        "selectedIssue는 사용자가 고른 핵심 각도이자 절대적인 중심 논점이다. 원본 영상은 근거 자료일 뿐이며, 원본에 더 흥미로운 다른 이야기가 있어도 논점을 바꾸지 않는다.",
+        "도입부터 마지막 결론까지 selectedIssue가 제기한 대상과 논점을 다룬다. 선택 논점과 직접 연결되지 않는 장점·단점·지역 사례·부수 효과는 대본에서 제외한다.",
+        "selectedIssue.reason과 articleTitles는 제작 의도와 검증 방향이다. availableSources에서 이를 뒷받침하는 수치와 발언만 골라 쓴다.",
+      ]
   const response = await claudeText(
     [
       "너는 뉴스스토리 채널의 짧은 시사 논평을 쓰는 작가다.",
       "사실을 차례로 읽는 중립 뉴스 리포트가 아니라, 확인된 사실을 바탕으로 이슈를 평가하는 구어체 논평을 작성한다. 논평은 이슈에 따라 비판일 수도, 옹호일 수도 있다.",
-      "대본을 쓰기 전 channelDirection, selectedIssue, supplementalContext, 원본 발언을 함께 보고 이번 콘텐츠가 누구의 주장을 지지하고 누구를 비판해야 하는지 먼저 판단한다.",
-      "selectedIssue나 원본의 주인공이라는 이유로 그 인물을 자동으로 비판 대상으로 삼지 마라. 채널 방향과 맞는 발언자나 주장은 의미와 근거를 살려 옹호하고, 그 발언이 지적하는 조치·수사·보도·반박의 모순을 비판한다.",
+      ...focusRules,
       "옹호는 무조건적인 찬양이 아니다. 원본에서 확인되는 주장과 근거를 분명히 전달하고, 발언자의 주장은 확정된 사실과 구분해 '주장했다', '지적했다'로 표현한다.",
       "관점이 애매하면 임의로 한쪽을 공격하지 말고, 확인된 차이와 쟁점을 보여 주는 문제 제기형 논평으로 쓴다.",
-      "selectedIssue는 이 영상의 절대적인 중심 논점이다. 원본 영상은 근거 자료일 뿐이며, 원본에 더 흥미로운 다른 이야기가 있어도 논점을 바꾸지 않는다.",
-      "도입부터 마지막 결론까지 selectedIssue가 제기한 대상과 논점을 다룬다. 선택 논점과 직접 연결되지 않는 장점·단점·지역 사례·부수 효과는 대본에서 제외한다.",
-      "selectedIssue.reason과 articleTitles는 제작 의도와 검증 방향이다. availableSources에서 이를 뒷받침하는 수치와 발언만 골라 쓴다.",
       "supplementalContext는 사용자가 강조하거나 연결하고 싶은 보조 내용이다. 이 내용을 대본의 관점과 질문에 반영하고 availableSources에서 직접 연결되는 근거를 찾아 핵심 흐름으로 구성한다.",
       "supplementalContext에만 있고 원본 영상·자막에서 확인되지 않는 사실은 단정하지 않는다. 근거가 없으면 배경 주장으로 추가하지 말고 질문 또는 검토할 관점으로만 제한한다.",
       "말투는 옆 사람에게 중요한 사실을 조근조근 알려 주는 차분한 반말이다. 너무 가까운 친구처럼 가볍거나 장난스럽게 말하지 말고, 시청자를 훈계하거나 연설하지도 마라.",
@@ -241,8 +487,9 @@ async function reportWithClaude(
       "제공된 원문 밖의 사실이나 숨은 의도를 만들어내지 않는다. 확인되지 않은 의혹은 사실처럼 단정하지 말고 반드시 질문·가능성·추론으로 구분한다.",
       "근거 없이 '언론이 숨겼다', '아무도 모른다', '충격적인 진실'처럼 비밀을 과장하는 표현은 쓰지 않는다. 친밀한 말투와 사실의 희소성을 혼동하지 않는다.",
       `댓글 유도 문구까지 포함한 전체 본문 TTS가 약 50~56초가 되도록 공백 제외 ${REPORT_MIN_CHARACTERS}~${REPORT_MAX_CHARACTERS}자로 작성하고, ${REPORT_TARGET_CHARACTERS}자 안팎을 우선한다.`,
-      "대본의 마지막에는 앞선 결론과 자연스럽게 연결되는 짧은 질문과 댓글 유도 문구를 반드시 포함한다. 예: '이 정책, 어떻게 봐?' / '댓글로 의견 남겨줘.'",
-      "댓글 유도 문구도 script의 마지막 발화이자 자막이며 visuals의 마지막 source 장면으로 포함한다. 별도 후처리 문구로 취급하지 않는다.",
+      "대본의 마지막에는 앞선 결론과 자연스럽게 연결되는 짧은 질문과 댓글 유도를 반드시 포함한다.",
+      "질문 예: 인물이면 '김계리의 의견에 어떻게 생각해?', 이슈면 '조작기소에 대해 어떻게 생각해?'. '주제, 어떻게 봐?'처럼 끊긴 말투는 쓰지 않는다.",
+      "바로 다음 줄에 '댓글로 남겨줘.'를 둔다. 이 문구도 script의 마지막 발화이자 자막·visuals 마지막 source 장면으로 포함한다.",
       "댓글 유도까지 포함해 7~11개의 완결된 문장으로 작성한다.",
       "각 문장은 한 가지 주장과 근거를 담고 자연스러운 한국어 문장으로 완성한다.",
       "script 문자열은 한 문단으로 출력하지 말고, 화면에 함께 보여 줄 자연스러운 자막 호흡마다 줄바꿈(\\n)을 넣는다. 한 문장이 여러 자막 호흡으로 나뉘어도 문장부호는 문장 마지막에만 둔다.",
@@ -265,7 +512,10 @@ async function reportWithClaude(
       "JSON 객체만 출력한다: {script:string, visuals:[{visual:'source'|'quote',sourceId:string,sourceStart:number,sourceEnd:number}]}",
     ].join("\n"),
     JSON.stringify({
-      channelDirection: sourceContext.channelDirection,
+      channelDirection: sourceContext.directSource
+        ? ""
+        : sourceContext.channelDirection,
+      directSource: sourceContext.directSource === true,
       selectedIssue: sourceContext.issue,
       supplementalContext: sourceContext.supplementalContext,
       selectedRange: {
@@ -310,7 +560,10 @@ async function reportWithClaude(
   }
   const script = typeof value.script === "string" ? value.script.trim() : ""
   if (!script) throw new Error("empty-report")
-  if (!scriptMatchesIssueFocus(script, sourceContext.issue)) {
+  if (
+    !sourceContext.directSource &&
+    !scriptMatchesIssueFocus(script, sourceContext.issue)
+  ) {
     throw new Error("issue-focus-mismatch")
   }
   const preferred = Array.isArray(value.visuals)
@@ -333,6 +586,7 @@ async function reportWithClaude(
             narration: "",
             visual,
             sourceId:
+              sourceContext.supportingSources.length > 0 &&
               typeof requestedSourceId === "string" &&
               availableSourceIds.has(requestedSourceId)
                 ? requestedSourceId
@@ -392,7 +646,9 @@ async function refineWithClaude(
   candidates: NewsClipCandidate[],
   settings: NewsClipSettings,
   issue: NewsIssueFocus,
-  supplementalContext: string
+  supplementalContext: string,
+  channelDirection = settings.issueSearchGuidance,
+  directSource = false
 ) {
   const firstLineLimit = titleLineCharacterLimit(settings.titleCardText)
   const secondLineLimit = titleLineCharacterLimit({
@@ -402,33 +658,49 @@ async function refineWithClaude(
   const response = await claudeText(
     [
       "너는 뉴스스토리 채널의 시사 논평 쇼츠를 기획하는 편집자다.",
-      "channelDirection, selectedIssue, supplementalContext를 보고 이번 콘텐츠의 옹호 대상과 비판 대상을 먼저 구분한다. 원본 발언자나 주제를 자동으로 비판 대상으로 삼지 마라.",
-      "채널이 지지하는 발언은 그 주장의 핵심 근거가 선명한 구간을 우선하고, 비판해야 할 사안은 앞뒤 불일치·구체적 피해·수치·책임 회피가 선명한 구간을 우선한다.",
-      "selectedIssue가 있으면 후보의 일반적인 화제성보다 선택 이슈의 구체 논점과 직접 맞는 구간을 최우선으로 고른다.",
-      "같은 정책을 다뤄도 selectedIssue의 문제 제기와 다른 효과·사례를 중심으로 한 구간은 감점한다.",
+      directSource
+        ? "사용자가 직접 지정한 원본 영상이다. transcript에 실제로 나온 발언·인물·사건을 기준으로 구간을 고르고, channelDirection이나 다른 이슈로 주제를 바꾸지 않는다."
+        : "channelDirection, selectedIssue, supplementalContext를 보고 이번 콘텐츠의 옹호 대상과 비판 대상을 먼저 구분한다. 원본 발언자나 주제를 자동으로 비판 대상으로 삼지 마라.",
+      directSource
+        ? "화제성이 높은 연속 발언과 핵심 주장이 선명한 구간을 우선한다."
+        : "채널이 지지하는 발언은 그 주장의 핵심 근거가 선명한 구간을 우선하고, 비판해야 할 사안은 앞뒤 불일치·구체적 피해·수치·책임 회피가 선명한 구간을 우선한다.",
+      directSource
+        ? "selectedIssue는 영상 제목 참고용이다. 제목과 자막이 다르면 자막을 따른다."
+        : "selectedIssue가 있으면 후보의 일반적인 화제성보다 선택 이슈의 구체 논점과 직접 맞는 구간을 최우선으로 고른다.",
+      directSource
+        ? ""
+        : "같은 정책을 다뤄도 selectedIssue의 문제 제기와 다른 효과·사례를 중심으로 한 구간은 감점한다.",
       "supplementalContext가 있으면 그 내용과 직접 연결되는 원본 발언·수치가 포함된 후보 구간을 우선한다.",
       "맥락 왜곡과 확인되지 않은 주장은 감점한다. 원문에 없는 사실을 제목에 추가하지 마라.",
-      "제목은 중립적인 뉴스 요약문이 아니라, 확인된 사실 하나와 선택한 관점의 판단 또는 반문을 결합한 뉴스스토리식 구어체 훅으로 쓴다.",
-      "친구에게 놓치기 쉬운 사실을 귀띔하는 느낌의 호기심을 만들되, '아무도 모르는 비밀'처럼 근거 없이 과장하지 않는다.",
-      "'결국 누가 부담하나?', '이게 대책인가?', '뒤집힌 해명!'처럼 짧고 직설적인 의문·대조 구조를 활용하되 원문 근거보다 강하게 단정하지 않는다.",
-      "인트로 제목은 한 문장을 줄바꿈하지 말고, 의미가 독립된 짧은 구절 2개를 만들어 반드시 줄바꿈(\\n)으로 구분한다. 각 구절은 한 줄만 사용한다.",
-      `1단은 공백 제외 ${firstLineLimit}자 이내, 2단은 공백 제외 ${secondLineLimit}자 이내로 작성한다. 2단에는 가장 강한 핵심어를 짧게 배치한다.`,
+      "titleOptions는 각 후보 preview/windowText에 실제로 나온 인물·기관·숫자·핵심 명사만 써서 만든다. 구간에 없는 소재를 끌어오지 않는다.",
+      "제목은 자극용 허풍이 아니라, 그 구간 발언을 한눈에 알아듣는 짧은 두 줄 헤드라인이다.",
+      "1단=구체적 사실·주장의 주어/핵심어, 2단=그 구간의 반전·쟁점·핵심 결과. 서로 이어지는 한 문장을 억지로 쪼개지 않는다.",
+      "금지: '그 말', '진짜 문제', '아무도 모르는', '충격', '경악', 구간과 무관한 감탄·추상어.",
+      "어색한 조사 생략·말꼬리 자르기를 피하고, 평소 뉴스 쇼츠에서 자연스럽게 읽히는 한국어로 쓴다.",
+      "인트로 제목은 의미가 독립된 짧은 구절 2개를 만들어 반드시 줄바꿈(\\n)으로 구분한다. 각 구절은 한 줄만 사용한다.",
+      `1단은 공백 제외 ${firstLineLimit}자 이내, 2단은 공백 제외 ${secondLineLimit}자 이내로 작성한다.`,
       "JSON 배열만 출력한다. 각 항목은 id, reason, contextRisk(low|medium|high), titleOptions(정확히 3개)를 갖는다.",
-    ].join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n"),
     JSON.stringify({
-      channelDirection: settings.issueSearchGuidance,
+      channelDirection,
+      directSource,
       selectedIssue: issue,
       supplementalContext,
-      transcript: transcript.map((item) => ({
-        start: item.start,
-        end: item.end,
-        text: item.text,
-      })),
       candidates: candidates.map((item) => ({
         id: item.id,
         start: item.sourceStart,
         end: item.sourceEnd,
         preview: item.preview,
+        windowText: transcript
+          .filter(
+            (segment) =>
+              segment.end > item.sourceStart && segment.start < item.sourceEnd
+          )
+          .map((segment) => segment.text)
+          .join(" ")
+          .slice(0, 500),
         scores: item.scores,
       })),
     }),
@@ -482,6 +754,17 @@ function fitCandidateTitles(
       fitTitleToLineLayouts(title, settings.titleCardText, secondLayout)
     ),
   }))
+}
+
+function replaceCandidate(
+  candidates: NewsClipCandidate[],
+  next: NewsClipCandidate
+) {
+  const exists = candidates.some((candidate) => candidate.id === next.id)
+  if (!exists) return [next, ...candidates]
+  return candidates.map((candidate) =>
+    candidate.id === next.id ? next : candidate
+  )
 }
 
 function stripFence(value: string) {

@@ -1,6 +1,6 @@
 import type { NewsClipSettings } from "./types.ts"
 
-export const NEWS_RENDER_SCHEMA_VERSION = 32
+export const NEWS_RENDER_SCHEMA_VERSION = 40
 
 export function newsRenderSettingsKey(settings: NewsClipSettings) {
   const source = JSON.stringify({
@@ -24,6 +24,8 @@ export function newsRenderSettingsKey(settings: NewsClipSettings) {
     bodyTitleColor: settings.bodyTitleColor,
     bodySubtitleText: settings.bodySubtitleText,
     subtitleColor: settings.subtitleColor,
+    bodySourceText: settings.bodySourceText,
+    sourceColor: settings.sourceColor,
     emphasisColor: settings.emphasisColor,
     videoRect: settings.videoRect,
     safeMarginPercent: settings.safeMarginPercent,

@@ -160,11 +160,12 @@ test("직접 발언 장면은 TTS 분량이 아닌 원본 구간 길이를 사�
     sourceStart: 12.25,
     sourceEnd: 18.75,
   }
-  assert.equal(estimateReportScenesDuration([scenes[0]]), 6.5)
-  const subtitles = reportSubtitles(scenes, [6.5, 3.25])
-  assert.equal(subtitles[0].end, 6.5)
-  assert.equal(subtitles[1].start, 6.5)
-  assert.equal(subtitles[1].end, 9.75)
+  // 원본 6.5초 구간은 기본 배속(1.2x) 적용 후 출력 길이로 잡힌다.
+  assert.equal(estimateReportScenesDuration([scenes[0]]), 5.417)
+  const subtitles = reportSubtitles(scenes, [5.417, 3.25])
+  assert.equal(subtitles[0].end, 5.417)
+  assert.equal(subtitles[1].start, 5.417)
+  assert.equal(subtitles[1].end, 8.667)
 })
 
 test("원문과 발화 길이가 맞는 직접 발언은 원본 음성을 유지한다", () => {
@@ -233,13 +234,66 @@ test("직접 발언 자막을 원본 자막 타임코드에 맞춘다", () => {
 
   const alignment = quoteTranscriptAlignment(scene, quoteTranscript)
 
-  assert.deepEqual(
-    alignment.map((item) => item.text),
-    ["대통령이 내란 한다라는 것 자체가 넌", "센스 아닙니까?"]
-  )
-  assert.equal(alignment[0].start, 0)
-  assert.equal(alignment[1].start, 3.081)
-  assert.equal(alignment[1].end, 8.601)
+  // 겹친 ASR 조각은 문장 단위로 이어 붙이고, 다음 문장과 시간이 겹치지 않게 정리한다.
+  assert.equal(alignment.length, 1)
+  assert.match(alignment[0]?.text ?? "", /넌\s*센스 아닙니까\?/)
+  assert.equal(alignment[0]?.start, 0)
+  assert.equal(alignment[0]?.end, 8.601)
+})
+
+test("겹친 전사 단어 타임스탬프를 섞지 않고 문장 순서를 유지한다", () => {
+  const scene: NewsReportScene = {
+    id: "buildup-highlight",
+    narration: "",
+    visual: "quote",
+    sourceStart: 80,
+    sourceEnd: 100,
+  }
+  const quoteTranscript: TranscriptSegment[] = [
+    {
+      id: "a",
+      text: "2026년 11월 1일",
+      start: 80,
+      end: 86,
+      speaker: "a",
+      words: [
+        { text: "2026년", start: 80, end: 82 },
+        { text: "11월", start: 82, end: 84 },
+        { text: "1일", start: 84, end: 86 },
+      ],
+    },
+    {
+      id: "b",
+      text: "대한민국은 죽고",
+      start: 83,
+      end: 88,
+      speaker: "a",
+      words: [
+        { text: "대한민국은", start: 83, end: 85 },
+        { text: "죽고", start: 85, end: 88 },
+      ],
+    },
+    {
+      id: "c",
+      text: "이재명만 살았습니다.",
+      start: 86,
+      end: 92,
+      speaker: "a",
+      words: [
+        { text: "이재명만", start: 86, end: 89 },
+        { text: "살았습니다.", start: 89, end: 92 },
+      ],
+    },
+  ]
+  const alignment = quoteTranscriptAlignment(scene, quoteTranscript)
+  const joined = alignment.map((item) => item.text).join(" ")
+  assert.match(joined, /2026년 11월 1일/)
+  assert.match(joined, /대한민국은 죽고/)
+  assert.match(joined, /이재명만 살았습니다/)
+  assert.equal(joined.includes("11월 대한민국은"), false)
+  for (let index = 1; index < alignment.length; index += 1) {
+    assert.ok(alignment[index]!.start >= alignment[index - 1]!.end - 0.02)
+  }
 })
 
 test("요약 대본보다 원본 음성이 지나치게 긴 직접 발언은 TTS 장면으로 바꾼다", () => {
@@ -297,6 +351,40 @@ test("일반 자료 화면은 직접 발언 검증과 관계없이 유지한다"
   }
 
   assert.equal(normalizeQuoteScenes([scene], {}, "primary")[0], scene)
+})
+
+test("무음컷으로 나눈 빈 나레이션 직접 발언은 원본 음성 장면으로 유지한다", () => {
+  const scene: NewsReportScene = {
+    id: "buildup-highlight-cut-2",
+    narration: "",
+    visual: "quote",
+    sourceId: "primary",
+    sourceStart: 12,
+    sourceEnd: 14,
+  }
+
+  assert.equal(
+    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0]
+      .visual,
+    "quote"
+  )
+})
+
+test("무음컷 첫 조각에 원문 대본이 남아 있어도 TTS로 바꾸지 않는다", () => {
+  const scene: NewsReportScene = {
+    id: "buildup-highlight-cut-1",
+    narration: "현직 대통령이 체포되어 갔습니다.",
+    visual: "quote",
+    sourceId: "primary",
+    sourceStart: 12,
+    sourceEnd: 14,
+  }
+
+  assert.equal(
+    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0]
+      .visual,
+    "quote"
+  )
 })
 
 test("실제 장면별 오디오 길이에 맞춰 자막 싱크를 다시 계산한다", () => {
@@ -456,6 +544,33 @@ test("댓글 유도 문구는 본편 다음 별도 장면으로 분리한다", (
   assert.equal(ensureReportEndCta(script, "다른 제목"), script)
 })
 
+test("이미 있는 마무리 장면의 구간·크롭은 다시 붙일 때 유지한다", () => {
+  const body = buildReportScenes(
+    "지원 대상과 재원 부담을 함께 봐야 해.",
+    transcript,
+    10,
+    25
+  )
+  const first = appendEndCtaScenes(body, "어떻게 생각해?\n댓글로 남겨줘.")
+  const edited = first.map((scene) =>
+    scene.id === "end-cta"
+      ? {
+          ...scene,
+          sourceStart: 12,
+          sourceEnd: 18,
+          crop: { x: 40, y: 30, zoom: 1.25 },
+        }
+      : scene
+  )
+  const again = appendEndCtaScenes(edited, "어떻게 생각해?\n댓글로 남겨줘.")
+  const cta = again.at(-1)
+
+  assert.equal(cta?.id, "end-cta")
+  assert.equal(cta?.sourceStart, 12)
+  assert.equal(cta?.sourceEnd, 18)
+  assert.deepEqual(cta?.crop, { x: 40, y: 30, zoom: 1.25 })
+})
+
 test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않는다", () => {
   const phrases = [
     "국민이 진실이라고 믿던 그 보도,",
@@ -463,6 +578,23 @@ test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않�
     "언론한테 반성하라는 이 발언, 직접 들어봐.",
     "김계리 발언에 대해 어떻게 생각해?",
     "댓글로 의견 남겨줘.",
+  ]
+  const quoteTranscript: TranscriptSegment[] = [
+    {
+      id: "q1",
+      text: "공수처가 현직 대통령을 체포하는 장면을 연출한다",
+      start: 20,
+      end: 28,
+      speaker: "speaker-1",
+      words: [
+        { text: "공수처가", start: 20, end: 21.5, speaker: "speaker-1" },
+        { text: "현직", start: 21.5, end: 22.2, speaker: "speaker-1" },
+        { text: "대통령을", start: 22.2, end: 23.5, speaker: "speaker-1" },
+        { text: "체포하는", start: 23.5, end: 25, speaker: "speaker-1" },
+        { text: "장면을", start: 25, end: 26, speaker: "speaker-1" },
+        { text: "연출한다", start: 26, end: 28, speaker: "speaker-1" },
+      ],
+    },
   ]
   const scenes = [
     {
@@ -474,7 +606,7 @@ test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않�
     },
     {
       id: "buildup-highlight",
-      narration: "공수처가 현직 대통령을 체포하는 장면을 연출한다",
+      narration: "",
       visual: "quote" as const,
       sourceStart: 20,
       sourceEnd: 70,
@@ -487,7 +619,7 @@ test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않�
       sourceEnd: 70,
     },
   ]
-  const subtitles = reportSubtitles(scenes, [9, 50, 4], phrases)
+  const subtitles = reportSubtitles(scenes, [9, 50, 4], phrases, quoteTranscript)
   const quoteSubs = subtitles.filter(
     (cue) => cue.sceneId === "buildup-highlight"
   )

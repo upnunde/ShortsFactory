@@ -44,11 +44,10 @@ test("뉴스 편집 설정을 안전한 범위로 제한한다", () => {
     "bad/id"
   )
   assert.equal(settings.profileId, "default")
-  assert.equal(settings.targetMinSeconds, 45)
-  assert.equal(settings.targetMaxSeconds, 58)
+  assert.equal(settings.targetMinSeconds, 5)
+  assert.equal(settings.targetMaxSeconds, 100)
   assert.equal(settings.idealMinSeconds, 50)
   assert.equal(settings.idealMaxSeconds, 55)
-  assert.equal(settings.hardMaxSeconds, 59)
   assert.equal(settings.titleCardSeconds, 3)
   assert.equal(settings.bgmVolume, 0.4)
   assert.equal(settings.safeMarginPercent, 5)

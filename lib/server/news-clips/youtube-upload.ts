@@ -4,12 +4,19 @@ import path from "node:path"
 
 import type { NewsClipProject } from "@/lib/news-clips/types"
 import {
+  koreaPublishAt,
+  scheduleForUpload,
+} from "@/lib/youtube-metadata"
+import {
   readChannelAccountStatus,
   youtubeAccessToken,
 } from "@/lib/server/accounts"
 import { readNewsChannel } from "@/lib/server/news-clips/channels"
 
-export async function uploadNewsClipToYoutube(project: NewsClipProject) {
+export async function uploadNewsClipToYoutube(
+  project: NewsClipProject,
+  scheduledAt = ""
+) {
   const profile = await readNewsChannel(project.profileId)
   if (!profile) throw new Error("news-channel-not-found")
 
@@ -38,6 +45,7 @@ export async function uploadNewsClipToYoutube(project: NewsClipProject) {
     .replace(/\s*\n\s*/g, " ")
     .trim()
     .slice(0, 100)
+  const publishAt = koreaPublishAt(scheduleForUpload(scheduledAt))
   const metadata = {
     snippet: {
       title: title || "뉴스 쇼츠",
@@ -49,6 +57,7 @@ export async function uploadNewsClipToYoutube(project: NewsClipProject) {
     },
     status: {
       privacyStatus: "private",
+      ...(publishAt ? { publishAt } : {}),
       selfDeclaredMadeForKids: false,
       embeddable: true,
     },

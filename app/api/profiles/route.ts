@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import {
+  archiveProfile,
   createProfile,
   listProfiles,
   updateProfile,
@@ -8,6 +9,31 @@ import {
 
 export async function GET() {
   return NextResponse.json(await listProfiles())
+}
+
+export async function DELETE(request: Request) {
+  const body = (await request.json().catch(() => null)) as {
+    id?: unknown
+  } | null
+  if (typeof body?.id !== "string") {
+    return NextResponse.json(
+      { message: "삭제할 채널을 읽을 수 없습니다." },
+      { status: 400 }
+    )
+  }
+  if (body.id === "default") {
+    return NextResponse.json(
+      { message: "기본 채널은 삭제할 수 없습니다." },
+      { status: 400 }
+    )
+  }
+  const archived = await archiveProfile(body.id)
+  return archived
+    ? NextResponse.json({ archived: true })
+    : NextResponse.json(
+        { message: "채널을 삭제하지 못했습니다. 마지막 채널은 남겨 둡니다." },
+        { status: 404 }
+      )
 }
 
 export async function POST(request: Request) {

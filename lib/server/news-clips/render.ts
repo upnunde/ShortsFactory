@@ -9,18 +9,27 @@ import {
   selectIntroStillRange,
   type IntroStillRange,
 } from "@/lib/news-clips/intro"
-import { finalDurationAllowed } from "@/lib/news-clips/timeline"
+import { densifySourceKeeps } from "@/lib/news-clips/buildup"
+import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
+import {
+  NEWS_SOURCE_PLAYBACK_RATE,
+  sourceFootageSecondsForOutput,
+  sourceVideoSetpts,
+} from "@/lib/news-clips/playback"
+import { tightenQuoteSegment } from "@/lib/server/news-clips/quote-tighten"
+import { detectAudioSilence } from "@/lib/server/news-clips/vad"
+import { NEWS_SILENCE_CUT_MIN_SECONDS } from "@/lib/news-clips/vad"
 import {
   NEWS_INTRO_GAP_SECONDS,
   NEWS_OUTRO_GAP_SECONDS,
-  normalizeQuoteScenes,
   quoteTranscriptAlignment,
   retimeSubtitleCuesToScenes,
 } from "@/lib/news-clips/report"
+import { bodySourceCreditText } from "@/lib/news-clips/source-credit"
 import { NEWS_RENDER_SCHEMA_VERSION } from "@/lib/news-clips/render-key"
 import { parseTranscript } from "@/lib/news-clips/transcript"
 import {
-  normalizeSubtitleCues,
+  layoutTimedSubtitleCues,
   resolveTextBox,
   splitIntroTitleLines,
   titleLineFits,
@@ -55,11 +64,13 @@ export async function renderNewsTextOverlay({
   mode,
   title,
   subtitle,
+  sourceCredit = "",
   settings,
 }: {
   mode: "title" | "body"
   title: string
   subtitle: string
+  sourceCredit?: string
   settings: NewsClipSettings
 }) {
   const folder = path.join(process.cwd(), "outputs", "news-text-preview")
@@ -68,6 +79,7 @@ export async function renderNewsTextOverlay({
     mode,
     title,
     subtitle,
+    sourceCredit,
     fontFamily: settings.fontFamily,
     titleCardText: settings.titleCardText,
     titleCardSecondFontSize: settings.titleCardSecondFontSize,
@@ -78,6 +90,8 @@ export async function renderNewsTextOverlay({
     bodyTitleColor: settings.bodyTitleColor,
     bodySubtitleText: settings.bodySubtitleText,
     subtitleColor: settings.subtitleColor,
+    bodySourceText: settings.bodySourceText,
+    sourceColor: settings.sourceColor,
     emphasisColor: settings.emphasisColor,
     safeMarginPercent: settings.safeMarginPercent,
   })
@@ -92,6 +106,7 @@ export async function renderNewsTextOverlay({
     filters.push(assAlphaFilter(titleAss))
   } else {
     const subtitleAss = path.join(folder, `${key}-subtitle.ass`)
+    const sourceAss = path.join(folder, `${key}-source.ass`)
     await Promise.all([
       writeFile(titleAss, bodyTitleAssText(title, 1, settings)),
       writeFile(
@@ -110,8 +125,13 @@ export async function renderNewsTextOverlay({
           settings
         )
       ),
+      writeFile(sourceAss, bodySourceAssText(sourceCredit, 1, settings)),
     ])
-    filters.push(assAlphaFilter(titleAss), assAlphaFilter(subtitleAss))
+    filters.push(
+      assAlphaFilter(titleAss),
+      assAlphaFilter(subtitleAss),
+      assAlphaFilter(sourceAss)
+    )
   }
   filters.push("format=rgba")
   await run(ffmpegBin(), [
@@ -135,11 +155,13 @@ export async function renderNewsFramePreview({
   mode,
   title,
   subtitle,
+  sourceCredit = "",
   settings,
 }: {
   mode: "title" | "body"
   title: string
   subtitle: string
+  sourceCredit?: string
   settings: NewsClipSettings
 }) {
   const folder = path.join(process.cwd(), "outputs", "news-frame-preview")
@@ -148,6 +170,7 @@ export async function renderNewsFramePreview({
     mode,
     title,
     subtitle,
+    sourceCredit,
     titleFrameImage: settings.titleFrameImage,
     bodyFrameImage: settings.bodyFrameImage,
     videoRect: settings.videoRect,
@@ -161,6 +184,8 @@ export async function renderNewsFramePreview({
     bodyTitleColor: settings.bodyTitleColor,
     bodySubtitleText: settings.bodySubtitleText,
     subtitleColor: settings.subtitleColor,
+    bodySourceText: settings.bodySourceText,
+    sourceColor: settings.sourceColor,
     emphasisColor: settings.emphasisColor,
     safeMarginPercent: settings.safeMarginPercent,
   })
@@ -172,6 +197,7 @@ export async function renderNewsFramePreview({
   if (!placeholder) throw new Error("news-preview-placeholder-missing")
   const titleAss = path.join(folder, `${key}-title.ass`)
   const subtitleAss = path.join(folder, `${key}-subtitle.ass`)
+  const sourceAss = path.join(folder, `${key}-source.ass`)
   const frame = publicFile(
     mode === "title" ? settings.titleFrameImage : settings.bodyFrameImage
   )
@@ -220,6 +246,7 @@ export async function renderNewsFramePreview({
         settings
       )
     ),
+    writeFile(sourceAss, bodySourceAssText(sourceCredit, 1, settings)),
   ])
   const rect = settings.videoRect
   const frameFilter = frame
@@ -231,7 +258,7 @@ export async function renderNewsFramePreview({
     `[0:v]scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${rect.width}:${rect.height}:x='(iw-ow)*0.42':y='if(gte(iw/ih\\,1.2)\\,0\\,(ih-oh)*0.34)',setsar=1[clip]`,
     frameFilter,
     `[bg][clip]overlay=${rect.x}:${rect.y}[framed]`,
-    `[framed]${assFilter(titleAss)},${assFilter(subtitleAss)}[v]`,
+    `[framed]${assFilter(titleAss)},${assFilter(subtitleAss)},${assFilter(sourceAss)}[v]`,
   ].join(";")
   await run(ffmpegBin(), [
     "-y",
@@ -269,21 +296,25 @@ export async function renderNewsClip(
   project = {
     ...project,
     title: renderTitle,
-    reportScenes: normalizeQuoteScenes(
-      project.reportScenes,
-      project.source?.id ? { [project.source.id]: project.transcript } : {},
-      project.source?.id ?? "",
-      settings.titleVoiceRate
-    ),
     metadata: {
       ...project.metadata,
       youtubeTitle: renderTitle.replace(/\s*\n\s*/g, " "),
     },
   }
+  const prepared = prepareRenderProject(project, settings)
+  if (prepared.reason) throw new Error(prepared.reason)
+  project = prepared.project
   validateProject(project, settings)
   const sources = await resolveProjectSources(project)
   const source = sources.get(project.source!.id)
   if (!source) throw new Error("source-upload-required")
+  const freshSilences = await detectAudioSilence(source.localFile).catch(
+    () => project.detectedSilences
+  )
+  project = {
+    ...project,
+    detectedSilences: freshSilences,
+  }
   const sourceFiles = new Map(
     [...sources].map(([sourceId, item]) => [sourceId, item.localFile])
   )
@@ -310,7 +341,7 @@ export async function renderNewsClip(
   const prefix = mode === "preview" ? "preview-" : ""
   const dimensions =
     mode === "preview"
-      ? { width: 540, height: 960, scale: 0.5, preset: "ultrafast" }
+      ? { width: 360, height: 640, scale: 360 / 1080, preset: "ultrafast" }
       : {
           width: 720,
           height: 1280,
@@ -366,13 +397,16 @@ export async function renderNewsClip(
   const outputDurationSeconds = roundDuration(
     titleCardDurationSeconds + bodyDurationSeconds
   )
-  validateDuration(outputDurationSeconds, settings)
   const effectiveProject: NewsClipProject = {
     ...project,
-    subtitles: retimeSubtitleCuesToScenes(
-      normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText),
-      project.reportScenes,
-      report.scenes
+    // 실측 장면 길이에 맞춘 뒤, 줄바꿈만 적용한다(merge/재타이밍으로 싱크를 깨지 않음).
+    subtitles: layoutTimedSubtitleCues(
+      retimeSubtitleCuesToScenes(
+        project.subtitles,
+        project.reportScenes,
+        report.scenes
+      ),
+      settings.bodySubtitleText
     ),
     titleCardDurationSeconds,
     outputDurationSeconds,
@@ -416,6 +450,7 @@ export async function renderNewsClip(
     reportScript: effectiveProject.reportScript,
     reportScenes: report.scenes,
     reportAudio: report.signature,
+    sourcePlaybackRate: NEWS_SOURCE_PLAYBACK_RATE,
     subtitles: effectiveProject.subtitles,
     title: effectiveProject.title,
     crop: effectiveProject.crop,
@@ -428,6 +463,9 @@ export async function renderNewsClip(
     bodyTitleText: settings.bodyTitleText,
     bodyTitleColor: settings.bodyTitleColor,
     bodySubtitleText: settings.bodySubtitleText,
+    bodySourceText: settings.bodySourceText,
+    sourceColor: settings.sourceColor,
+    sourceCredit: bodySourceCreditText(source),
     emphasisColor: settings.emphasisColor,
     subtitleColor: settings.subtitleColor,
     safeMarginPercent: settings.safeMarginPercent,
@@ -440,6 +478,8 @@ export async function renderNewsClip(
     bgmVolume: effectiveProject.bgmVolume,
     bgmFile: settings.bgmFile,
   })
+  const bodySourceAss = path.join(folder, `${prefix}body-source.ass`)
+  const sourceCredit = bodySourceCreditText(source)
 
   await Promise.all([
     writeFile(captions, subtitlesToSrt(effectiveProject.subtitles)),
@@ -454,6 +494,10 @@ export async function renderNewsClip(
     writeFile(
       bodyTitleAss,
       bodyTitleAssText(effectiveProject.title, bodyDurationSeconds, settings)
+    ),
+    writeFile(
+      bodySourceAss,
+      bodySourceAssText(sourceCredit, bodyDurationSeconds, settings)
     ),
     writeFile(
       path.join(folder, "manifest.json"),
@@ -498,6 +542,7 @@ export async function renderNewsClip(
       report.scenes,
       captionsAss,
       bodyTitleAss,
+      bodySourceAss,
       bodyVideo,
       dimensions,
       bodyDurationSeconds
@@ -579,6 +624,14 @@ export async function renderNewsClip(
 }
 
 function validateProject(project: NewsClipProject, settings: NewsClipSettings) {
+  const reason = invalidProjectReason(project, settings)
+  if (reason) throw new Error(reason)
+}
+
+function invalidProjectReason(
+  project: NewsClipProject,
+  settings: NewsClipSettings
+) {
   const [firstTitleLine, secondTitleLine] = splitIntroTitleLines(
     project.title,
     settings.titleCardText
@@ -587,28 +640,37 @@ function validateProject(project: NewsClipProject, settings: NewsClipSettings) {
     ...settings.titleCardText,
     fontSize: settings.titleCardSecondFontSize,
   }
-  if (
-    project.type !== "news_clip" ||
-    !newsChannelId(project.profileId) ||
-    !/^[0-9a-f-]{36}$/i.test(project.id) ||
-    !project.source?.approved ||
-    !project.title.trim() ||
-    !secondTitleLine ||
-    !titleLineFits(firstTitleLine, settings.titleCardText) ||
-    !titleLineFits(secondTitleLine, secondTitleLayout) ||
-    !project.reportScript.trim() ||
-    project.reportScenes.length === 0 ||
-    project.reportScenes.some(
-      (scene) =>
-        !scene.narration.trim() ||
-        (scene.visual === "quote" &&
-          (!Number.isFinite(scene.sourceStart) ||
-            !Number.isFinite(scene.sourceEnd) ||
-            scene.sourceEnd <= scene.sourceStart))
-    )
-  ) {
-    throw new Error("invalid-project")
+  if (project.type !== "news_clip") return "invalid-project"
+  if (!newsChannelId(project.profileId)) return "invalid-channel"
+  if (!/^[0-9a-f-]{36}$/i.test(project.id)) return "invalid-project-id"
+  if (!project.source?.approved) return "source-not-approved"
+  if (!project.title.trim()) return "title-required"
+  if (!secondTitleLine) return "title-second-line-required"
+  if (!titleLineFits(firstTitleLine, settings.titleCardText)) {
+    return "title-first-line-overflow"
   }
+  if (!titleLineFits(secondTitleLine, secondTitleLayout)) {
+    return "title-second-line-overflow"
+  }
+  if (!project.reportScript.trim()) return "report-script-required"
+  if (project.reportScenes.length === 0) return "report-scenes-required"
+  // quote 무음컷(…-cut-2 이후)은 원본 음성만 쓰므로 narration이 비어 있을 수 있다.
+  const brokenScene = project.reportScenes.find((scene) => {
+    if (scene.visual === "quote") {
+      return (
+        !Number.isFinite(scene.sourceStart) ||
+        !Number.isFinite(scene.sourceEnd) ||
+        scene.sourceEnd <= scene.sourceStart
+      )
+    }
+    return !scene.narration.trim()
+  })
+  if (brokenScene) {
+    return brokenScene.visual === "quote"
+      ? "report-scene-quote-range-invalid"
+      : "report-scene-narration-required"
+  }
+  return ""
 }
 
 async function resolveProjectSources(project: NewsClipProject) {
@@ -633,12 +695,6 @@ async function resolveProjectSources(project: NewsClipProject) {
     resolved.set(sourceId, source)
   }
   return resolved
-}
-
-function validateDuration(duration: number, settings: NewsClipSettings) {
-  if (!finalDurationAllowed(duration, settings.hardMaxSeconds)) {
-    throw new Error("invalid-duration")
-  }
 }
 
 async function synthesizeSpeech(
@@ -669,6 +725,7 @@ type TimedReportScene = NewsReportScene & {
   end: number
   duration: number
   alignment: TypecastSpeechTiming["words"]
+  tightVideoPath?: string
 }
 
 async function synthesizeReport(
@@ -686,10 +743,10 @@ async function synthesizeReport(
     path: string
     volume: number
     duration: number
-    normalizeSpeech?: boolean
   }[] = []
   const durations: number[] = []
   const alignments: TypecastSpeechTiming["words"][] = []
+  const tightVideoPaths: Array<string | undefined> = []
   for (const [index, scene] of scenes.entries()) {
     if (scene.visual === "quote") {
       const source =
@@ -700,36 +757,54 @@ async function synthesizeReport(
         source,
         start: scene.sourceStart,
         end: scene.sourceEnd,
+        // v5: 무음컷 없이 1.2배만. 배속/캐시 버전 변경 시 키 분리.
+        tighten: "v5-rate-1.2",
+        playbackRate: NEWS_SOURCE_PLAYBACK_RATE,
       }).slice(0, 16)
-      const audio = path.join(folder, `quote-${index + 1}-${key}.m4a`)
-      if (!(await exists(audio))) {
-        await extractQuoteAudio(
-          source,
-          scene.sourceStart,
-          scene.sourceEnd,
-          audio
-        )
-      }
-      const duration = await mediaDuration(audio)
-      audioFiles.push({ path: audio, volume: quoteVolume, duration })
-      durations.push(duration)
+      const tightened = await tightenQuoteSegment({
+        source,
+        start: scene.sourceStart,
+        end: scene.sourceEnd,
+        folder,
+        key: `${index + 1}-${key}`,
+      })
+      audioFiles.push({
+        path: tightened.audioPath,
+        volume: quoteVolume,
+        duration: tightened.duration,
+      })
+      durations.push(tightened.duration)
+      const rawQuoteSeconds = Math.max(
+        0.1,
+        scene.sourceEnd - scene.sourceStart
+      )
+      const alignmentScale = tightened.duration / rawQuoteSeconds
       alignments.push(
         quoteTranscriptAlignment(
           scene,
           transcripts.get(scene.sourceId || primarySourceId) ?? []
-        )
+        ).map((word) => ({
+          ...word,
+          start: roundDuration(word.start * alignmentScale),
+          end: roundDuration(word.end * alignmentScale),
+        }))
       )
+      tightVideoPaths.push(tightened.videoPath)
       continue
     }
 
+    const narration = scene.narration.trim()
+    if (!narration) {
+      throw new Error("report-scene-narration-required")
+    }
     const key = digest({
-      narration: scene.narration,
+      narration,
       tts: newsTtsCacheIdentity(provider),
       rate: settings.titleVoiceRate,
     }).slice(0, 16)
     const audio = path.join(folder, `report-${index + 1}-${key}.wav`)
     const timing = await synthesizeSpeech(
-      scene.narration,
+      narration,
       settings,
       audio,
       provider
@@ -739,13 +814,18 @@ async function synthesizeReport(
       path: audio,
       volume: ttsVolume,
       duration,
-      normalizeSpeech: true,
     })
     durations.push(duration)
     alignments.push(timing?.words ?? [])
+    tightVideoPaths.push(undefined)
   }
 
-  const signature = digest({ audioFiles, durations })
+  const signature = digest({
+    audioFiles,
+    durations,
+    // loudnorm 제거 후 캐시 분리
+    concatAudio: "v2-volume-atrim",
+  })
   const audio = path.join(folder, `report-${signature.slice(0, 16)}.m4a`)
   if (!(await exists(audio))) {
     await concatAudio(audioFiles, audio)
@@ -760,6 +840,7 @@ async function synthesizeReport(
       end: roundDuration(cursor),
       duration: roundDuration(durations[index]),
       alignment: alignments[index],
+      tightVideoPath: tightVideoPaths[index],
     } satisfies TimedReportScene
   })
   return {
@@ -783,50 +864,19 @@ async function readSpeechTiming(filePath: string) {
   }
 }
 
-async function extractQuoteAudio(
-  source: string,
-  start: number,
-  end: number,
-  output: string
-) {
-  const duration = Math.max(0.1, end - start)
-  const fadeOutStart = Math.max(0, duration - 0.03)
-  await run(ffmpegBin(), [
-    "-y",
-    "-ss",
-    String(Math.max(0, start)),
-    "-i",
-    source,
-    "-t",
-    String(duration),
-    "-map",
-    "0:a:0",
-    "-vn",
-    "-af",
-    `afade=t=in:st=0:d=0.03,afade=t=out:st=${fadeOutStart}:d=0.03`,
-    "-c:a",
-    "aac",
-    "-ar",
-    "48000",
-    output,
-  ])
-}
-
 async function concatAudio(
   inputs: {
     path: string
     volume: number
     duration: number
-    normalizeSpeech?: boolean
   }[],
   output: string
 ) {
   const inputArgs = inputs.flatMap((input) => ["-i", input.path])
+  // loudnorm을 filter_complex에 넣으면 PTS/길이가 깨져 자막·입모양 싱크가 밀린다.
+  // 볼륨만 맞추고 장면별 실측 duration으로 잘라 타임라인을 유지한다.
   const normalized = inputs.map((input, index) => {
-    const speechNormalization = input.normalizeSpeech
-      ? ",loudnorm=I=-20:TP=-3:LRA=7,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
-      : ""
-    return `[${index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo${speechNormalization},volume=${Math.max(0, Math.min(2, input.volume))},apad,atrim=duration=${Math.max(0.1, input.duration)}[audio${index}]`
+    return `[${index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=${Math.max(0, Math.min(2, input.volume))},apad,atrim=duration=${Math.max(0.1, input.duration)},asetpts=PTS-STARTPTS[audio${index}]`
   })
   const streams = inputs.map((_, index) => `[audio${index}]`).join("")
   await run(ffmpegBin(), [
@@ -959,6 +1009,7 @@ async function makeBodyVideo(
   scenes: TimedReportScene[],
   captionsAss: string,
   bodyTitleAss: string,
+  bodySourceAss: string,
   output: string,
   dimensions: RenderDimensions,
   requestedBodyDurationSeconds: number
@@ -975,6 +1026,16 @@ async function makeBodyVideo(
     bodyDurationSeconds - narrationDurationSeconds
   )
   const sourceInputs = [...sources.entries()]
+  const tightClipPaths = scenes
+    .map((scene) => scene.tightVideoPath)
+    .filter((value): value is string => Boolean(value))
+  const uniqueTightClips = [...new Set(tightClipPaths)]
+  const tightClipIndexes = new Map(
+    uniqueTightClips.map((clipPath, index) => [
+      clipPath,
+      sourceInputs.length + index,
+    ])
+  )
   const sourceInputIndexes = new Map(
     sourceInputs.map(([sourceId], index) => [sourceId, index])
   )
@@ -993,8 +1054,12 @@ async function makeBodyVideo(
     height: Math.round(rect.height * dimensions.scale),
   }
   const background = publicFile(settings.bodyFrameImage)
-  const backgroundIndex = background ? sourceInputs.length : -1
-  const reportAudioIndex = sourceInputs.length + (background ? 1 : 0)
+  const backgroundIndex = background
+    ? sourceInputs.length + uniqueTightClips.length
+    : -1
+  const reportAudioIndex =
+    sourceInputs.length + uniqueTightClips.length + (background ? 1 : 0)
+  const silences = project.detectedSilences
   const sceneFilters = scenes.map((scene, index) => {
     const sceneSourceId = scene.sourceId || primarySourceId
     const sourceInputIndex =
@@ -1014,21 +1079,55 @@ async function makeBodyVideo(
     const sceneCropY = `(ih-oh)*${Math.max(0, Math.min(100, crop.y)) / 100}`
     const sceneWidth = Math.round(scaledRect.width * sceneZoom)
     const sceneHeight = Math.round(scaledRect.height * sceneZoom)
+    const scaleCrop = `scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${scaledRect.width}:${scaledRect.height}:x='${sceneCropX}':y='${sceneCropY}',setsar=1`
+    // 원본 푸티지 공통 1.2배. fps를 고정해 setpts 배속이 프레임 타임라인에 안정적으로 반영되게 한다.
+    const speed = `${sourceVideoSetpts(NEWS_SOURCE_PLAYBACK_RATE)},fps=30`
+    const finish = `tpad=stop_mode=clone:stop_duration=${renderDuration},trim=duration=${renderDuration},setpts=PTS-STARTPTS[scene${index}]`
+    if (scene.visual === "quote") {
+      const tightIndex = scene.tightVideoPath
+        ? tightClipIndexes.get(scene.tightVideoPath)
+        : undefined
+      if (tightIndex !== undefined) {
+        // quote-tighten 단계에서 이미 배속 적용됨
+        return `[${tightIndex}:v]setpts=PTS-STARTPTS,${scaleCrop},${finish}`
+      }
+      const baseSourceRange = fitSceneSourceRange(
+        scene,
+        sourceFootageSecondsForOutput(duration),
+        sourceDurationSeconds
+      )
+      return `[${sourceInputIndex}:v]trim=start=${baseSourceRange.start}:end=${baseSourceRange.end},setpts=PTS-STARTPTS,${speed},${scaleCrop},${finish}`
+    }
+    const footageNeed = sourceFootageSecondsForOutput(renderDuration)
     const baseSourceRange = fitSceneSourceRange(
       scene,
-      duration,
+      footageNeed,
       sourceDurationSeconds
     )
-    const sourceRange =
-      renderDuration > duration
-        ? extendSourceRangeEnd(
-            baseSourceRange,
-            renderDuration,
-            sourceDurationSeconds
-          )
-        : baseSourceRange
-    const trim = `trim=start=${sourceRange.start}:end=${sourceRange.end}`
-    return `[${sourceInputIndex}:v]${trim},setpts=PTS-STARTPTS,scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${scaledRect.width}:${scaledRect.height}:x='${sceneCropX}':y='${sceneCropY}',setsar=1,tpad=stop_mode=clone:stop_duration=${renderDuration},trim=duration=${renderDuration},setpts=PTS-STARTPTS[scene${index}]`
+    const packed = densifySourceKeeps(
+      baseSourceRange.start,
+      Math.max(
+        baseSourceRange.end,
+        baseSourceRange.start + footageNeed
+      ),
+      silences,
+      footageNeed,
+      sourceDurationSeconds,
+      NEWS_SILENCE_CUT_MIN_SECONDS,
+      project.transcript
+    )
+    if (packed.length <= 1) {
+      const only = packed[0] ?? baseSourceRange
+      return `[${sourceInputIndex}:v]trim=start=${only.start}:end=${only.end},setpts=PTS-STARTPTS,${speed},${scaleCrop},${finish}`
+    }
+    const pieces = packed.map((keep, pieceIndex) => {
+      const label = `s${index}p${pieceIndex}`
+      return `[${sourceInputIndex}:v]trim=start=${keep.start}:end=${keep.end},setpts=PTS-STARTPTS,${speed},${scaleCrop}[${label}]`
+    })
+    const concatLabels = packed
+      .map((_, pieceIndex) => `[s${index}p${pieceIndex}]`)
+      .join("")
+    return `${pieces.join(";")};${concatLabels}concat=n=${packed.length}:v=1:a=0,${finish}`
   })
   const concatInputs = scenes.map((_, index) => `[scene${index}]`).join("")
   const backgroundFilter = background
@@ -1038,12 +1137,13 @@ async function makeBodyVideo(
     ...sceneFilters,
     `${concatInputs}concat=n=${scenes.length}:v=1:a=0[clip]`,
     backgroundFilter,
-    `[bg][clip]overlay=${scaledRect.x}:${scaledRect.y}[framed];[framed]${assFilter(bodyTitleAss)},${assFilter(captionsAss)}[vout]`,
+    `[bg][clip]overlay=${scaledRect.x}:${scaledRect.y}[framed];[framed]${assFilter(bodyTitleAss)},${assFilter(captionsAss)},${assFilter(bodySourceAss)}[vout]`,
     `[${reportAudioIndex}:a]apad,atrim=duration=${bodyDurationSeconds},alimiter=limit=0.95[aout]`,
   ].join(";")
   await run(ffmpegBin(), [
     "-y",
     ...sourceInputs.flatMap(([, sourceFile]) => ["-i", sourceFile]),
+    ...uniqueTightClips.flatMap((clipPath) => ["-i", clipPath]),
     ...(background ? ["-loop", "1", "-i", background] : []),
     "-i",
     reportAudio,
@@ -1235,6 +1335,40 @@ function bodyTitleAssText(
   )
 }
 
+function bodySourceAssText(
+  sourceCredit: string,
+  duration: number,
+  settings: NewsClipSettings
+) {
+  const layout = settings.bodySourceText
+  const text = sourceCredit.replace(/\s+/g, " ").trim()
+  if (!text) {
+    return assSingleLineDocument(
+      assFontFamily(settings.fontFamily, layout.fontWeight),
+      layout.fontSize,
+      ""
+    )
+  }
+  const metrics = titleLineRenderMetrics(text, layout, 0.35)
+  const anchor = textAnchor(layout, settings.safeMarginPercent)
+  const event = assSingleLineEvent(
+    text,
+    duration,
+    layout,
+    metrics.fontSize,
+    metrics.scaleX,
+    settings.sourceColor,
+    anchor.x,
+    layout.y,
+    anchor.alignment
+  )
+  return assSingleLineDocument(
+    assFontFamily(settings.fontFamily, layout.fontWeight),
+    metrics.fontSize,
+    event
+  )
+}
+
 function assSingleLineDocument(
   fontFamily: string,
   fontSize: number,
@@ -1276,6 +1410,7 @@ function subtitlesToAss(cues: SubtitleCue[], settings: NewsClipSettings) {
   const primary = hexToAss(settings.subtitleColor)
   const highlight =
     settings.emphasisColor === "#5ee28b" ? "&H008BE25E&" : "&H004DD8FF&"
+  const anchor = textAnchor(layout, settings.safeMarginPercent)
   const events = cues
     .map((cue) => {
       let text = assText(cue.text.trim())
@@ -1287,11 +1422,11 @@ function subtitlesToAss(cues: SubtitleCue[], settings: NewsClipSettings) {
           `{\\c${highlight}}${escapedWord}{\\c${primary}}`
         )
       }
-      return `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Subtitle,,0,0,0,,{\\q2\\bord0\\shad0\\b${layout.fontWeight}}${text}`
+      return `Dialogue: 0,${assTime(cue.start)},${assTime(cue.end)},Subtitle,,0,0,0,,{\\an${anchor.alignment}\\pos(${anchor.x},${layout.y})\\q2\\bord0\\shad0\\b${layout.fontWeight}\\c${primary}}${text}`
     })
     .join("\n")
   const { left, right } = textMargins(layout, settings.safeMarginPercent)
-  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Subtitle,${assFontFamily(settings.fontFamily, layout.fontWeight)},${layout.fontSize},${primary},&H000000FF,&HFF101010,&HFF000000,0,0,0,0,100,100,${layout.letterSpacing},0,1,0,0,${assAlignment(layout.alignment)},${left},${right},${layout.y},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events}\n`
+  return `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 2\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Subtitle,${assFontFamily(settings.fontFamily, layout.fontWeight)},${layout.fontSize},${primary},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,${layout.letterSpacing},0,1,0,0,${assAlignment(layout.alignment)},${left},${right},${layout.y},1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${events}\n`
 }
 
 function assFontFamily(

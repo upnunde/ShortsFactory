@@ -78,7 +78,8 @@ function publicPublishedAt(
     )
     if (Number.isFinite(parsed.getTime())) return parsed.toISOString()
   }
-  return new Date(now - 7 * 86_400_000).toISOString()
+  // 게시일을 모를 때는 허용 창(2일) 안으로 가정해 후보에 남긴다.
+  return new Date(now - 12 * 3_600_000).toISOString()
 }
 
 function stringValue(value: unknown) {

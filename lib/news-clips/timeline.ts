@@ -123,12 +123,8 @@ export function editedDuration(keep: KeepRange[]) {
   )
 }
 
-export function finalDurationAllowed(duration: number, hardMaximum = 59) {
-  return (
-    Number.isFinite(duration) &&
-    duration > 0 &&
-    duration < Math.min(59, hardMaximum)
-  )
+export function finalDurationAllowed(duration: number) {
+  return Number.isFinite(duration) && duration > 0
 }
 
 export type EditFitResult = {
@@ -195,9 +191,9 @@ export function fitEditPlan(input: {
   idealMaxSeconds?: number
 }): EditFitResult {
   const targetMin = input.targetMinSeconds ?? 45
-  const targetMax = Math.min(58, input.targetMaxSeconds ?? 58)
+  const targetMax = Math.max(targetMin, input.targetMaxSeconds ?? 58)
   const idealMin = input.idealMinSeconds ?? 50
-  const idealMax = Math.min(55, input.idealMaxSeconds ?? 55)
+  const idealMax = Math.max(idealMin, input.idealMaxSeconds ?? 55)
   let removed = input.silenceRanges.map((range) => ({ ...range }))
   let keep = makeKeepRanges(input.start, input.end, removed)
   let duration = editedDuration(keep) + input.titleSeconds
@@ -368,11 +364,7 @@ function candidateOf(
       mediaQuality,
       total,
     },
-    titleOptions: [
-      titleBase,
-      `"그 말"이 보여준 진짜 문제`,
-      `숫자로 드러난 ${titleBase}`,
-    ],
+    titleOptions: localTitleOptions(titleBase, preview),
   }
 }
 
@@ -450,6 +442,22 @@ function titleFrom(text: string) {
     .trim()
   const first = clean.split(/[.?!]/)[0].slice(0, 28).trim()
   return first || "핵심 발언이 드러난 순간"
+}
+
+function localTitleOptions(titleBase: string, preview: string) {
+  const line1 = titleBase.slice(0, 14).trim() || "핵심 발언"
+  const nouns = preview
+    .replace(/[^0-9A-Za-z가-힣\s]/g, " ")
+    .split(/\s+/)
+    .filter((token) => token.length >= 2)
+  const line2 =
+    nouns.find((token) => token !== line1 && token.length <= 10) ?? "직접 들어봐"
+  const alt = nouns.find((token) => ![line1, line2].includes(token)) ?? line2
+  return [
+    `${line1}\n${line2.slice(0, 12)}`,
+    `${alt.slice(0, 14)}\n${line1.slice(0, 12)}`,
+    `${line1}\n${alt.slice(0, 12)}`,
+  ]
 }
 
 function mergeRanges(ranges: RemovedRange[]) {

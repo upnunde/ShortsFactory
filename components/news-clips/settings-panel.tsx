@@ -1,10 +1,12 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
-import { Button, Card, Tabs } from "@heroui/react"
+import { Button, Card } from "@heroui/react"
 import { Play, Plus, Square, Trash2 } from "lucide-react"
 import { NewsFramePreview } from "@/components/news-clips/frame-preview"
+import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label"
+import { SegmentedTabs } from "@/components/news-clips/segmented-tabs"
 import { AccountsPanel } from "@/components/studio/accounts-panel"
 import {
   resolveTextBox,
@@ -57,7 +59,19 @@ export function NewsClipSettingsPanel({
   const [voiceBusy, setVoiceBusy] = useState("")
   const [voicePlaying, setVoicePlaying] = useState("")
   const [frameMode, setFrameMode] = useState<"title" | "body">("title")
+  const [bodyTextTab, setBodyTextTab] = useState<
+    "title" | "subtitle" | "source"
+  >("title")
+  const [settingsTab, setSettingsTab] = useState(initialTab)
   const [loaded, setLoaded] = useState(false)
+  const [typecastUsage, setTypecastUsage] = useState<{
+    planCredits: number
+    usedCredits: number
+    remainingCredits: number
+    usedPercent: number
+  } | null>(null)
+  const [typecastUsageNote, setTypecastUsageNote] = useState("")
+  const [typecastUsagePending, setTypecastUsagePending] = useState(false)
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null)
   const onPreviewChangeRef = useRef(onPreviewChange)
   const [previewFirstTitle, previewSecondTitle] = splitIntroTitleLines(
@@ -121,6 +135,59 @@ export function NewsClipSettingsPanel({
     },
     []
   )
+
+  const loadTypecastUsage = useCallback(async () => {
+    setTypecastUsagePending(true)
+    setTypecastUsageNote("")
+    try {
+      const response = await fetch("/api/news-clips/typecast-usage", {
+        cache: "no-store",
+      })
+      const body = (await response.json()) as {
+        planCredits?: number
+        usedCredits?: number
+        remainingCredits?: number
+        usedPercent?: number
+        message?: string
+      }
+      if (!response.ok) {
+        setTypecastUsage(null)
+        setTypecastUsageNote(body.message || "사용량을 불러오지 못했습니다.")
+        return
+      }
+      if (
+        typeof body.planCredits !== "number" ||
+        typeof body.usedCredits !== "number" ||
+        typeof body.remainingCredits !== "number" ||
+        typeof body.usedPercent !== "number"
+      ) {
+        setTypecastUsage(null)
+        setTypecastUsageNote("사용량을 불러오지 못했습니다.")
+        return
+      }
+      setTypecastUsage({
+        planCredits: body.planCredits,
+        usedCredits: body.usedCredits,
+        remainingCredits: body.remainingCredits,
+        usedPercent: body.usedPercent,
+      })
+    } catch {
+      setTypecastUsage(null)
+      setTypecastUsageNote("사용량을 불러오지 못했습니다.")
+    } finally {
+      setTypecastUsagePending(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (settings.ttsProvider !== "typecast") {
+      setTypecastUsage(null)
+      setTypecastUsageNote("")
+      setTypecastUsagePending(false)
+      return
+    }
+    void loadTypecastUsage()
+  }, [loadTypecastUsage, settings.ttsProvider])
 
   async function save() {
     if (!loaded) return
@@ -324,33 +391,23 @@ export function NewsClipSettingsPanel({
         </Button>
       </header>
 
-      <Tabs defaultSelectedKey={initialTab}>
-        <Tabs.ListContainer>
-          <Tabs.List aria-label="뉴스 리포트 설정 구분">
-            <Tabs.Tab id="search">
-              검색·길이
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="assets">
-              화면 자산
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="text">
-              텍스트 배치
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="audio">
-              오디오·자막
-              <Tabs.Indicator />
-            </Tabs.Tab>
-            <Tabs.Tab id="accounts">
-              채널 연결
-              <Tabs.Indicator />
-            </Tabs.Tab>
-          </Tabs.List>
-        </Tabs.ListContainer>
+      <SegmentedTabs
+        ariaLabel="뉴스 리포트 설정 구분"
+        equalWidth={false}
+        className="overflow-x-auto"
+        value={settingsTab}
+        onChange={setSettingsTab}
+        items={[
+          { id: "search", label: "검색·길이" },
+          { id: "assets", label: "화면 자산" },
+          { id: "text", label: "텍스트 배치" },
+          { id: "audio", label: "오디오·자막" },
+          { id: "accounts", label: "채널 연결" },
+        ]}
+      />
 
-        <Tabs.Panel id="search" className="flex flex-col gap-6 pt-2">
+      {settingsTab === "search" ? (
+        <div className="flex flex-col gap-6">
           <Card>
             <Card.Header>
               <Card.Title>이슈 탐색·원본 검색</Card.Title>
@@ -499,9 +556,10 @@ export function NewsClipSettingsPanel({
                   최종 쇼츠 길이 · 제목 프레임 포함
                 </p>
                 <p className="mt-2 text-sm text-muted">
-                  목표 {settings.idealMinSeconds}~{settings.idealMaxSeconds}초 ·
-                  권장 {settings.targetMinSeconds}~{settings.targetMaxSeconds}초
-                  · 59초 미만 강제
+                  자동 편집 참고 {settings.idealMinSeconds}~
+                  {settings.idealMaxSeconds}초 · 권장{" "}
+                  {settings.targetMinSeconds}~{settings.targetMaxSeconds}초.
+                  초안·최종 길이는 제한하지 않습니다.
                 </p>
               </div>
               <div className="rounded-xl border border-separator p-4">
@@ -509,9 +567,11 @@ export function NewsClipSettingsPanel({
               </div>
             </Card.Content>
           </Card>
-        </Tabs.Panel>
+        </div>
+      ) : null}
 
-        <Tabs.Panel id="assets" className="flex flex-col gap-6 pt-2">
+      {settingsTab === "assets" ? (
+        <div className="flex flex-col gap-6">
           <Card>
             <Card.Header>
               <Card.Title>고정 프레임</Card.Title>
@@ -540,9 +600,11 @@ export function NewsClipSettingsPanel({
               </div>
             </Card.Content>
           </Card>
-        </Tabs.Panel>
+        </div>
+      ) : null}
 
-        <Tabs.Panel id="text" className="flex flex-col gap-6 pt-2">
+      {settingsTab === "text" ? (
+        <div className="flex flex-col gap-6">
           <Card>
             <Card.Header>
               <Card.Title>글꼴·텍스트 위치</Card.Title>
@@ -552,22 +614,15 @@ export function NewsClipSettingsPanel({
             </Card.Header>
             <Card.Content className="grid items-start gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
               <div className="flex flex-col gap-3 lg:sticky lg:top-6">
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant={frameMode === "title" ? "secondary" : "outline"}
-                    onPress={() => setFrameMode("title")}
-                  >
-                    제목 프레임
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={frameMode === "body" ? "secondary" : "outline"}
-                    onPress={() => setFrameMode("body")}
-                  >
-                    본문 프레임
-                  </Button>
-                </div>
+                <SegmentedTabs
+                  ariaLabel="프레임 미리보기"
+                  value={frameMode}
+                  onChange={setFrameMode}
+                  items={[
+                    { id: "title", label: "제목 프레임" },
+                    { id: "body", label: "본문 프레임" },
+                  ]}
+                />
                 <NewsFramePreview
                   mode={frameMode}
                   title={previewTitle || "뉴스 핵심을\n두 줄 안에 표시"}
@@ -575,6 +630,7 @@ export function NewsClipSettingsPanel({
                     previewSubtitle ||
                     "본문 자막도 두 줄 안에서\n음성에 맞춰 표시됩니다"
                   }
+                  sourceCredit="출처 · 예시 방송"
                   settings={settings}
                   showGuides
                   className="w-full"
@@ -646,39 +702,77 @@ export function NewsClipSettingsPanel({
                   />
                 ) : (
                   <>
-                    <TextLayoutEditor
-                      title="본문 상단 제목 · 한 줄"
-                      value={settings.bodyTitleText}
-                      color={settings.bodyTitleColor}
-                      safeMarginPercent={settings.safeMarginPercent}
-                      onChange={(bodyTitleText) =>
-                        setSettings({ ...settings, bodyTitleText })
-                      }
-                      onColorChange={(bodyTitleColor) =>
-                        setSettings({ ...settings, bodyTitleColor })
-                      }
+                    <SegmentedTabs
+                      ariaLabel="본문 텍스트"
+                      value={bodyTextTab}
+                      onChange={setBodyTextTab}
+                      items={[
+                        { id: "title", label: "제목" },
+                        { id: "subtitle", label: "자막" },
+                        { id: "source", label: "출처" },
+                      ]}
                     />
-                    <TextLayoutEditor
-                      title="본문 자막"
-                      value={settings.bodySubtitleText}
-                      maxWidthPercent={100}
-                      color={settings.subtitleColor}
-                      safeMarginPercent={settings.safeMarginPercent}
-                      onChange={(bodySubtitleText) =>
-                        setSettings({ ...settings, bodySubtitleText })
-                      }
-                      onColorChange={(subtitleColor) =>
-                        setSettings({ ...settings, subtitleColor })
-                      }
-                    />
+                    {bodyTextTab === "title" ? (
+                      <TextLayoutEditor
+                        title="본문 상단 제목 · 한 줄"
+                        value={settings.bodyTitleText}
+                        maxWidthPercent={100}
+                        color={settings.bodyTitleColor}
+                        safeMarginPercent={settings.safeMarginPercent}
+                        onChange={(bodyTitleText) =>
+                          setSettings({ ...settings, bodyTitleText })
+                        }
+                        onColorChange={(bodyTitleColor) =>
+                          setSettings({ ...settings, bodyTitleColor })
+                        }
+                      />
+                    ) : null}
+                    {bodyTextTab === "subtitle" ? (
+                      <TextLayoutEditor
+                        title="본문 자막"
+                        value={settings.bodySubtitleText}
+                        maxWidthPercent={100}
+                        color={settings.subtitleColor}
+                        safeMarginPercent={settings.safeMarginPercent}
+                        onChange={(bodySubtitleText) =>
+                          setSettings({ ...settings, bodySubtitleText })
+                        }
+                        onColorChange={(subtitleColor) =>
+                          setSettings({ ...settings, subtitleColor })
+                        }
+                      />
+                    ) : null}
+                    {bodyTextTab === "source" ? (
+                      <>
+                        <div className="rounded-xl border border-separator bg-default p-3 text-sm text-muted">
+                          출처 문구는 사용 중인 원본 영상의 채널명을 감지해
+                          자동으로 넣습니다. 여기서는 글꼴·위치·색만 정합니다.
+                        </div>
+                        <TextLayoutEditor
+                          title="본문 출처"
+                          value={settings.bodySourceText}
+                          maxWidthPercent={100}
+                          color={settings.sourceColor}
+                          safeMarginPercent={settings.safeMarginPercent}
+                          onChange={(bodySourceText) =>
+                            setSettings({ ...settings, bodySourceText })
+                          }
+                          onColorChange={(sourceColor) =>
+                            setSettings({ ...settings, sourceColor })
+                          }
+                        />
+                      </>
+                    ) : null}
                   </>
                 )}
               </div>
             </Card.Content>
           </Card>
-        </Tabs.Panel>
+        </div>
+      ) : null}
 
-        <Tabs.Panel id="audio" className="flex flex-col gap-6 pt-2">
+      {settingsTab === "audio" ? (
+        <div className="flex flex-col gap-6">
           <Card>
             <Card.Header>
               <Card.Title>오디오·자막</Card.Title>
@@ -707,6 +801,50 @@ export function NewsClipSettingsPanel({
                     <option value="typecast">Typecast</option>
                   </select>
                 </label>
+                {settings.ttsProvider === "typecast" ? (
+                  <div className="flex max-w-md flex-col gap-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium">Typecast 사용량</span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        isDisabled={typecastUsagePending}
+                        onPress={() => void loadTypecastUsage()}
+                      >
+                        {typecastUsagePending ? "확인 중" : "새로고침"}
+                      </Button>
+                    </div>
+                    {typecastUsage ? (
+                      <>
+                        <div className="h-2 overflow-hidden rounded-full bg-default">
+                          <div
+                            className={`h-full rounded-full transition-[width] ${
+                              typecastUsage.usedPercent >= 90
+                                ? "bg-danger"
+                                : typecastUsage.usedPercent >= 70
+                                  ? "bg-warning"
+                                  : "bg-success"
+                            }`}
+                            style={{
+                              width: `${Math.min(100, typecastUsage.usedPercent)}%`,
+                            }}
+                          />
+                        </div>
+                        <p className="text-sm text-muted">
+                          {typecastUsage.usedCredits.toLocaleString("ko-KR")} /{" "}
+                          {typecastUsage.planCredits.toLocaleString("ko-KR")}{" "}
+                          크레딧 · {typecastUsage.usedPercent}% 사용
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-sm text-muted">
+                        {typecastUsagePending
+                          ? "사용량을 확인하는 중…"
+                          : typecastUsageNote || "사용량 정보가 없습니다."}
+                      </p>
+                    )}
+                  </div>
+                ) : null}
                 {settings.ttsProvider !== "free" ? (
                   <section className="flex flex-col gap-4 border-t border-separator pt-5">
                     <div className="flex items-center justify-between gap-3">
@@ -938,9 +1076,11 @@ export function NewsClipSettingsPanel({
               </label>
             </Card.Content>
           </Card>
-        </Tabs.Panel>
+        </div>
+      ) : null}
 
-        <Tabs.Panel id="accounts" className="flex flex-col gap-6 pt-2">
+      {settingsTab === "accounts" ? (
+        <div className="flex flex-col gap-6">
           <AccountsPanel
             notice={accountNotice}
             profileId={profileId}
@@ -962,16 +1102,20 @@ export function NewsClipSettingsPanel({
               }
             />
           </label>
-        </Tabs.Panel>
-      </Tabs>
+        </div>
+      ) : null}
 
       <div className="sticky bottom-0 z-20 flex items-center justify-end gap-3 border-t border-separator bg-background/95 py-3 backdrop-blur">
         {note ? <p className="mr-auto text-sm text-muted">{note}</p> : null}
         <Button
-          isDisabled={!loaded || pending || !hasChanges}
+          isDisabled={!loaded || (pending ? false : !hasChanges)}
           onPress={() => void save()}
         >
-          {pending ? "저장 중" : "설정 저장"}
+          <LoadingButtonLabel
+            loading={pending}
+            label="설정 저장"
+            loadingLabel="저장 중"
+          />
         </Button>
       </div>
     </div>

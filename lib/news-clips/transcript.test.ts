@@ -5,6 +5,7 @@ import { buildSubtitles } from "./subtitles.ts"
 import {
   fitTitleToLineLayouts,
   fitTitleToTwoLines,
+  layoutTimedSubtitleCues,
   normalizeSubtitleCues,
   updateEditedSubtitleCue,
   retimeSubtitleCues,
@@ -100,6 +101,7 @@ test("제목 허용 글자 수는 폭·크기·자간 변경을 함께 반영한
     width: 1008,
   }
 
+  // width 설정값을 그대로 반영해 글자 수를 계산한다.
   assert.equal(titleLineCharacterLimit(base), 11)
   assert.equal(titleLineCharacterLimit({ ...base, fontSize: 125 }), 8)
   assert.equal(titleLineCharacterLimit({ ...base, width: 808 }), 8)
@@ -125,6 +127,48 @@ test("자동 제목은 1단과 2단의 서로 다른 크기에 맞춰 짧게 쓴
   assert.equal(secondLine, "예산 비상!!")
   assert.equal(titleLineFits(firstLine, firstLayout), true)
   assert.equal(titleLineFits(secondLine, secondLayout), true)
+})
+
+test("원본 음성 자막은 합치지 않고 타임코드를 유지한다", () => {
+  const cues = normalizeSubtitleCues(
+    [
+      {
+        id: "quote-caption-buildup-highlight-1",
+        sceneId: "buildup-highlight",
+        start: 3.2,
+        end: 4.1,
+        text: "공수처가 현직",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "quote-caption-buildup-highlight-2",
+        sceneId: "buildup-highlight",
+        start: 4.1,
+        end: 5.4,
+        text: "대통령을 체포",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "end-cta-1",
+        sceneId: "end-cta",
+        start: 20,
+        end: 22,
+        text: "댓글로 남겨줘",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    defaultNewsClipSettings.bodySubtitleText
+  )
+
+  assert.equal(cues.length, 3)
+  assert.equal(cues[0]?.start, 3.2)
+  assert.equal(cues[0]?.end, 4.1)
+  assert.equal(cues[1]?.start, 4.1)
+  assert.equal(cues[1]?.end, 5.4)
+  assert.equal(cues[2]?.start, 20)
 })
 
 test("긴 본문 자막은 자연스러운 의미 단위와 최대 두 줄로 나눈다", () => {
@@ -283,6 +327,43 @@ test("숫자 뒤 조사를 다음 자막으로 분리하지 않는다", () => {
   assert.ok(cues.every((cue) => cue.text.split("\n").length <= 2))
 })
 
+test("실측 싱크 자막은 합치지 않고 줄바꿈만 다시 맞춘다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    width: 972,
+    fontSize: 58,
+  }
+  const cues = layoutTimedSubtitleCues(
+    [
+      {
+        id: "report-caption-1",
+        sceneId: "scene-a",
+        start: 0,
+        end: 1.4,
+        text: "첫 문장입니다",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "report-caption-2",
+        sceneId: "scene-a",
+        start: 1.4,
+        end: 3.1,
+        text: "이어서 두 번째 문장입니다",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    layout
+  )
+
+  assert.equal(cues.length, 2)
+  assert.equal(cues[0]?.start, 0)
+  assert.equal(cues[0]?.end, 1.4)
+  assert.equal(cues[1]?.start, 1.4)
+  assert.equal(cues[1]?.end, 3.1)
+})
+
 test("수동 편집한 자막 구간은 실제 음성 길이에 맞춰 비율을 유지한다", () => {
   const cues = retimeSubtitleCues(
     [
@@ -321,10 +402,17 @@ test("텍스트 폭과 정렬을 화면 대비 좌우 여백으로 계산한다"
     { ...defaultNewsClipSettings.titleCardText, alignment: "left" },
     defaultNewsClipSettings.safeMarginPercent
   )
+  const full = resolveTextBox(
+    { ...defaultNewsClipSettings.titleCardText, width: 1080 },
+    defaultNewsClipSettings.safeMarginPercent
+  )
 
   assert.equal(centered.widthPercent, 80)
   assert.equal(centered.leftPercent, 10)
   assert.equal(centered.rightPercent, 10)
   assert.equal(left.leftPercent, 7)
   assert.equal(left.rightPercent, 13)
+  assert.equal(full.widthPercent, 100)
+  assert.equal(full.leftPercent, 0)
+  assert.equal(full.rightPercent, 0)
 })

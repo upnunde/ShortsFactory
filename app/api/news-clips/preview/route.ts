@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         ...result,
-        message: "540×960 저해상도 초안을 만들었습니다.",
+        message: "360×640 저해상도 초안을 만들었습니다.",
       },
       { headers: { "Cache-Control": "no-store" } }
     )
@@ -46,11 +46,30 @@ export async function POST(request: Request) {
           ? "이 컴퓨터에서 무료 한국어 음성 기능을 사용할 수 없습니다."
           : code === "local-tts-failed"
             ? "무료 한국어 아나운서 음성을 만들지 못했습니다."
-            : code === "invalid-duration"
-              ? "초안 길이는 제목 프레임을 포함해 59초 미만이어야 합니다."
-              : code === "invalid-project"
-                ? "제목, 보도 대본과 문장별 화면 구성을 확인해 주세요."
-                : "저해상도 초안을 만들지 못했습니다.")
+            : code === "invalid-channel"
+              ? "뉴스 채널 정보가 올바르지 않습니다."
+              : code === "invalid-project-id"
+                ? "프로젝트 ID가 올바르지 않습니다."
+                : code === "source-not-approved"
+                  ? "승인된 원본 영상이 필요합니다."
+                  : code === "title-required"
+                    ? "인트로 제목을 입력해 주세요."
+                    : code === "title-second-line-required"
+                      ? "인트로 제목 2단을 입력해 주세요."
+                      : code === "title-first-line-overflow" ||
+                          code === "title-second-line-overflow"
+                        ? "인트로 제목 폭이 초과됐습니다. 길이를 줄여 주세요."
+                        : code === "report-script-required"
+                          ? "보도 대본을 입력해 주세요."
+                          : code === "report-scenes-required"
+                            ? "화면 구성 장면이 없습니다. 대본을 저장해 장면을 만들어 주세요."
+                            : code === "report-scene-narration-required"
+                              ? "나레이션이 비어 있는 장면이 있습니다."
+                              : code === "report-scene-quote-range-invalid"
+                                ? "직접 발언 장면의 원본 구간이 올바르지 않습니다."
+                                : code === "invalid-project"
+                                  ? "제목, 보도 대본과 문장별 화면 구성을 확인해 주세요."
+                                  : "저해상도 초안을 만들지 못했습니다.")
     return NextResponse.json({ message }, { status: 422 })
   }
 }

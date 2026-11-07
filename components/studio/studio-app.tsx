@@ -993,6 +993,11 @@ export function StudioApp({
             `/studio/character?channel=${encodeURIComponent(created.id)}`
           )
         }}
+        onDeleted={(profileId) => {
+          setProfiles((current) =>
+            current.filter((profile) => profile.id !== profileId)
+          )
+        }}
         onBack={() => router.push("/")}
       />
     )

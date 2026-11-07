@@ -8,6 +8,7 @@ export const runtime = "nodejs"
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     project?: NewsClipProject
+    scheduledAt?: string
   } | null
   if (!body?.project || body.project.type !== "news_clip") {
     return NextResponse.json(
@@ -16,7 +17,12 @@ export async function POST(request: Request) {
     )
   }
   try {
-    return NextResponse.json(await uploadNewsClipToYoutube(body.project))
+    return NextResponse.json(
+      await uploadNewsClipToYoutube(
+        body.project,
+        typeof body.scheduledAt === "string" ? body.scheduledAt : ""
+      )
+    )
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
     const message =

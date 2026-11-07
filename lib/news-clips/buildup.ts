@@ -1,4 +1,4 @@
-import { snapKeepEndsToSpeech, snapSourceRangeToSpeech } from "./speech-bounds.ts"
+import { snapSourceRangeToSpeech } from "./speech-bounds.ts"
 import { fitEditPlan } from "./timeline.ts"
 import type {
   NewsClipCandidate,
@@ -48,44 +48,18 @@ export function keepRangesInside(
   return keeps.length > 0 ? keeps : [{ start: spanStart, end: spanEnd }]
 }
 
+/**
+ * 예전엔 quote 장면을 무음 기준으로 쪼갰다.
+ * 무음컷은 비선형인데 자막은 원본 타임코드를 쓰거나 선형 스케일만 해서
+ * 싱크가 깨지므로 분할하지 않는다. (호출부 호환용 no-op)
+ */
 export function expandScenesWithSilenceCuts(
   scenes: NewsReportScene[],
-  silences: RemovedRange[],
-  minSilenceSeconds = 0.2,
-  transcript: TranscriptSegment[] = []
+  _silences?: RemovedRange[],
+  _minSilenceSeconds?: number,
+  _transcript?: TranscriptSegment[]
 ): NewsReportScene[] {
-  return scenes.flatMap((scene) => {
-    // quote: 원본 음성과 함께 공백을 잘라 장면을 나눈다.
-    // source: 장면 메타는 유지하고, 렌더 단계에서 densify로 jump-cut 한다.
-    if (scene.visual !== "quote") return [scene]
-    const rawKeeps = keepRangesInside(
-      scene.sourceStart,
-      scene.sourceEnd,
-      silences,
-      minSilenceSeconds
-    )
-    const keeps = transcript.length
-      ? snapKeepEndsToSpeech(rawKeeps, transcript)
-      : rawKeeps
-    if (keeps.length <= 1) {
-      const only = keeps[0]
-      if (!only) return [scene]
-      return [
-        {
-          ...scene,
-          sourceStart: round(only.start),
-          sourceEnd: round(only.end),
-        },
-      ]
-    }
-    return keeps.map((keep, index) => ({
-      ...scene,
-      id: `${scene.id}-cut-${index + 1}`,
-      narration: index === 0 ? scene.narration : "",
-      sourceStart: round(keep.start),
-      sourceEnd: round(keep.end),
-    }))
-  })
+  return scenes
 }
 
 /** TTS 길이에 맞춰 무음 구간을 건너뛴 원본 keep 조각들을 모은다. */
@@ -197,14 +171,6 @@ export function localBuildupDraft(
     plan.keepRanges[0]?.sourceStart ?? candidate.sourceStart
   const highlightEnd =
     plan.keepRanges.at(-1)?.sourceEnd ?? candidate.sourceEnd
-  const quoteText = transcript
-    .filter(
-      (segment) =>
-        segment.end > highlightStart && segment.start < highlightEnd
-    )
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .join(" ")
   const scenes: NewsReportScene[] = [
     {
       id: "buildup-teaser",
@@ -215,8 +181,9 @@ export function localBuildupDraft(
       sourceEnd: round(Math.min(highlightStart + 3, highlightEnd)),
     },
     {
+      // 본편은 원본 음성. 자막은 전사 타임코드로 따로 붙인다.
       id: "buildup-highlight",
-      narration: quoteText.slice(0, 400),
+      narration: "",
       visual: "quote",
       sourceId: primarySourceId || undefined,
       sourceStart: round(highlightStart),
@@ -239,18 +206,11 @@ export function buildBuildupScenes(
   primarySourceId = "",
   preferred?: NewsReportScene[]
 ): NewsReportScene[] {
-  const quoteText = transcript
-    .filter(
-      (segment) =>
-        segment.end > highlightStart && segment.start < highlightEnd
-    )
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .join(" ")
   const teaserScene = preferred?.find((scene) => scene.id === "buildup-teaser")
   const highlightScene = preferred?.find(
     (scene) =>
-      scene.id === "buildup-highlight" || scene.id.startsWith("buildup-highlight")
+      scene.id === "buildup-highlight" ||
+      scene.id.startsWith("buildup-highlight")
   )
   const teaserRange = snapSourceRangeToSpeech(
     highlightStart,
@@ -274,8 +234,9 @@ export function buildBuildupScenes(
       ...(teaserScene?.crop ? { crop: teaserScene.crop } : {}),
     },
     {
-      id: highlightScene?.id || "buildup-highlight",
-      narration: quoteText.slice(0, 400),
+      // 서두·마무리만 TTS. 하이라이트는 원본 영상+음성, 자막은 전사 기준.
+      id: "buildup-highlight",
+      narration: "",
       visual: "quote",
       sourceId: highlightScene?.sourceId || primarySourceId || undefined,
       sourceStart: round(quoteRange.start),
@@ -283,6 +244,67 @@ export function buildBuildupScenes(
       ...(highlightScene?.crop ? { crop: highlightScene.crop } : {}),
     },
   ]
+}
+
+/** 잘린 하이라이트 조각들까지 포함해 전체 원본 구간을 구한다. */
+export function buildupHighlightBounds(
+  scenes: NewsReportScene[],
+  fallbackStart: number,
+  fallbackEnd: number
+) {
+  const pieces = scenes.filter(
+    (scene) =>
+      scene.visual === "quote" &&
+      (scene.id === "buildup-highlight" ||
+        /^buildup-highlight-cut-\d+/i.test(scene.id) ||
+        scene.id.startsWith("buildup-highlight"))
+  )
+  if (!pieces.length) {
+    return {
+      start: Math.min(fallbackStart, fallbackEnd),
+      end: Math.max(fallbackStart, fallbackEnd),
+    }
+  }
+  return {
+    start: Math.min(...pieces.map((scene) => scene.sourceStart)),
+    end: Math.max(...pieces.map((scene) => scene.sourceEnd)),
+  }
+}
+
+/** 겹친/중복된 하이라이트 컷을 한 장면으로 합쳐 다시 무음컷할 수 있게 한다. */
+export function collapseBuildupHighlightCuts(
+  scenes: NewsReportScene[]
+): NewsReportScene[] {
+  const highlightPieces = scenes.filter(
+    (scene) =>
+      scene.id === "buildup-highlight" ||
+      /^buildup-highlight-cut-\d+/i.test(scene.id)
+  )
+  if (!highlightPieces.length) return scenes
+
+  const first = highlightPieces[0]!
+  const collapsed: NewsReportScene = {
+    ...first,
+    id: "buildup-highlight",
+    narration: "",
+    visual: "quote",
+    sourceStart: Math.min(...highlightPieces.map((scene) => scene.sourceStart)),
+    sourceEnd: Math.max(...highlightPieces.map((scene) => scene.sourceEnd)),
+  }
+  const without = scenes.filter(
+    (scene) =>
+      scene.id !== "buildup-highlight" &&
+      !/^buildup-highlight-cut-\d+/i.test(scene.id)
+  )
+  const teaserIdx = without.findIndex((scene) => scene.id === "buildup-teaser")
+  if (teaserIdx >= 0) {
+    return [
+      ...without.slice(0, teaserIdx + 1),
+      collapsed,
+      ...without.slice(teaserIdx + 1),
+    ]
+  }
+  return [collapsed, ...without]
 }
 
 function buildLocalTeaser(

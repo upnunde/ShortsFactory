@@ -11,6 +11,7 @@ export async function POST(request: Request) {
     mode?: unknown
     title?: unknown
     subtitle?: unknown
+    sourceCredit?: unknown
     settings?: unknown
   } | null
   if (body?.mode !== "title" && body?.mode !== "body") {
@@ -20,6 +21,10 @@ export async function POST(request: Request) {
     typeof body.title === "string" ? body.title.trim().slice(0, 200) : ""
   const subtitle =
     typeof body.subtitle === "string" ? body.subtitle.trim().slice(0, 500) : ""
+  const sourceCredit =
+    typeof body.sourceCredit === "string"
+      ? body.sourceCredit.trim().slice(0, 200)
+      : ""
   if (!title) {
     return NextResponse.json({ message: "invalid-title" }, { status: 400 })
   }
@@ -38,6 +43,7 @@ export async function POST(request: Request) {
       mode: body.mode,
       title,
       subtitle,
+      sourceCredit,
       settings,
     })
     return new NextResponse(new Uint8Array(png), {

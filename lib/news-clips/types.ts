@@ -1,7 +1,10 @@
+import type { NewsAngleOption } from "./angles.ts"
 import type { RecommendedNewsIssue } from "./issues.ts"
 import { isPrimarilyKorean } from "./language.ts"
 
 export type ProjectType = "character" | "news_clip"
+
+export type NewsClipProductionMode = "report" | "buildup"
 
 export type NewsChannelProfile = {
   id: string
@@ -208,7 +211,6 @@ export type NewsClipSettings = {
   targetMaxSeconds: number
   idealMinSeconds: number
   idealMaxSeconds: number
-  hardMaxSeconds: number
   titleCardSeconds: number
   titleFrameImage: string
   bodyFrameImage: string
@@ -233,6 +235,8 @@ export type NewsClipSettings = {
   bodyTitleColor: string
   bodySubtitleText: NewsTextLayout
   subtitleColor: string
+  bodySourceText: NewsTextLayout
+  sourceColor: string
   emphasisColor: "#ffd84d" | "#5ee28b"
   videoRect: { x: number; y: number; width: number; height: number }
   safeMarginPercent: number
@@ -247,10 +251,13 @@ export type NewsClipProject = {
   profileId: string
   createdAt: string
   updatedAt: string
+  productionMode: NewsClipProductionMode
   source: NewsSource | null
   supportingSources: NewsSource[]
   sourceIssueId: string
   selectedIssue: RecommendedNewsIssue | null
+  angleOptions: NewsAngleOption[]
+  selectedAngleId: string
   transcript: TranscriptSegment[]
   candidates: NewsClipCandidate[]
   selectedCandidateId: string
@@ -287,7 +294,13 @@ export type NewsClipProject = {
 }
 
 export type NewsClipStep =
-  "issue" | "source" | "script" | "direction" | "preview" | "final"
+  | "issue"
+  | "source"
+  | "angles"
+  | "script"
+  | "direction"
+  | "preview"
+  | "final"
 
 export type NewsClipStudioState = {
   projectType: "news_clip"
@@ -300,16 +313,25 @@ export const NEWS_CLIP_STEPS: {
   label: string
   role: string
 }[] = [
-  { id: "issue", label: "이슈 탐색·승인", role: "제작할 주제 결정" },
+  { id: "issue", label: "이슈·원본 선택", role: "주제와 원본 결정" },
   { id: "source", label: "원본 영상 선택", role: "보도 근거 결정" },
+  {
+    id: "angles",
+    label: "주제고르기",
+    role: "원본 주제를 고른 뒤 대본 제작",
+  },
   { id: "script", label: "보도 대본 검수", role: "제목·보도문 확정" },
   { id: "direction", label: "화면 연출 구성", role: "장면·음성 방식 확정" },
   {
     id: "preview",
-    label: "통합 검수·영상 제작",
-    role: "대본·자막·화면 검수 후 영상 제작",
+    label: "검수·수정",
+    role: "대본·자막·화면·음향 수정",
   },
-  { id: "final", label: "최종 결과", role: "720p 결과 확인" },
+  {
+    id: "final",
+    label: "미리보기·업로드",
+    role: "초안 확인 후 최종본·예약 업로드",
+  },
 ]
 
 // Figma body frame 900×1600 has a 900×600 (3:2) video opening at y=350.
@@ -333,7 +355,6 @@ export const defaultNewsClipSettings: NewsClipSettings = {
   targetMaxSeconds: 58,
   idealMinSeconds: 50,
   idealMaxSeconds: 55,
-  hardMaxSeconds: 59,
   titleCardSeconds: 2.5,
   titleFrameImage: "",
   bodyFrameImage: "",
@@ -388,6 +409,16 @@ export const defaultNewsClipSettings: NewsClipSettings = {
     alignment: "center",
   },
   subtitleColor: "#ffffff",
+  bodySourceText: {
+    fontSize: 28,
+    fontWeight: 500,
+    letterSpacing: 0,
+    x: 72,
+    y: 1520,
+    width: 936,
+    alignment: "center",
+  },
+  sourceColor: "#b8bcc8",
   emphasisColor: "#ffd84d",
   videoRect: { ...NEWS_BODY_VIDEO_RECT },
   safeMarginPercent: 7,
@@ -404,10 +435,13 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     profileId,
     createdAt: now,
     updatedAt: now,
+    productionMode: "report",
     source: null,
     supportingSources: [],
     sourceIssueId: "",
     selectedIssue: null,
+    angleOptions: [],
+    selectedAngleId: "",
     transcript: [],
     candidates: [],
     selectedCandidateId: "",
@@ -452,6 +486,7 @@ export function resetNewsClipProjectProgress(
     ...freshNewsClipProject(project.profileId),
     id: project.id,
     createdAt: project.createdAt,
+    productionMode: project.productionMode,
     selectedIssue,
   }
 }

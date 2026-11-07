@@ -13,6 +13,7 @@ import {
   publicSearchEntriesToVideos,
   type YtDlpSearchEntry,
 } from "@/lib/news-clips/youtube-search"
+import { NEWS_MAX_AGE_MS, isWithinNewsMaxAge } from "@/lib/news-clips/freshness"
 import { isPrimarilyKorean } from "@/lib/news-clips/language"
 import {
   scoreSourceRelevance,
@@ -75,7 +76,9 @@ export async function searchRecentNews(
       relevanceContext
     )
   }
-  const publishedAfter = new Date(Date.now() - 7 * 86_400_000).toISOString()
+  const publishedAfter = new Date(
+    Date.now() - NEWS_MAX_AGE_MS
+  ).toISOString()
   const [globalItems, preferredItems] = await Promise.all([
     searchYouTube("", sourceQuery, publishedAfter, apiKey, 50),
     Promise.all(
@@ -243,8 +246,11 @@ function relevantVideosOnly(
   videos: LightweightVideo[],
   context: SourceRelevanceContext
 ) {
+  const freshVideos = videos.filter((video) =>
+    isWithinNewsMaxAge(video.publishedAt)
+  )
   const scores = new Map(
-    videos.map((video) => [
+    freshVideos.map((video) => [
       video.id,
       scoreSourceRelevance(context, {
         title: video.title,
@@ -254,11 +260,11 @@ function relevantVideosOnly(
       }),
     ])
   )
-  const strict = videos.filter((video) => scores.get(video.id)?.passes)
+  const strict = freshVideos.filter((video) => scores.get(video.id)?.passes)
   if (strict.length >= 3) return { videos: strict, scores }
 
   const selected = new Map(strict.map((video) => [video.id, video]))
-  const relaxed = videos
+  const relaxed = freshVideos
     .filter((video) => {
       const relevance = scores.get(video.id)
       return (

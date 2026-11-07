@@ -1,4 +1,5 @@
 import { issueTokens } from "./discovery.ts"
+import { isWithinNewsMaxAge } from "./freshness.ts"
 import { isPrimarilyKorean } from "./language.ts"
 
 export type NewsIssueArticle = {
@@ -96,7 +97,7 @@ export function rankRecommendedIssues(
   const priorityTokens = issueTokens(priorityContext)
   const groups: IssueGroup[] = []
   for (const article of articles
-    .filter(validArticle)
+    .filter((item) => validArticle(item, now))
     .sort(
       (left, right) =>
         new Date(right.publishedAt).getTime() -
@@ -255,12 +256,13 @@ function matchCount(value: string, pattern: RegExp) {
   return count
 }
 
-function validArticle(article: NewsIssueArticle) {
+function validArticle(article: NewsIssueArticle, now = Date.now()) {
   return (
     article.title.trim().length >= 4 &&
     isPrimarilyKorean(article.title) &&
     /^https?:\/\//.test(article.url) &&
-    Number.isFinite(new Date(article.publishedAt).getTime())
+    Number.isFinite(new Date(article.publishedAt).getTime()) &&
+    isWithinNewsMaxAge(article.publishedAt, now)
   )
 }
 

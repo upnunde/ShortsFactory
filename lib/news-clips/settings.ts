@@ -40,11 +40,44 @@ export function normalizeNewsClipSettings(
     issueSearchGuidance: textValue(raw.issueSearchGuidance, 500),
     communitySignalsEnabled: raw.communitySignalsEnabled === true,
     communityCacheMinutes: number(raw.communityCacheMinutes, 20, 180, 30),
-    targetMinSeconds: 45,
-    targetMaxSeconds: 58,
-    idealMinSeconds: 50,
-    idealMaxSeconds: 55,
-    hardMaxSeconds: 59,
+    ...(() => {
+      const targetMinSeconds = number(
+        raw.targetMinSeconds,
+        5,
+        600,
+        defaultNewsClipSettings.targetMinSeconds
+      )
+      const targetMaxSeconds = Math.max(
+        targetMinSeconds,
+        number(
+          raw.targetMaxSeconds,
+          5,
+          600,
+          defaultNewsClipSettings.targetMaxSeconds
+        )
+      )
+      const idealMinSeconds = number(
+        raw.idealMinSeconds,
+        5,
+        600,
+        defaultNewsClipSettings.idealMinSeconds
+      )
+      const idealMaxSeconds = Math.max(
+        idealMinSeconds,
+        number(
+          raw.idealMaxSeconds,
+          5,
+          600,
+          defaultNewsClipSettings.idealMaxSeconds
+        )
+      )
+      return {
+        targetMinSeconds,
+        targetMaxSeconds,
+        idealMinSeconds,
+        idealMaxSeconds,
+      }
+    })(),
     titleCardSeconds: number(raw.titleCardSeconds, 2, 3, 2.5),
     titleFrameImage: pathValue(raw.titleFrameImage),
     bodyFrameImage: pathValue(raw.bodyFrameImage),
@@ -92,10 +125,14 @@ export function normalizeNewsClipSettings(
     ),
     titleCardColor: hexColor(raw.titleCardColor, "#ffffff"),
     titleCardSecondColor: hexColor(raw.titleCardSecondColor, "#ffd84d"),
-    bodyTitleText: normalizeTextLayout(raw.bodyTitleText, {
-      ...defaultNewsClipSettings.bodyTitleText,
-      fontSize: Math.max(42, Math.round(legacyTitleSize * 0.72)),
-    }),
+    bodyTitleText: normalizeTextLayout(
+      raw.bodyTitleText,
+      {
+        ...defaultNewsClipSettings.bodyTitleText,
+        fontSize: Math.max(42, Math.round(legacyTitleSize * 0.72)),
+      },
+      1080
+    ),
     bodyTitleColor: hexColor(raw.bodyTitleColor, "#ffffff"),
     bodySubtitleText: normalizeTextLayout(
       raw.bodySubtitleText,
@@ -106,6 +143,13 @@ export function normalizeNewsClipSettings(
       1080
     ),
     subtitleColor: hexColor(raw.subtitleColor, "#ffffff"),
+    bodySourceText: normalizeTextLayout(
+      raw.bodySourceText,
+      defaultNewsClipSettings.bodySourceText,
+      1080,
+      72
+    ),
+    sourceColor: hexColor(raw.sourceColor, "#b8bcc8"),
     emphasisColor: raw.emphasisColor === "#5ee28b" ? "#5ee28b" : "#ffd84d",
     videoRect: { ...NEWS_BODY_VIDEO_RECT },
     safeMarginPercent: number(raw.safeMarginPercent, 5, 12, 7),

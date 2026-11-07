@@ -34,7 +34,26 @@ export async function POST(request: Request) {
     issueReason?: unknown
     issueArticleTitles?: unknown
     supplementalContext?: unknown
+    productionMode?: unknown
+    directSource?: unknown
+    angleTitle?: unknown
+    angleSummary?: unknown
+    angleKeywords?: unknown
   } | null
+  const productionMode =
+    body?.productionMode === "buildup" ? "buildup" : "report"
+  const directSource = body?.directSource === true
+  const angleTitle =
+    typeof body?.angleTitle === "string" ? body.angleTitle.trim() : ""
+  const angleSummary =
+    typeof body?.angleSummary === "string" ? body.angleSummary.trim() : ""
+  const angleKeywords = Array.isArray(body?.angleKeywords)
+    ? body.angleKeywords
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .slice(0, 8)
+    : []
   const sourceId = typeof body?.sourceId === "string" ? body.sourceId : ""
   let source = await readSource(sourceId)
   if (!source || !source.approved) {
@@ -66,7 +85,7 @@ export async function POST(request: Request) {
         ),
       ].slice(0, 8)
     : []
-  const issueContext = {
+  const baseIssueContext = {
     title: typeof body?.issueTitle === "string" ? body.issueTitle.trim() : "",
     keywords: Array.isArray(body?.issueKeywords)
       ? body.issueKeywords
@@ -87,8 +106,20 @@ export async function POST(request: Request) {
           .slice(0, 5)
       : [],
   }
+  const issueContext = angleTitle
+    ? {
+        title: angleTitle,
+        keywords: angleKeywords.length
+          ? angleKeywords
+          : baseIssueContext.keywords,
+        reason: angleSummary || baseIssueContext.reason,
+        articleTitles: baseIssueContext.articleTitles,
+      }
+    : baseIssueContext
   const sourceSetKey = [
-    "issue-script-v3",
+    "issue-script-v4-angle",
+    productionMode,
+    directSource ? "direct" : "issue",
     sourceId,
     ...supportingSourceIds,
     settings.issueSearchGuidance,
@@ -126,7 +157,13 @@ export async function POST(request: Request) {
             .join(" ")
         : ""
       if (isPrimarilyKorean(cachedTranscript)) {
-        return NextResponse.json({ ...(cached as object), cached: true })
+        const refreshedSource = (await readSource(source.id)) ?? source
+        return NextResponse.json({
+          ...(cached as object),
+          sourceChannel: refreshedSource.channel,
+          sourceTitle: refreshedSource.title,
+          cached: true,
+        })
       }
     }
   }
@@ -159,7 +196,8 @@ export async function POST(request: Request) {
       { status: 422 }
     )
   }
-  if (issueContext.title) {
+  // URL·파일 직행이거나 사용자가 핵심 각도를 고른 경우 연관도 검사로 막지 않는다.
+  if (issueContext.title && !directSource && !angleTitle) {
     const relevance = scoreSourceRelevance(issueContext, {
       title: source.title,
       description: source.summary,
@@ -226,8 +264,16 @@ export async function POST(request: Request) {
       Array.isArray((cached as { detectedSilences?: unknown }).detectedSilences)
         ? (cached as { detectedSilences: RemovedRange[] }).detectedSilences
         : null
-    const [analysis, detectedSilences] = await Promise.all([
-      analyzeNewsTranscript(transcript, settings, body?.useClaude !== false, {
+    const detectedSilences = cachedSilences
+      ? cachedSilences
+      : source.localFile
+        ? await detectAudioSilence(source.localFile).catch(() => [])
+        : []
+    const analysis = await analyzeNewsTranscript(
+      transcript,
+      settings,
+      body?.useClaude !== false,
+      {
         primarySourceId: source.id,
         primarySourceTitle: source.title,
         primarySourceSummary: source.summary,
@@ -237,18 +283,19 @@ export async function POST(request: Request) {
         issue: issueContext,
         supplementalContext,
         channelDirection: settings.issueSearchGuidance,
-      }),
-      cachedSilences
-        ? Promise.resolve(cachedSilences)
-        : source.localFile
-          ? detectAudioSilence(source.localFile).catch(() => [])
-          : Promise.resolve([]),
-    ])
+        directSource,
+      },
+      productionMode,
+      detectedSilences
+    )
+    const refreshedSource = (await readSource(source.id)) ?? source
     const result = {
       ...analysis,
       detectedSilences,
       settingsKey,
       sourceSetKey,
+      sourceChannel: refreshedSource.channel,
+      sourceTitle: refreshedSource.title,
     }
     await writeAnalysisCache(sourceId, result)
     return NextResponse.json({ ...result, cached: false })

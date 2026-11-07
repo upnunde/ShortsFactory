@@ -170,6 +170,34 @@ test("원본 검색어는 그룹 첫 기사가 아니라 표시된 대표 이슈
   assert.ok(issue.keywords.includes("규제"))
 })
 
+test("2일을 넘긴 기사는 키워드·자동 추천에서 제외한다", () => {
+  const issues = rankRecommendedIssues(
+    [
+      article(
+        "정부 세금 개편안 국회 논의 - 매체A",
+        "매체A",
+        "2026-11-05T04:00:00Z"
+      ),
+      article(
+        "정부 세금 개편안 후속 보도 - 매체B",
+        "매체B",
+        "2026-11-02T04:00:00Z"
+      ),
+      article(
+        "외교 안보 회담 결과 발표 - 매체C",
+        "매체C",
+        "2026-10-20T04:00:00Z"
+      ),
+    ],
+    [],
+    now
+  )
+  assert.equal(issues.length, 1)
+  assert.match(issues[0].title, /세금 개편안/)
+  assert.equal(issues[0].articleCount, 1)
+  assert.equal(issues[0].articles[0].source, "매체A")
+})
+
 function article(title: string, source: string, publishedAt: string) {
   return {
     title,
