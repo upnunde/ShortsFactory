@@ -162,6 +162,7 @@ export function NewsClipReviewStep({
     project.reportScenes.find(
       (scene) => scene.id === selectedDirectionSceneId
     ) ?? project.reportScenes[0]
+  const bodyPreviewCrop = selectedDirectionScene?.crop ?? project.crop
   const automaticIntroRange = selectIntroStillRange({
     ...project,
     introStillTimeSeconds: null,
@@ -261,17 +262,18 @@ export function NewsClipReviewStep({
 
   useEffect(() => {
     const video = scriptFrameVideoRef.current
-    if (mode !== "script" || !video?.readyState) return
+    if ((mode !== "script" && mode !== "preview") || !video?.readyState) return
     video.currentTime =
       frameMode === "title"
         ? introCursor
-        : Math.max(0, project.reportScenes[0]?.sourceStart ?? 0)
+        : Math.max(0, selectedDirectionScene?.sourceStart ?? 0)
   }, [
     frameMode,
     introCursor,
     introVideoUrl,
     mode,
-    project.reportScenes,
+    selectedDirectionScene?.id,
+    selectedDirectionScene?.sourceStart,
     scriptBodyVideoUrl,
   ])
 
@@ -310,6 +312,9 @@ export function NewsClipReviewStep({
     setSelectedDirectionSceneId(sceneId)
     if (directionVideoRef.current?.readyState) {
       directionVideoRef.current.currentTime = Math.max(0, sourceStart)
+    }
+    if (scriptFrameVideoRef.current?.readyState && frameMode === "body") {
+      scriptFrameVideoRef.current.currentTime = Math.max(0, sourceStart)
     }
   }
 
@@ -794,7 +799,7 @@ export function NewsClipReviewStep({
               }
               sourceCredit={bodySourceCreditText(project.source)}
               settings={settings}
-              zoom={project.crop.zoom}
+              zoom={bodyPreviewCrop.zoom}
               backgroundContent={
                 frameMode === "title" && sourceVideoUrl ? (
                   <video
@@ -824,13 +829,13 @@ export function NewsClipReviewStep({
                     preload="metadata"
                     className="size-full object-cover"
                     style={{
-                      transform: `scale(${Math.max(1.22, project.crop.zoom)})`,
-                      transformOrigin: `${project.crop.x}% ${project.crop.y}%`,
+                      transform: `scale(${Math.max(1.22, bodyPreviewCrop.zoom)})`,
+                      transformOrigin: `${bodyPreviewCrop.x}% ${bodyPreviewCrop.y}%`,
                     }}
                     onLoadedMetadata={(event) => {
                       event.currentTarget.currentTime = Math.max(
                         0,
-                        project.reportScenes[0]?.sourceStart ?? 0
+                        selectedDirectionScene?.sourceStart ?? 0
                       )
                     }}
                   />
@@ -888,7 +893,7 @@ export function NewsClipReviewStep({
               }
               sourceCredit={bodySourceCreditText(project.source)}
               settings={settings}
-              zoom={project.crop.zoom}
+              zoom={bodyPreviewCrop.zoom}
               backgroundContent={
                 frameMode === "title" && introVideoUrl ? (
                   <video
@@ -918,13 +923,13 @@ export function NewsClipReviewStep({
                     preload="metadata"
                     className="size-full object-cover"
                     style={{
-                      transform: `scale(${Math.max(1.22, project.crop.zoom)})`,
-                      transformOrigin: `${project.crop.x}% ${project.crop.y}%`,
+                      transform: `scale(${Math.max(1.22, bodyPreviewCrop.zoom)})`,
+                      transformOrigin: `${bodyPreviewCrop.x}% ${bodyPreviewCrop.y}%`,
                     }}
                     onLoadedMetadata={(event) => {
                       event.currentTarget.currentTime = Math.max(
                         0,
-                        project.reportScenes[0]?.sourceStart ?? 0
+                        selectedDirectionScene?.sourceStart ?? 0
                       )
                     }}
                   />
@@ -1438,127 +1443,75 @@ export function NewsClipReviewStep({
                   </div>
                 ) : null}
                 {mode === "direction" || compositionPane === "body" ? (
-                  <>
-                    <section className="flex flex-col gap-4 border-b border-separator pb-5">
-                      <h4 className={sectionTitleClass}>전체 화면 설정</h4>
-                      <div className="grid gap-5 md:grid-cols-3">
-                        <RangeInput
-                          label="화면 확대"
-                          value={project.crop.zoom}
-                          min={1.02}
-                          max={1.8}
-                          step={0.01}
-                          formatValue={ratioPercent}
-                          onChange={(zoom) =>
-                            onProject({ crop: { ...project.crop, zoom } })
-                          }
-                        />
-                        <RangeInput
-                          label="가로 크롭 중심"
-                          value={project.crop.x}
-                          min={0}
-                          max={100}
-                          step={1}
-                          formatValue={screenPercent}
-                          onChange={(x) =>
-                            onProject({ crop: { ...project.crop, x } })
-                          }
-                        />
-                        <RangeInput
-                          label="세로 크롭 중심"
-                          value={project.crop.y}
-                          min={0}
-                          max={100}
-                          step={1}
-                          formatValue={screenPercent}
-                          onChange={(y) =>
-                            onProject({ crop: { ...project.crop, y } })
-                          }
-                        />
-                      </div>
-                    </section>
-                    <div className="flex flex-col gap-4">
-                      {project.reportScenes.length ? (
-                        project.reportScenes.map((scene, index) => (
-                          <div
-                            key={scene.id}
-                            className={`grid gap-3 rounded-xl border p-3 md:grid-cols-[76px_1fr] ${
-                              mode === "direction" &&
-                              scene.id === selectedDirectionScene?.id
-                                ? "border-foreground/35 bg-default"
-                                : "border-separator"
-                            }`}
-                          >
-                            {mode === "direction" ? (
-                              <Button
-                                size="sm"
-                                variant={
-                                  scene.id === selectedDirectionScene?.id
-                                    ? "secondary"
-                                    : "ghost"
-                                }
-                                className="justify-start"
-                                onPress={() =>
-                                  selectDirectionScene(
-                                    scene.id,
-                                    scene.sourceStart
-                                  )
-                                }
-                              >
-                                문장 {index + 1}
-                              </Button>
-                            ) : (
-                              <span className="pt-2 text-xs text-muted">
-                                문장 {index + 1}
+                  <div className="flex flex-col gap-3">
+                    {project.reportScenes.length ? (
+                      project.reportScenes.map((scene, index) => {
+                        const selected = scene.id === selectedDirectionScene?.id
+                        const crop = scene.crop ?? project.crop
+                        const patchCrop = (partial: Partial<typeof crop>) =>
+                          updateReportScene(scene.id, {
+                            crop: { ...crop, ...partial },
+                          })
+                        return (
+                          <div key={scene.id} className="flex flex-col gap-2">
+                            <button
+                              type="button"
+                              aria-pressed={selected}
+                              className={`flex w-full flex-col gap-1 rounded-xl border p-3 text-left ${
+                                selected
+                                  ? "border-foreground/35 bg-default"
+                                  : "border-separator"
+                              }`}
+                              onClick={() =>
+                                selectDirectionScene(
+                                  scene.id,
+                                  scene.sourceStart
+                                )
+                              }
+                            >
+                              <span className="flex items-center gap-2 text-xs text-muted">
+                                <span>구간 {index + 1}</span>
+                                <span className="rounded-md border border-separator px-1.5 py-0.5">
+                                  {scene.visual === "quote"
+                                    ? "직접발언"
+                                    : "자료"}
+                                </span>
                               </span>
-                            )}
-                            <div className="flex min-w-0 flex-col gap-3">
-                              <p className="text-sm leading-6">
+                              <span className="line-clamp-2 text-sm leading-6">
                                 {scene.narration}
-                              </p>
-                              <div className="flex flex-col gap-3">
-                                <label className="flex w-full flex-col gap-2">
-                                  <span className="text-sm">사용 자료</span>
-                                  <select
-                                    aria-label={`문장 ${index + 1} 사용 자료`}
-                                    value={
-                                      scene.sourceId || project.source?.id || ""
-                                    }
-                                    onChange={(event) =>
-                                      updateReportScene(scene.id, {
-                                        sourceId: event.currentTarget.value,
-                                      })
-                                    }
-                                    className={field}
-                                  >
-                                    {project.source ? (
-                                      <option value={project.source.id}>
-                                        {project.source.title}
-                                      </option>
-                                    ) : null}
-                                  </select>
-                                </label>
-                                <label className="flex w-full flex-col gap-2">
-                                  <span className="text-sm">화면 종류</span>
-                                  <select
-                                    aria-label={`문장 ${index + 1} 화면 종류`}
-                                    value={scene.visual}
-                                    onChange={(event) =>
-                                      updateReportScene(scene.id, {
-                                        visual: event.currentTarget.value as
-                                          "source" | "quote",
-                                      })
-                                    }
-                                    className={field}
-                                  >
-                                    <option value="source">
-                                      자료 화면 · TTS 계속
-                                    </option>
-                                    <option value="quote">
-                                      직접 발언 · 원본 음성
-                                    </option>
-                                  </select>
-                                </label>
+                              </span>
+                            </button>
+                            {selected ? (
+                              <div className="flex flex-col gap-4 rounded-xl border border-separator p-3">
+                                <div className="grid gap-5 md:grid-cols-3">
+                                  <RangeInput
+                                    label="화면 확대"
+                                    value={crop.zoom}
+                                    min={1.02}
+                                    max={1.8}
+                                    step={0.01}
+                                    formatValue={ratioPercent}
+                                    onChange={(zoom) => patchCrop({ zoom })}
+                                  />
+                                  <RangeInput
+                                    label="가로 크롭 중심"
+                                    value={crop.x}
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    formatValue={screenPercent}
+                                    onChange={(x) => patchCrop({ x })}
+                                  />
+                                  <RangeInput
+                                    label="세로 크롭 중심"
+                                    value={crop.y}
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    formatValue={screenPercent}
+                                    onChange={(y) => patchCrop({ y })}
+                                  />
+                                </div>
                                 <SourceRangeTimeline
                                   scene={scene}
                                   sourceId={
@@ -1590,16 +1543,16 @@ export function NewsClipReviewStep({
                                   }}
                                 />
                               </div>
-                            </div>
+                            ) : null}
                           </div>
-                        ))
-                      ) : (
-                        <p className="text-sm text-muted">
-                          대본을 입력하면 문장별 화면이 생깁니다.
-                        </p>
-                      )}
-                    </div>
-                  </>
+                        )
+                      })
+                    ) : (
+                      <p className="text-sm text-muted">
+                        대본을 입력하면 문장별 화면이 생깁니다.
+                      </p>
+                    )}
+                  </div>
                 ) : null}
               </Card.Content>
             </Card>
