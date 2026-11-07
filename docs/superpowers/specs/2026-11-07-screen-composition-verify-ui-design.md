@@ -1,7 +1,7 @@
 # 화면 구성 확인 UI 재설계
 
 날짜: 2026-11-07  
-상태: 승인 대기 (구현 전 스펙)
+상태: 승인됨 (구간별 프레이밍 포함)
 
 ## 문제
 
@@ -21,7 +21,6 @@
 
 ## 비목표
 
-- 씬별 crop 데이터 모델 / 렌더 반영 (1차 제외)
 - 자동 얼굴·화자 트래킹 고도화
 - 자료 선택·화면 종류(source/quote)를 이 화면의 주 컨트롤로 유지
 - direction 모드 전체 재설계 (preview의 화면 구성 중심)
@@ -70,9 +69,9 @@
 
 선택된 구간에 대해:
 
-1. **프레이밍** — `crop.zoom` / `crop.x` / `crop.y`  
-   - 1차: 기존 프로젝트 전역 `crop`을 수정한다.  
-   - 선택 구간을 보며 맞추는 확인 흐름이며, 저장값은 전역 1세트다.
+1. **프레이밍** — 해당 구간의 `crop.zoom` / `crop.x` / `crop.y`  
+   - 같은 원본이라도 구간마다 확대·위치(주요 화면 강조)를 따로 맞춘다.  
+   - 이상하게 들어간 구간만 골라 손본다.
 2. **자료 구간** — 기존 `SourceRangeTimeline` (`sourceStart` / `sourceEnd`)
 
 노출하지 않음 (본 화면):
@@ -86,17 +85,12 @@
 
 ## 데이터
 
-### 1차 (이번 스펙)
-
-변경 없음.
-
-- `NewsClipProject.crop` — 본문 프레이밍 1세트
+- `NewsReportScene.crop?: CropPosition` — 구간별 본문 프레이밍. 없으면 `project.crop` 폴백.
+- `NewsClipProject.crop` — 기본/폴백 프레이밍 (신규 씬·미설정 구간)
 - `NewsClipProject.introStill*` — 인트로
-- `NewsReportScene.sourceStart/End` — 구간별 타임라인만 씬에 유지
+- `NewsReportScene.sourceStart/End` — 구간 타임라인
 
-### 의도적 보류
-
-씬별 `crop` 필드와 렌더 반영은 자동 프레이밍 검증 이후, “구간마다 다른 구도가 실제로 필요”가 확인되면 별 스펙으로 추가한다.
+렌더는 씬마다 `scene.crop ?? project.crop`을 적용한다. 미리보기도 선택된 구간의 crop을 쓴다.
 
 ## UX 규칙
 
@@ -106,16 +100,16 @@
 
 ## 구현 경계 (예상 파일)
 
-- `components/news-clips/review-step.tsx` — 탭 구조, 인트로 이전, 본문 선택형 컨트롤
-- (필요 시) 작은 서브컴포넌트 분리 — 같은 파일 비대화 시에만
-
-렌더·타입·자동 프레이밍 로직은 1차에서 건드리지 않는다.
+- `lib/news-clips/types.ts` — 씬 crop 필드
+- `lib/server/news-clips/render.ts` — 씬별 crop 적용
+- `components/news-clips/review-step.tsx` — 탭 구조, 인트로 이전, 본문 선택형·구간별 컨트롤
+- (필요 시) hydrate/normalize 경로에서 씬 crop 보존
 
 ## 성공 기준
 
 1. preview에서 독립 인트로 탭이 없고, 화면 구성 > 인트로에서 동일 보정이 가능하다.
 2. 본문에서 구간을 고르기 전에는 크롭·타임라인 슬라이더가 보이지 않는다.
-3. 구간 선택 후 프레이밍·구간을 바꾸면 미리보기에 반영되고, 기존처럼 프로젝트 상태에 저장된다.
+3. 구간 A의 프레이밍을 바꿔도 구간 B는 그대로이며, 렌더/미리보기에 각각 반영된다.
 4. 「전체 화면 설정」 상시 블록이 없다.
 
 ## 테스트

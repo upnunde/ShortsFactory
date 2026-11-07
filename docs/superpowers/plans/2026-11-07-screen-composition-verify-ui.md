@@ -4,19 +4,19 @@
 
 **Goal:** Reorganize the news-clips review 「화면 구성」 into intro/body sub-tabs with per-section controls that appear only when a body section is selected.
 
-**Architecture:** Keep all behavior in `review-step.tsx` for this pass. Drop the standalone `intro` editor tab; add a `compositionPane: "intro" | "body"` state that stays synced with `frameMode`. Body lists scenes compactly; crop + source-range controls render only for the selected scene. Still use the existing global `project.crop` (no per-scene crop model).
+**Architecture:** Drop the standalone `intro` editor tab; add `compositionPane: "intro" | "body"` synced with `frameMode`. Body lists scenes compactly; crop + source-range controls appear only for the selected scene. Each scene stores its own optional `crop`; UI/render use `scene.crop ?? project.crop` so the same source can be reframed per segment.
 
-**Tech Stack:** React client component (`review-step.tsx`), HeroUI Button/Card, existing `NewsFramePreview` / `SourceRangeTimeline` / `RangeInput`.
+**Tech Stack:** React (`review-step.tsx`), HeroUI, `NewsFramePreview` / `SourceRangeTimeline` / `RangeInput`, news-clips types + render.
 
 **Spec:** `docs/superpowers/specs/2026-11-07-screen-composition-verify-ui-design.md`
 
 ## Global Constraints
 
 - UI copy minimal — titles/tab labels only; no new guidance paragraphs.
-- Do not change render pipeline, `NewsReportScene` shape, or auto-framing.
-- 1차 crop remains project-global `project.crop`.
+- Per-section crop is required (same video, different framing per beat).
 - Hide source-id / visual-type selects from this pane (read-only badge only).
 - Korean UI labels: `인트로`, `본문`, `화면 구성`.
+- Do not build auto face-tracking in this plan.
 
 ---
 
@@ -24,10 +24,62 @@
 
 | File | Responsibility |
 |------|----------------|
-| `components/news-clips/review-step.tsx` | Tab config, composition sub-tabs, intro move, body accordion controls, preview sync |
-| `docs/superpowers/specs/2026-11-07-screen-composition-verify-ui-design.md` | Source of truth (read-only during impl) |
+| `lib/news-clips/types.ts` | `NewsReportScene.crop?` |
+| `lib/server/news-clips/render.ts` | Apply `scene.crop ?? project.crop` per scene |
+| `components/news-clips/review-step.tsx` | Tab config, composition sub-tabs, intro move, per-section controls, preview sync |
+| `components/news-clips/news-clips-app.tsx` | Preserve scene crop on hydrate if touched |
+| Spec doc | Source of truth |
 
-No new files required unless `review-step.tsx` becomes unreadable; prefer in-file helpers first.
+---
+
+### Task 0: Per-scene crop model + render
+
+**Files:**
+- Modify: `lib/news-clips/types.ts` (`NewsReportScene`)
+- Modify: `lib/server/news-clips/render.ts` (body scene filter crop)
+- Optional helper in `lib/news-clips/types.ts` or inline: `sceneCrop(scene, fallback)`
+
+**Interfaces:**
+- Produces: `NewsReportScene.crop?: CropPosition`
+- Render: for each timed scene, `const crop = scene.crop ?? project.crop`
+
+- [ ] **Step 1: Extend type**
+
+```ts
+export type NewsReportScene = {
+  id: string
+  narration: string
+  visual: "source" | "quote"
+  sourceId?: string
+  sourceStart: number
+  sourceEnd: number
+  crop?: CropPosition
+}
+```
+
+- [ ] **Step 2: Render uses per-scene crop**
+
+In `makeBodyVideo` / sceneFilters loop, replace project-wide zoom/crop with:
+
+```ts
+const crop = scene.crop ?? project.crop
+const sceneZoom = Math.max(1.02, Math.min(1.8, crop.zoom))
+const sceneCropX = `(iw-ow)*${Math.max(0, Math.min(100, crop.x)) / 100}`
+const sceneCropY = `(ih-oh)*${Math.max(0, Math.min(100, crop.y)) / 100}`
+```
+
+Bump `NEWS_RENDER_SCHEMA_VERSION` by 1 so caches invalidate.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add lib/news-clips/types.ts lib/server/news-clips/render.ts lib/news-clips/render-key.ts
+git commit -m "$(cat <<'EOF'
+feat: apply per-scene crop when rendering news body
+
+EOF
+)"
+```
 
 ---
 
@@ -298,8 +350,8 @@ EOF
 - Modify: `components/news-clips/review-step.tsx` (scenes list ~1409–1560)
 
 **Interfaces:**
-- Consumes: `selectedDirectionSceneId`, `selectDirectionScene`, `updateReportScene`, `project.crop`
-- Produces: compact selectable rows; expanded panel only when `scene.id === selectedDirectionSceneId`
+- Consumes: `selectedDirectionSceneId`, `selectDirectionScene`, `updateReportScene`, `scene.crop ?? project.crop`
+- Produces: compact selectable rows; expanded panel only when `scene.id === selectedDirectionSceneId`; crop edits write to `scene.crop`
 
 - [ ] **Step 1: Remove 「전체 화면 설정」 section**
 
@@ -339,35 +391,44 @@ Immediately after the selected row (or inside an expanded panel under it):
 {scene.id === selectedDirectionScene?.id ? (
   <div className="mt-2 flex flex-col gap-4 rounded-xl border border-separator p-3">
     <div className="grid gap-5 md:grid-cols-3">
-      <RangeInput
-        label="화면 확대"
-        value={project.crop.zoom}
-        min={1.02}
-        max={1.8}
-        step={0.01}
-        formatValue={ratioPercent}
-        onChange={(zoom) =>
-          onProject({ crop: { ...project.crop, zoom } })
-        }
-      />
-      <RangeInput
-        label="가로 크롭 중심"
-        value={project.crop.x}
-        min={0}
-        max={100}
-        step={1}
-        formatValue={screenPercent}
-        onChange={(x) => onProject({ crop: { ...project.crop, x } })}
-      />
-      <RangeInput
-        label="세로 크롭 중심"
-        value={project.crop.y}
-        min={0}
-        max={100}
-        step={1}
-        formatValue={screenPercent}
-        onChange={(y) => onProject({ crop: { ...project.crop, y } })}
-      />
+      {(() => {
+        const crop = scene.crop ?? project.crop
+        const patchCrop = (partial: Partial<typeof crop>) =>
+          updateReportScene(scene.id, {
+            crop: { ...crop, ...partial },
+          })
+        return (
+          <>
+            <RangeInput
+              label="화면 확대"
+              value={crop.zoom}
+              min={1.02}
+              max={1.8}
+              step={0.01}
+              formatValue={ratioPercent}
+              onChange={(zoom) => patchCrop({ zoom })}
+            />
+            <RangeInput
+              label="가로 크롭 중심"
+              value={crop.x}
+              min={0}
+              max={100}
+              step={1}
+              formatValue={screenPercent}
+              onChange={(x) => patchCrop({ x })}
+            />
+            <RangeInput
+              label="세로 크롭 중심"
+              value={crop.y}
+              min={0}
+              max={100}
+              step={1}
+              formatValue={screenPercent}
+              onChange={(y) => patchCrop({ y })}
+            />
+          </>
+        )
+      })()}
     </div>
     <SourceRangeTimeline
       scene={scene}
@@ -412,7 +473,7 @@ Remove or empty `Card.Description` (no “자료는 TTS…” guidance).
 
 1. Preview → 화면 구성 → 본문: only section list visible; no crop sliders until click.
 2. Click section: crop + timeline appear; left preview seeks to `sourceStart`.
-3. Change crop: preview framing updates (global crop).
+3. Change crop on section A: only A’s preview framing changes; B unchanged.
 4. Preview → 인트로 sub-tab: intro controls; no body list.
 5. Top editor tabs: no standalone 인트로.
 
@@ -467,15 +528,15 @@ EOF
 | Composition sub-tabs 인트로 \| 본문 | Task 2–3 |
 | Preview sync with sub-tabs | Task 2 |
 | Move intro controls under composition | Task 3 |
+| Per-scene crop type + render | Task 0 |
 | Remove always-on global crop block | Task 4 |
 | Section list + controls only when selected | Task 4 |
 | Hide source/visual selects; badge only | Task 4 |
-| No render/type/auto-framing changes | All tasks (constraint) |
 | Minimal copy | Task 3–4 |
 
 ## Placeholder / consistency review
 
 - No TBD steps.
 - `CompositionPane` naming consistent across tasks.
-- Crop still `project.crop` everywhere (global).
+- Crop: `scene.crop ?? project.crop` in UI and render.
 - Intro pane preview-only as specified.
