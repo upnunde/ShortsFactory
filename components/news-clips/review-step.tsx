@@ -1170,153 +1170,6 @@ export function NewsClipReviewStep({
             </Card>
           ) : null}
 
-          {false && mode === "preview" && introVideoUrl ? (
-            <Card>
-              <Card.Header className="min-h-16 flex-row items-start justify-between gap-4">
-                <div>
-                  <Card.Title className={cardTitleClass}>
-                    인트로 이미지
-                  </Card.Title>
-                  <Card.Description className={cardDescriptionClass}>
-                    인트로에 쓸 장면을 고릅니다.
-                  </Card.Description>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="ml-auto shrink-0"
-                  isDisabled={project.introStillTimeSeconds === null}
-                  onPress={restoreAutomaticIntroStill}
-                >
-                  <RotateCcw className="size-4" /> 자동 선택
-                </Button>
-              </Card.Header>
-              <Card.Content className="flex flex-col gap-5">
-                <NewsFramePreview
-                  mode="title"
-                  title={titleDraft}
-                  subtitle=""
-                  settings={settings}
-                  className="mx-auto w-full max-w-[260px] rounded-xl shadow-none"
-                  backgroundContent={
-                    <video
-                      ref={sourceVideoRef}
-                      src={introVideoUrl}
-                      muted
-                      playsInline
-                      preload="metadata"
-                      className="size-full object-cover transition-transform"
-                      style={{
-                        transform: `scale(${project.introStillZoom})`,
-                        transformOrigin: `${project.introStillX}% ${project.introStillY}%`,
-                      }}
-                      onLoadedMetadata={(event) => {
-                        const duration = Number.isFinite(
-                          event.currentTarget.duration
-                        )
-                          ? event.currentTarget.duration
-                          : initialSourceDuration(project)
-                        setSourceDuration(duration)
-                        event.currentTarget.currentTime = Math.min(
-                          Math.max(0, introCursor),
-                          Math.max(0, duration - 0.05)
-                        )
-                      }}
-                    />
-                  }
-                />
-                <label className="flex flex-col gap-2">
-                  <span className="flex items-center justify-between text-sm">
-                    <span>
-                      {project.introStillTimeSeconds === null
-                        ? "자동 선택"
-                        : "직접 선택"}
-                    </span>
-                    <span className="text-muted tabular-nums">
-                      {time(introCursor)} / {time(sourceDuration)}
-                    </span>
-                  </span>
-                  <input
-                    aria-label="인트로 이미지 위치"
-                    type="range"
-                    min={0}
-                    max={Math.max(0.1, sourceDuration)}
-                    step={0.1}
-                    value={Math.min(introCursor, sourceDuration)}
-                    onChange={(event) =>
-                      selectIntroStill(Number(event.currentTarget.value))
-                    }
-                  />
-                </label>
-                <label className="flex flex-col gap-2">
-                  <span className="flex items-center justify-between text-sm">
-                    <span>추가 확대</span>
-                    <span className="text-muted tabular-nums">
-                      {ratioPercent(project.introStillZoom)}
-                    </span>
-                  </span>
-                  <input
-                    aria-label="인트로 이미지 추가 확대"
-                    type="range"
-                    min={1}
-                    max={1.8}
-                    step={0.01}
-                    value={project.introStillZoom}
-                    onChange={(event) =>
-                      onProject({
-                        introStillZoom: Number(event.currentTarget.value),
-                      })
-                    }
-                  />
-                </label>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="flex flex-col gap-2">
-                    <span className="flex items-center justify-between text-sm">
-                      <span>좌우 위치</span>
-                      <span className="text-muted tabular-nums">
-                        {axisPosition(project.introStillX, "왼쪽", "오른쪽")}
-                      </span>
-                    </span>
-                    <input
-                      aria-label="인트로 이미지 좌우 위치"
-                      type="range"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={project.introStillX}
-                      onChange={(event) =>
-                        onProject({
-                          introStillX: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                  <label className="flex flex-col gap-2">
-                    <span className="flex items-center justify-between text-sm">
-                      <span>위아래 위치</span>
-                      <span className="text-muted tabular-nums">
-                        {axisPosition(project.introStillY, "위", "아래")}
-                      </span>
-                    </span>
-                    <input
-                      aria-label="인트로 이미지 위아래 위치"
-                      type="range"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={project.introStillY}
-                      onChange={(event) =>
-                        onProject({
-                          introStillY: Number(event.currentTarget.value),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-              </Card.Content>
-            </Card>
-          ) : null}
-
           {mode === "script" && editorTab === "captions" ? (
             <Card>
               <Card.Header className="flex-row items-start justify-between gap-4">
@@ -1411,166 +1264,343 @@ export function NewsClipReviewStep({
           editorTab === "scenes" ? (
             <Card>
               <Card.Header>
-                <Card.Title className={cardTitleClass}>
-                  문장별 화면 구성
-                </Card.Title>
-                <Card.Description className={cardDescriptionClass}>
-                  자료는 TTS 유지, 직접 발언만 원본 음성입니다.
-                </Card.Description>
+                <Card.Title className={cardTitleClass}>화면 구성</Card.Title>
               </Card.Header>
               <Card.Content className="flex flex-col gap-6">
-                <section className="flex flex-col gap-4 border-b border-separator pb-5">
-                  <h4 className={sectionTitleClass}>전체 화면 설정</h4>
-                  <div className="grid gap-5 md:grid-cols-3">
-                    <RangeInput
-                      label="화면 확대"
-                      value={project.crop.zoom}
-                      min={1.02}
-                      max={1.8}
-                      step={0.01}
-                      formatValue={ratioPercent}
-                      onChange={(zoom) =>
-                        onProject({ crop: { ...project.crop, zoom } })
-                      }
-                    />
-                    <RangeInput
-                      label="가로 크롭 중심"
-                      value={project.crop.x}
-                      min={0}
-                      max={100}
-                      step={1}
-                      formatValue={screenPercent}
-                      onChange={(x) =>
-                        onProject({ crop: { ...project.crop, x } })
-                      }
-                    />
-                    <RangeInput
-                      label="세로 크롭 중심"
-                      value={project.crop.y}
-                      min={0}
-                      max={100}
-                      step={1}
-                      formatValue={screenPercent}
-                      onChange={(y) =>
-                        onProject({ crop: { ...project.crop, y } })
-                      }
-                    />
-                  </div>
-                </section>
-                <div className="flex flex-col gap-4">
-                  {project.reportScenes.length ? (
-                    project.reportScenes.map((scene, index) => (
-                      <div
-                        key={scene.id}
-                        className={`grid gap-3 rounded-xl border p-3 md:grid-cols-[76px_1fr] ${
-                          mode === "direction" &&
-                          scene.id === selectedDirectionScene?.id
-                            ? "border-foreground/35 bg-default"
-                            : "border-separator"
+                {mode === "preview" ? (
+                  <div
+                    role="tablist"
+                    aria-label="화면 구성"
+                    className="flex w-full gap-1 rounded-xl border border-separator bg-default p-1"
+                  >
+                    {(
+                      [
+                        ["intro", "인트로"],
+                        ["body", "본문"],
+                      ] as const
+                    ).map(([pane, label]) => (
+                      <button
+                        key={pane}
+                        type="button"
+                        role="tab"
+                        aria-selected={compositionPane === pane}
+                        className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${
+                          compositionPane === pane
+                            ? "bg-background text-foreground shadow-sm"
+                            : "text-muted hover:text-foreground"
                         }`}
+                        onClick={() => setCompositionPane(pane)}
                       >
-                        {mode === "direction" ? (
-                          <Button
-                            size="sm"
-                            variant={
-                              scene.id === selectedDirectionScene?.id
-                                ? "secondary"
-                                : "ghost"
-                            }
-                            className="justify-start"
-                            onPress={() =>
-                              selectDirectionScene(scene.id, scene.sourceStart)
-                            }
-                          >
-                            문장 {index + 1}
-                          </Button>
-                        ) : (
-                          <span className="pt-2 text-xs text-muted">
-                            문장 {index + 1}
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {mode === "preview" &&
+                compositionPane === "intro" &&
+                introVideoUrl ? (
+                  <div className="flex flex-col gap-5">
+                    <div className="flex items-center justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        isDisabled={project.introStillTimeSeconds === null}
+                        onPress={restoreAutomaticIntroStill}
+                      >
+                        <RotateCcw className="size-4" /> 자동 선택
+                      </Button>
+                    </div>
+                    <NewsFramePreview
+                      mode="title"
+                      title={titleDraft}
+                      subtitle=""
+                      settings={settings}
+                      className="mx-auto w-full max-w-[260px] rounded-xl shadow-none"
+                      backgroundContent={
+                        <video
+                          ref={sourceVideoRef}
+                          src={introVideoUrl}
+                          muted
+                          playsInline
+                          preload="metadata"
+                          className="size-full object-cover transition-transform"
+                          style={{
+                            transform: `scale(${project.introStillZoom})`,
+                            transformOrigin: `${project.introStillX}% ${project.introStillY}%`,
+                          }}
+                          onLoadedMetadata={(event) => {
+                            const duration = Number.isFinite(
+                              event.currentTarget.duration
+                            )
+                              ? event.currentTarget.duration
+                              : initialSourceDuration(project)
+                            setSourceDuration(duration)
+                            event.currentTarget.currentTime = Math.min(
+                              Math.max(0, introCursor),
+                              Math.max(0, duration - 0.05)
+                            )
+                          }}
+                        />
+                      }
+                    />
+                    <label className="flex flex-col gap-2">
+                      <span className="flex items-center justify-between text-sm">
+                        <span>
+                          {project.introStillTimeSeconds === null
+                            ? "자동 선택"
+                            : "직접 선택"}
+                        </span>
+                        <span className="text-muted tabular-nums">
+                          {time(introCursor)} / {time(sourceDuration)}
+                        </span>
+                      </span>
+                      <input
+                        aria-label="인트로 이미지 위치"
+                        type="range"
+                        min={0}
+                        max={Math.max(0.1, sourceDuration)}
+                        step={0.1}
+                        value={Math.min(introCursor, sourceDuration)}
+                        onChange={(event) =>
+                          selectIntroStill(Number(event.currentTarget.value))
+                        }
+                      />
+                    </label>
+                    <label className="flex flex-col gap-2">
+                      <span className="flex items-center justify-between text-sm">
+                        <span>추가 확대</span>
+                        <span className="text-muted tabular-nums">
+                          {ratioPercent(project.introStillZoom)}
+                        </span>
+                      </span>
+                      <input
+                        aria-label="인트로 이미지 추가 확대"
+                        type="range"
+                        min={1}
+                        max={1.8}
+                        step={0.01}
+                        value={project.introStillZoom}
+                        onChange={(event) =>
+                          onProject({
+                            introStillZoom: Number(event.currentTarget.value),
+                          })
+                        }
+                      />
+                    </label>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <label className="flex flex-col gap-2">
+                        <span className="flex items-center justify-between text-sm">
+                          <span>좌우 위치</span>
+                          <span className="text-muted tabular-nums">
+                            {axisPosition(
+                              project.introStillX,
+                              "왼쪽",
+                              "오른쪽"
+                            )}
                           </span>
-                        )}
-                        <div className="flex min-w-0 flex-col gap-3">
-                          <p className="text-sm leading-6">{scene.narration}</p>
-                          <div className="flex flex-col gap-3">
-                            <label className="flex w-full flex-col gap-2">
-                              <span className="text-sm">사용 자료</span>
-                              <select
-                                aria-label={`문장 ${index + 1} 사용 자료`}
-                                value={
-                                  scene.sourceId || project.source?.id || ""
-                                }
-                                onChange={(event) =>
-                                  updateReportScene(scene.id, {
-                                    sourceId: event.currentTarget.value,
-                                  })
-                                }
-                                className={field}
-                              >
-                                {project.source ? (
-                                  <option value={project.source.id}>
-                                    {project.source.title}
-                                  </option>
-                                ) : null}
-                              </select>
-                            </label>
-                            <label className="flex w-full flex-col gap-2">
-                              <span className="text-sm">화면 종류</span>
-                              <select
-                                aria-label={`문장 ${index + 1} 화면 종류`}
-                                value={scene.visual}
-                                onChange={(event) =>
-                                  updateReportScene(scene.id, {
-                                    visual: event.currentTarget.value as
-                                      "source" | "quote",
-                                  })
-                                }
-                                className={field}
-                              >
-                                <option value="source">
-                                  자료 화면 · TTS 계속
-                                </option>
-                                <option value="quote">
-                                  직접 발언 · 원본 음성
-                                </option>
-                              </select>
-                            </label>
-                            <SourceRangeTimeline
-                              scene={scene}
-                              sourceId={
-                                scene.sourceId || project.source?.id || ""
-                              }
-                              duration={sceneSourceDuration(
-                                project,
-                                scene,
-                                directionSourceMetadata.url ===
-                                  sourceVideoUrlFor(
-                                    scene.sourceId || project.source?.id
-                                  )
-                                  ? directionSourceMetadata.duration
-                                  : 0
-                              )}
-                              onStartChange={(sourceStart) => {
-                                selectDirectionScene(scene.id, sourceStart)
-                                updateReportScene(scene.id, { sourceStart })
-                              }}
-                              onEndChange={(sourceEnd) => {
-                                selectDirectionScene(
-                                  scene.id,
-                                  Math.max(scene.sourceStart, sourceEnd - 0.1)
-                                )
-                                updateReportScene(scene.id, { sourceEnd })
-                              }}
-                            />
-                          </div>
-                        </div>
+                        </span>
+                        <input
+                          aria-label="인트로 이미지 좌우 위치"
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={project.introStillX}
+                          onChange={(event) =>
+                            onProject({
+                              introStillX: Number(event.currentTarget.value),
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2">
+                        <span className="flex items-center justify-between text-sm">
+                          <span>위아래 위치</span>
+                          <span className="text-muted tabular-nums">
+                            {axisPosition(project.introStillY, "위", "아래")}
+                          </span>
+                        </span>
+                        <input
+                          aria-label="인트로 이미지 위아래 위치"
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={project.introStillY}
+                          onChange={(event) =>
+                            onProject({
+                              introStillY: Number(event.currentTarget.value),
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                  </div>
+                ) : null}
+                {mode === "direction" || compositionPane === "body" ? (
+                  <>
+                    <section className="flex flex-col gap-4 border-b border-separator pb-5">
+                      <h4 className={sectionTitleClass}>전체 화면 설정</h4>
+                      <div className="grid gap-5 md:grid-cols-3">
+                        <RangeInput
+                          label="화면 확대"
+                          value={project.crop.zoom}
+                          min={1.02}
+                          max={1.8}
+                          step={0.01}
+                          formatValue={ratioPercent}
+                          onChange={(zoom) =>
+                            onProject({ crop: { ...project.crop, zoom } })
+                          }
+                        />
+                        <RangeInput
+                          label="가로 크롭 중심"
+                          value={project.crop.x}
+                          min={0}
+                          max={100}
+                          step={1}
+                          formatValue={screenPercent}
+                          onChange={(x) =>
+                            onProject({ crop: { ...project.crop, x } })
+                          }
+                        />
+                        <RangeInput
+                          label="세로 크롭 중심"
+                          value={project.crop.y}
+                          min={0}
+                          max={100}
+                          step={1}
+                          formatValue={screenPercent}
+                          onChange={(y) =>
+                            onProject({ crop: { ...project.crop, y } })
+                          }
+                        />
                       </div>
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted">
-                      대본을 입력하면 문장별 화면이 생깁니다.
-                    </p>
-                  )}
-                </div>
+                    </section>
+                    <div className="flex flex-col gap-4">
+                      {project.reportScenes.length ? (
+                        project.reportScenes.map((scene, index) => (
+                          <div
+                            key={scene.id}
+                            className={`grid gap-3 rounded-xl border p-3 md:grid-cols-[76px_1fr] ${
+                              mode === "direction" &&
+                              scene.id === selectedDirectionScene?.id
+                                ? "border-foreground/35 bg-default"
+                                : "border-separator"
+                            }`}
+                          >
+                            {mode === "direction" ? (
+                              <Button
+                                size="sm"
+                                variant={
+                                  scene.id === selectedDirectionScene?.id
+                                    ? "secondary"
+                                    : "ghost"
+                                }
+                                className="justify-start"
+                                onPress={() =>
+                                  selectDirectionScene(
+                                    scene.id,
+                                    scene.sourceStart
+                                  )
+                                }
+                              >
+                                문장 {index + 1}
+                              </Button>
+                            ) : (
+                              <span className="pt-2 text-xs text-muted">
+                                문장 {index + 1}
+                              </span>
+                            )}
+                            <div className="flex min-w-0 flex-col gap-3">
+                              <p className="text-sm leading-6">
+                                {scene.narration}
+                              </p>
+                              <div className="flex flex-col gap-3">
+                                <label className="flex w-full flex-col gap-2">
+                                  <span className="text-sm">사용 자료</span>
+                                  <select
+                                    aria-label={`문장 ${index + 1} 사용 자료`}
+                                    value={
+                                      scene.sourceId || project.source?.id || ""
+                                    }
+                                    onChange={(event) =>
+                                      updateReportScene(scene.id, {
+                                        sourceId: event.currentTarget.value,
+                                      })
+                                    }
+                                    className={field}
+                                  >
+                                    {project.source ? (
+                                      <option value={project.source.id}>
+                                        {project.source.title}
+                                      </option>
+                                    ) : null}
+                                  </select>
+                                </label>
+                                <label className="flex w-full flex-col gap-2">
+                                  <span className="text-sm">화면 종류</span>
+                                  <select
+                                    aria-label={`문장 ${index + 1} 화면 종류`}
+                                    value={scene.visual}
+                                    onChange={(event) =>
+                                      updateReportScene(scene.id, {
+                                        visual: event.currentTarget.value as
+                                          "source" | "quote",
+                                      })
+                                    }
+                                    className={field}
+                                  >
+                                    <option value="source">
+                                      자료 화면 · TTS 계속
+                                    </option>
+                                    <option value="quote">
+                                      직접 발언 · 원본 음성
+                                    </option>
+                                  </select>
+                                </label>
+                                <SourceRangeTimeline
+                                  scene={scene}
+                                  sourceId={
+                                    scene.sourceId || project.source?.id || ""
+                                  }
+                                  duration={sceneSourceDuration(
+                                    project,
+                                    scene,
+                                    directionSourceMetadata.url ===
+                                      sourceVideoUrlFor(
+                                        scene.sourceId || project.source?.id
+                                      )
+                                      ? directionSourceMetadata.duration
+                                      : 0
+                                  )}
+                                  onStartChange={(sourceStart) => {
+                                    selectDirectionScene(scene.id, sourceStart)
+                                    updateReportScene(scene.id, { sourceStart })
+                                  }}
+                                  onEndChange={(sourceEnd) => {
+                                    selectDirectionScene(
+                                      scene.id,
+                                      Math.max(
+                                        scene.sourceStart,
+                                        sourceEnd - 0.1
+                                      )
+                                    )
+                                    updateReportScene(scene.id, { sourceEnd })
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <p className="text-sm text-muted">
+                          대본을 입력하면 문장별 화면이 생깁니다.
+                        </p>
+                      )}
+                    </div>
+                  </>
+                ) : null}
               </Card.Content>
             </Card>
           ) : null}
