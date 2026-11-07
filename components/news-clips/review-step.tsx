@@ -53,6 +53,7 @@ const sectionTitleClass = "text-base font-semibold leading-6"
 
 type ReviewMode = Exclude<NewsClipStep, "issue" | "source" | "angles">
 type EditorTab = "script" | "captions" | "scenes" | "media"
+type CompositionPane = "intro" | "body"
 
 const EDITOR_TABS: Record<
   ReviewMode,
@@ -107,6 +108,14 @@ export function NewsClipReviewStep({
   onNext: () => void
 }) {
   const [frameMode, setFrameMode] = useState<"title" | "body">("title")
+  const [compositionPane, setCompositionPaneState] =
+    useState<CompositionPane>("intro")
+
+  function setCompositionPane(pane: CompositionPane) {
+    setCompositionPaneState(pane)
+    setFrameMode(pane === "intro" ? "title" : "body")
+  }
+
   const [editorTabByMode, setEditorTabByMode] = useState<
     Record<ReviewMode, EditorTab>
   >({
@@ -750,26 +759,26 @@ export function NewsClipReviewStep({
               <button
                 type="button"
                 role="tab"
-                aria-selected={frameMode === "title"}
+                aria-selected={compositionPane === "intro"}
                 className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                  frameMode === "title"
+                  compositionPane === "intro"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted hover:text-foreground"
                 }`}
-                onClick={() => setFrameMode("title")}
+                onClick={() => setCompositionPane("intro")}
               >
                 인트로
               </button>
               <button
                 type="button"
                 role="tab"
-                aria-selected={frameMode === "body"}
+                aria-selected={compositionPane === "body"}
                 className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                  frameMode === "body"
+                  compositionPane === "body"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted hover:text-foreground"
                 }`}
-                onClick={() => setFrameMode("body")}
+                onClick={() => setCompositionPane("body")}
               >
                 본문
               </button>
@@ -953,7 +962,9 @@ export function NewsClipReviewStep({
                     }))
                     if (tab.id === "captions") setFrameMode("body")
                     if (tab.id === "scenes") {
-                      // Task 2 will set compositionPane; for now leave frameMode unchanged
+                      setFrameMode(
+                        compositionPane === "intro" ? "title" : "body"
+                      )
                     }
                   }}
                 >
