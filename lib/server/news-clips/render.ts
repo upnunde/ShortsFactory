@@ -19,6 +19,11 @@ import {
 import { densifySourceKeeps } from "@/lib/news-clips/buildup"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
 import {
+  finalPlaybackDuration,
+  normalizeFinalPlaybackRate,
+  retimeSubtitlesForFinalPlayback,
+} from "@/lib/news-clips/final-playback"
+import {
   NEWS_SOURCE_PLAYBACK_RATE,
   sourceFootageSecondsForOutput,
   sourceVideoSetpts,
@@ -313,6 +318,7 @@ export async function renderNewsClip(
     force?: boolean
     onProgress?: (percent: number, label: string) => void | Promise<void>
     signal?: AbortSignal
+    finalPlaybackRate?: number
   } = {}
 ) {
   const progress = async (percent: number, label: string) => {
@@ -322,6 +328,10 @@ export async function renderNewsClip(
   }
   await progress(2, "프로젝트 확인 중")
   const force = options.force === true
+  const finalPlaybackRate =
+    mode === "final"
+      ? normalizeFinalPlaybackRate(options.finalPlaybackRate)
+      : 1
   if (
     mode === "final" &&
     project.previewRevision !== project.editorialRevision
@@ -420,6 +430,10 @@ export async function renderNewsClip(
     folder,
     mode === "preview" ? "preview.mp4" : "final.mp4"
   )
+  const mixedVideo =
+    mode === "final" && finalPlaybackRate > 1
+      ? path.join(folder, "final-mixed.mp4")
+      : finalVideo
   const titleFrame = path.join(folder, `${prefix}title-frame.png`)
   const thumbnail = path.join(folder, "thumbnail.png")
   const cachePath = path.join(folder, `${prefix}render-cache.json`)
@@ -679,14 +693,19 @@ export async function renderNewsClip(
     bgmEnabled: effectiveProject.bgmEnabled,
     bgmVolume: effectiveProject.bgmVolume,
     bgmFile: settings.bgmFile,
+    finalPlaybackRate,
   })
   const leadSourceAss = path.join(folder, `${prefix}lead-source.ass`)
   const bodySourceAss = path.join(folder, `${prefix}body-source.ass`)
   const outroSourceAss = path.join(folder, `${prefix}outro-source.ass`)
   const sourceCredit = bodySourceCreditText(source)
 
+  const exportCaptionCues =
+    mode === "final"
+      ? retimeSubtitlesForFinalPlayback(exportSubtitles, finalPlaybackRate)
+      : exportSubtitles
   await Promise.all([
-    writeFile(captions, subtitlesToSrt(exportSubtitles)),
+    writeFile(captions, subtitlesToSrt(exportCaptionCues)),
     writeFile(leadCaptionsAss, subtitlesToAss(leadSubtitles, settings)),
     writeFile(bodyCaptionsAss, subtitlesToAss(bodySubtitles, settings)),
     writeFile(outroCaptionsAss, subtitlesToAss(outroSubtitlesLocal, settings)),
@@ -858,10 +877,26 @@ export async function renderNewsClip(
     renderCache.outputSignature !== outputSignature ||
     !(await exists(finalVideo))
   ) {
-    await applyBgm(effectiveProject, settings, joinedVideo, finalVideo)
+    await applyBgm(effectiveProject, settings, joinedVideo, mixedVideo)
+    if (mode === "final" && finalPlaybackRate > 1) {
+      await applyFinalPlaybackRate(
+        mixedVideo,
+        finalVideo,
+        finalPlaybackRate,
+        dimensions
+      )
+    }
   }
   await progress(98, "음향 적용 완료")
-  await validateNewsClipOutput(finalVideo, dimensions, outputDurationSeconds)
+  const renderedOutputDurationSeconds =
+    mode === "final"
+      ? finalPlaybackDuration(outputDurationSeconds, finalPlaybackRate)
+      : outputDurationSeconds
+  await validateNewsClipOutput(
+    finalVideo,
+    dimensions,
+    renderedOutputDurationSeconds
+  )
   if (mode === "final") {
     await run(ffmpegBin(), [
       "-y",
@@ -893,7 +928,14 @@ export async function renderNewsClip(
   await progress(100, "완료")
 
   const signature = createHash("sha256")
-    .update(JSON.stringify({ project: effectiveProject, settings, mode }))
+    .update(
+      JSON.stringify({
+        project: effectiveProject,
+        settings,
+        mode,
+        finalPlaybackRate,
+      })
+    )
     .digest("hex")
   const base = `/news-clips/output/${project.id}`
   if (mode === "preview") {
@@ -934,7 +976,8 @@ export async function renderNewsClip(
     titleFrameUrl: `${base}/title-frame.png`,
     manifestUrl: `${base}/manifest.json`,
     titleCardDurationSeconds,
-    outputDurationSeconds,
+    outputDurationSeconds: renderedOutputDurationSeconds,
+    finalPlaybackRate,
     subtitles: effectiveProject.subtitles,
     reportScenes: effectiveProject.reportScenes,
   }
@@ -1697,6 +1740,32 @@ type RenderDimensions = {
   height: number
   scale: number
   preset: string
+}
+
+async function applyFinalPlaybackRate(
+  input: string,
+  output: string,
+  rate: number,
+  dimensions: RenderDimensions
+) {
+  const safeRate = normalizeFinalPlaybackRate(rate)
+  await run(ffmpegBin(), [
+    "-y",
+    "-i",
+    input,
+    "-filter_complex",
+    `[0:v]setpts=PTS/${safeRate},fps=30[v];[0:a]atempo=${safeRate}[a]`,
+    "-map",
+    "[v]",
+    "-map",
+    "[a]",
+    ...newsVideoEncodeArgs(dimensions),
+    ...newsAudioEncodeArgs(),
+    "-movflags",
+    "+faststart",
+    "-shortest",
+    output,
+  ])
 }
 
 async function applyBgm(

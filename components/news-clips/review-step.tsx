@@ -15,6 +15,10 @@ import { introStillTime, selectIntroStillRange } from "@/lib/news-clips/intro"
 import { NEWS_SOURCE_PLAYBACK_RATE } from "@/lib/news-clips/playback"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import {
+  FINAL_PLAYBACK_RATES,
+  normalizeFinalPlaybackRate,
+} from "@/lib/news-clips/final-playback"
+import {
   buildBuildup2Scenes,
   buildup2HighlightBounds,
 } from "@/lib/news-clips/buildup"
@@ -243,7 +247,9 @@ export function NewsClipReviewStep({
     draft?: NewsClipProject
   ) => boolean | Promise<boolean>
   onCancelPreview: () => void
-  onReselect: (target?: "all" | "title" | "script") => void | Promise<void>
+  onReselect: (
+    target?: "all" | "title" | "script" | "outro"
+  ) => void | Promise<void>
   onFinalized: (project: NewsClipProject) => boolean | Promise<boolean>
   onNext: () => void
 }) {
@@ -301,6 +307,14 @@ export function NewsClipReviewStep({
   const [voicePlaying, setVoicePlaying] = useState(false)
   const [audioPanelOpen, setAudioPanelOpen] = useState(false)
   const [youtubeBusy, setYoutubeBusy] = useState(false)
+  const [finalPlaybackChoice, setFinalPlaybackChoice] = useState(() => ({
+    projectId: project.id,
+    rate: normalizeFinalPlaybackRate(project.finalPlaybackRate),
+  }))
+  const finalPlaybackRate =
+    finalPlaybackChoice.projectId === project.id
+      ? finalPlaybackChoice.rate
+      : normalizeFinalPlaybackRate(project.finalPlaybackRate)
   const [scheduledAt, setScheduledAt] = useState(() => nextKoreaUploadSlot())
   const voiceAudioRef = useRef<HTMLAudioElement | null>(null)
   const sourceVideoRef = useRef<HTMLVideoElement | null>(null)
@@ -425,6 +439,10 @@ export function NewsClipReviewStep({
   const previewIsCurrent =
     Boolean(project.previewUrl) &&
     project.previewRevision === project.editorialRevision
+  const finalOutputIsCurrent =
+    Boolean(project.outputUrl) &&
+    project.finalRevision === project.editorialRevision &&
+    normalizeFinalPlaybackRate(project.finalPlaybackRate) === finalPlaybackRate
   const previewSubtitles = project.subtitles
   const selectedSubtitle =
     previewSubtitles.find((caption) => caption.id === selectedSubtitleId) ??
@@ -970,7 +988,12 @@ export function NewsClipReviewStep({
         cache: "no-store",
         headers: { "content-type": "application/json" },
         // 수정 반영을 위해 이전 산출물·캐시를 지우고 항상 새로 만든다.
-        body: JSON.stringify({ project, settings, force: true }),
+        body: JSON.stringify({
+          project,
+          settings,
+          force: true,
+          finalPlaybackRate,
+        }),
       })
       const body = (await response.json()) as {
         message?: string
@@ -979,6 +1002,7 @@ export function NewsClipReviewStep({
         signature?: string
         titleCardDurationSeconds?: number
         outputDurationSeconds?: number
+        finalPlaybackRate?: number
         subtitles?: NewsClipProject["subtitles"]
         reportScenes?: NewsClipProject["reportScenes"]
       }
@@ -995,6 +1019,9 @@ export function NewsClipReviewStep({
           body.titleCardDurationSeconds ?? project.titleCardDurationSeconds,
         outputDurationSeconds:
           body.outputDurationSeconds ?? project.outputDurationSeconds,
+        finalPlaybackRate: normalizeFinalPlaybackRate(
+          body.finalPlaybackRate ?? finalPlaybackRate
+        ),
         subtitles: body.subtitles ?? project.subtitles,
         subtitleTimingsLocked: true,
         reportScenes: body.reportScenes ?? project.reportScenes,
@@ -1573,7 +1600,9 @@ export function NewsClipReviewStep({
                 <Button
                   size="sm"
                   variant="outline"
-                  aria-label={directionPlaying ? "미리보기 일시정지" : "미리보기 재생"}
+                  aria-label={
+                    directionPlaying ? "미리보기 일시정지" : "미리보기 재생"
+                  }
                   onPress={() => {
                     const video = directionVideoRef.current
                     if (!video) return
@@ -2016,19 +2045,29 @@ export function NewsClipReviewStep({
                           저장
                         </Button>
                         {mode === "preview" &&
-                        (compositionPane === "outro" ||
-                          compositionPane === "intro") ? null : (
+                        compositionPane === "intro" ? null : (
                           <Button
                             size="sm"
                             variant="outline"
                             isDisabled={buttonBusyDisabled(
                               busy,
-                              "rewrite-script"
+                              compositionPane === "outro"
+                                ? "rewrite-outro"
+                                : "rewrite-script"
                             )}
-                            onPress={() => void onReselect("script")}
+                            onPress={() =>
+                              void onReselect(
+                                compositionPane === "outro" ? "outro" : "script"
+                              )
+                            }
                           >
                             <LoadingButtonLabel
-                              loading={busyMatches(busy, "rewrite-script")}
+                              loading={busyMatches(
+                                busy,
+                                compositionPane === "outro"
+                                  ? "rewrite-outro"
+                                  : "rewrite-script"
+                              )}
                               label="다시 작성"
                               loadingLabel="작성 중"
                             />
@@ -2607,8 +2646,9 @@ export function NewsClipReviewStep({
                                                   item.originalText ??
                                                   item.text,
                                                 originalEmphasis:
-                                                  item.originalEmphasis ??
-                                                  [...item.emphasis],
+                                                  item.originalEmphasis ?? [
+                                                    ...item.emphasis,
+                                                  ],
                                                 text:
                                                   text ||
                                                   item.originalText ||
@@ -2665,8 +2705,9 @@ export function NewsClipReviewStep({
                                                   item.originalText ??
                                                   item.text,
                                                 originalEmphasis:
-                                                  item.originalEmphasis ??
-                                                  [...item.emphasis],
+                                                  item.originalEmphasis ?? [
+                                                    ...item.emphasis,
+                                                  ],
                                                 emphasis,
                                                 edited: true,
                                               }
@@ -2759,7 +2800,8 @@ export function NewsClipReviewStep({
                           isDisabled={
                             youtubeBusy
                               ? false
-                              : !project.outputUrl || !!project.youtubeUploadUrl
+                              : !finalOutputIsCurrent ||
+                                !!project.youtubeUploadUrl
                           }
                           onPress={() => void uploadFinalToYoutube()}
                         >
@@ -2870,12 +2912,37 @@ export function NewsClipReviewStep({
                 Boolean(previewBlockedReason) ||
                 !previewIsCurrent
               }
-              onPress={() => {
-                void (async () => {
-                  const created = await render()
-                  if (created) onNext()
-                })()
-              }}
+              onPress={onNext}
+            >
+              다음
+            </Button>
+          </>
+        ) : null}
+        {mode === "final" ? (
+          <>
+            <label className="flex items-center gap-2 text-sm">
+              <span className="text-muted">최종 배속</span>
+              <select
+                aria-label="최종본 배속"
+                value={finalPlaybackRate}
+                onChange={(event) =>
+                  setFinalPlaybackChoice({
+                    projectId: project.id,
+                    rate: normalizeFinalPlaybackRate(event.currentTarget.value),
+                  })
+                }
+                className="rounded-xl border border-separator bg-background px-3 py-2 text-sm outline-none focus:border-foreground/40"
+              >
+                {FINAL_PLAYBACK_RATES.map((rate) => (
+                  <option key={rate} value={rate}>
+                    {rate.toFixed(1)}배
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              isDisabled={busy !== "" || !previewIsCurrent}
+              onPress={() => void render()}
             >
               <LoadingButtonLabel
                 loading={busyMatches(busy, "render")}
@@ -3039,7 +3106,10 @@ function SceneCropPreview({
             const video = videoRef.current
             if (!video) return
             if (video.paused) {
-              if (video.currentTime < safeStart || video.currentTime >= safeEnd) {
+              if (
+                video.currentTime < safeStart ||
+                video.currentTime >= safeEnd
+              ) {
                 video.currentTime = safeStart
               }
               void video.play().catch(() => undefined)
@@ -3048,11 +3118,7 @@ function SceneCropPreview({
             }
           }}
         >
-          {playing ? (
-            <Pause className="size-4" />
-          ) : (
-            <Play className="size-4" />
-          )}
+          {playing ? <Pause className="size-4" /> : <Play className="size-4" />}
         </Button>
         <input
           aria-label="실시간 화면 미리보기 재생 위치"

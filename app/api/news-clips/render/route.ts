@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 
 import type { NewsClipProject, NewsClipSettings } from "@/lib/news-clips/types"
+import { normalizeFinalPlaybackRate } from "@/lib/news-clips/final-playback"
 import { renderNewsClip } from "@/lib/server/news-clips/render"
 import { newsTtsErrorMessage } from "@/lib/server/news-clips/tts-provider"
 
@@ -12,6 +13,7 @@ export async function POST(request: Request) {
     project?: NewsClipProject
     settings?: NewsClipSettings
     force?: boolean
+    finalPlaybackRate?: number
   } | null
   if (!body?.project || !body.settings) {
     return NextResponse.json(
@@ -22,6 +24,7 @@ export async function POST(request: Request) {
   try {
     const result = await renderNewsClip(body.project, body.settings, "final", {
       force: body.force === true,
+      finalPlaybackRate: normalizeFinalPlaybackRate(body.finalPlaybackRate),
     })
     return NextResponse.json(
       {

@@ -43,6 +43,7 @@ import {
 import type { NewsHistorySnapshot } from "@/lib/news-clips/history"
 import { issueTokens } from "@/lib/news-clips/discovery"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
+import { normalizeFinalPlaybackRate } from "@/lib/news-clips/final-playback"
 import {
   fitTitleToLineLayouts,
   normalizeSubtitleCues,
@@ -53,6 +54,10 @@ import {
   buildup2HighlightBounds,
   collapseBuildup2HighlightCuts,
 } from "@/lib/news-clips/buildup"
+import {
+  partitionSubtitlesByPart,
+  splitScenesByClipPart,
+} from "@/lib/news-clips/clip-parts"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
 import {
   NEWS_INTRO_GAP_SECONDS,
@@ -997,7 +1002,9 @@ export function NewsClipsApp({
     setNote("미리보기 만들기를 취소했습니다.")
   }
 
-  async function reselectCandidate(target: "all" | "title" | "script" = "all") {
+  async function reselectCandidate(
+    target: "all" | "title" | "script" | "outro" = "all"
+  ) {
     if (!project.source) return
     const selectedAngle = project.angleOptions.find(
       (item) => item.id === project.selectedAngleId
@@ -1005,16 +1012,20 @@ export function NewsClipsApp({
     const busyKey =
       target === "title"
         ? "rewrite-title"
-        : target === "script"
-          ? "rewrite-script"
-          : "reselect"
+        : target === "outro"
+          ? "rewrite-outro"
+          : target === "script"
+            ? "rewrite-script"
+            : "reselect"
     setBusy(busyKey)
     setNote(
       target === "title"
         ? "제목만 다시 작성하는 중입니다."
-        : target === "script"
-          ? "본문만 다시 작성하는 중입니다."
-          : "전체 자료를 근거로 제목과 본문을 다시 작성하는 중입니다."
+        : target === "outro"
+          ? "마무리 멘트만 다시 작성하는 중입니다."
+          : target === "script"
+            ? "본문만 다시 작성하는 중입니다."
+            : "전체 자료를 근거로 제목과 본문을 다시 작성하는 중입니다."
     )
     try {
       const response = await fetch("/api/news-clips/analyze", {
@@ -1112,6 +1123,67 @@ export function NewsClipsApp({
           },
         })
         setNote("제목만 다시 작성했습니다.")
+      } else if (target === "outro") {
+        const currentScript = splitEndCtaFromScript(project.reportScript)
+        const rewrittenCta =
+          splitEndCtaFromScript(draft.reportScript).cta || currentScript.cta
+        if (!rewrittenCta) {
+          setNote("마무리 멘트를 다시 작성하지 못했습니다.")
+          return
+        }
+        const reportScript = currentScript.body
+          ? `${currentScript.body}\n${rewrittenCta}`
+          : rewrittenCta
+        const reportScenes = appendEndCtaScenes(
+          project.reportScenes.filter((scene) => !isEndCtaScene(scene)),
+          rewrittenCta,
+          project.source.id
+        )
+        const prepared = prepareRenderProject(
+          {
+            ...project,
+            reportScript,
+            reportScenes,
+            subtitles: [],
+          },
+          settings,
+          { rebuildSubtitles: true }
+        )
+        if (prepared.reason) {
+          setNote("마무리 멘트를 다시 작성하지 못했습니다.")
+          return
+        }
+        const currentSceneParts = splitScenesByClipPart(
+          project.reportScenes,
+          project.productionMode
+        )
+        const currentSubtitleParts = partitionSubtitlesByPart(
+          project.subtitles,
+          currentSceneParts.lead,
+          currentSceneParts.body
+        )
+        const freshSceneParts = splitScenesByClipPart(
+          prepared.project.reportScenes,
+          prepared.project.productionMode
+        )
+        const freshSubtitleParts = partitionSubtitlesByPart(
+          prepared.project.subtitles,
+          freshSceneParts.lead,
+          freshSceneParts.body
+        )
+        updateProject({
+          reportScript,
+          reportScenes: prepared.project.reportScenes,
+          subtitles: [
+            ...currentSubtitleParts.lead,
+            ...currentSubtitleParts.body,
+            ...freshSubtitleParts.outro,
+          ],
+          subtitleTimingsLocked: false,
+          outputDurationSeconds: prepared.project.outputDurationSeconds,
+          titleCardDurationSeconds: 0,
+        })
+        setNote("마무리 멘트만 다시 작성했습니다.")
       } else if (target === "script") {
         const keepCta = splitEndCtaFromScript(project.reportScript).cta
         const newLeadOrBody = splitEndCtaFromScript(draft.reportScript).body
@@ -2109,6 +2181,7 @@ async function renderAutomaticProject(
     signature?: string
     titleCardDurationSeconds?: number
     outputDurationSeconds?: number
+    finalPlaybackRate?: number
     subtitles?: NewsClipProject["subtitles"]
     reportScenes?: NewsClipProject["reportScenes"]
   }
@@ -2134,6 +2207,9 @@ async function renderAutomaticProject(
       body.titleCardDurationSeconds ?? project.titleCardDurationSeconds,
     outputDurationSeconds:
       body.outputDurationSeconds ?? project.outputDurationSeconds,
+    finalPlaybackRate: endpoint.endsWith("render")
+      ? normalizeFinalPlaybackRate(body.finalPlaybackRate)
+      : project.finalPlaybackRate,
     subtitles: body.subtitles ?? project.subtitles,
     reportScenes: body.reportScenes ?? project.reportScenes,
   }
@@ -2767,6 +2843,7 @@ function normalizeSavedNewsProject(
     titleCardDurationSeconds: Number.isFinite(saved.titleCardDurationSeconds)
       ? saved.titleCardDurationSeconds
       : 0,
+    finalPlaybackRate: normalizeFinalPlaybackRate(saved.finalPlaybackRate),
     previewIntroUrl:
       typeof saved.previewIntroUrl === "string" ? saved.previewIntroUrl : "",
     previewLeadUrl:

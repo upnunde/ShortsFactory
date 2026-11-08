@@ -296,6 +296,7 @@ export type NewsClipProject = {
   introStillY: number
   titleCardDurationSeconds: number
   outputDurationSeconds: number
+  finalPlaybackRate: number
   renderSignature: string
   outputUrl: string
   previewUrl: string
@@ -483,6 +484,7 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     introStillY: 50,
     titleCardDurationSeconds: 0,
     outputDurationSeconds: 0,
+    finalPlaybackRate: 1.1,
     renderSignature: "",
     outputUrl: "",
     previewUrl: "",
