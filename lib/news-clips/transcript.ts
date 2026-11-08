@@ -3,10 +3,92 @@ import type { TranscriptSegment, TranscriptWord } from "./types"
 export function parseTranscript(input: string): TranscriptSegment[] {
   const text = input.replace(/^\uFEFF/, "").trim()
   if (!text) return []
+  const json = parseTimestampJson(text)
+  if (json.length) return json
   const blocks = text.split(/\r?\n\s*\r?\n/)
-  const timed = blocks.flatMap((block, index) => parseTimedBlock(block, index))
+  const timed = stabilizeTimedSegments(
+    blocks.flatMap((block, index) => parseTimedBlock(block, index))
+  )
   if (timed.length > 0) return timed
   return plainSegments(text)
+}
+
+function parseTimestampJson(input: string): TranscriptSegment[] {
+  if (!input.startsWith("{") && !input.startsWith("[")) return []
+  try {
+    const parsed = JSON.parse(input) as {
+      segments?: Array<{
+        start?: unknown
+        end?: unknown
+        text?: unknown
+        words?: Array<{
+          word?: unknown
+          text?: unknown
+          start?: unknown
+          end?: unknown
+          probability?: unknown
+          confidence?: unknown
+        }>
+      }>
+    }
+    if (!Array.isArray(parsed.segments)) return []
+    return parsed.segments.flatMap((segment, index) => {
+      const start = finite(segment.start)
+      const end = finite(segment.end)
+      const text = typeof segment.text === "string" ? segment.text.trim() : ""
+      if (!text || end <= start) return []
+      const words = Array.isArray(segment.words)
+        ? segment.words.flatMap((word) => {
+            const wordStart = finite(word.start)
+            const wordEnd = finite(word.end)
+            const wordText =
+              typeof word.word === "string"
+                ? word.word.trim()
+                : typeof word.text === "string"
+                  ? word.text.trim()
+                  : ""
+            if (!wordText || wordEnd <= wordStart) return []
+            const confidence = finite(
+              word.probability ?? word.confidence,
+              Number.NaN
+            )
+            return [
+              {
+                text: wordText,
+                start: wordStart,
+                end: wordEnd,
+                speaker: "speaker-1",
+                ...(Number.isFinite(confidence) ? { confidence } : {}),
+              },
+            ]
+          })
+        : []
+      return [
+        {
+          id: "segment-" + (index + 1),
+          text,
+          start,
+          end,
+          speaker: "speaker-1",
+          words: words.length ? words : segmentOf(text, start, end, index).words,
+        },
+      ]
+    })
+  } catch {
+    return []
+  }
+}
+
+function stabilizeTimedSegments(segments: TranscriptSegment[]) {
+  const sorted = [...segments].sort(
+    (left, right) => left.start - right.start || left.end - right.end
+  )
+  return sorted.map((segment, index) => {
+    const next = sorted[index + 1]
+    if (!next || segment.end <= next.start) return segment
+    const end = Math.max(segment.start + 0.08, next.start)
+    return segmentOf(segment.text, segment.start, end, index)
+  })
 }
 
 function parseTimedBlock(block: string, index: number): TranscriptSegment[] {
@@ -74,4 +156,8 @@ function parseTime(value: string) {
     Number(seconds) +
     Number(millis.padEnd(3, "0")) / 1000
   )
+}
+
+function finite(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback
 }

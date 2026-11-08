@@ -40,13 +40,17 @@ export async function extractNewsAngles(
       "title은 시청자가 고르기 쉬운 짧은 한국어 훅(18자 내외)이다.",
       "summary는 무엇을 다룰지 보여주는 한 줄 설명이다.",
       "keywords는 원본 자막에서 확인되는 핵심어 2~4개다.",
+      "각 각도마다 그 주제를 가장 잘 보여주는 연속 발언 구간 sourceStart·sourceEnd(초)를 반드시 넣는다.",
+      "sourceStart/sourceEnd는 transcript의 start/end 타임코드를 따른다.",
+      "고정된 목표 시간은 없다. 자연스럽게 시작하고 현재 문장과 생각이 완전히 끝나는 지점까지 포함한다.",
+      "구간에 해당 각도의 핵심 발언이 실제로 들어 있어야 한다. 다른 각도 구간과 과도하게 겹치지 않게 한다.",
       options.directSource
         ? "사용자가 지정한 원본 영상이다. 영상 내용 자체를 기준으로 각도를 뽑는다."
         : "선택된 이슈가 있으면 그 이슈와 연결되는 각도를 우선한다.",
-      options.productionMode === "buildup"
-        ? "빌드업형: 원본 하이라이트 발언으로 바로 넘길 수 있는 각도를 우선한다."
+      options.productionMode === "buildup2"
+        ? "빌드업형: 짧은 TTS 서두에서 원본 핵심 발언으로 자연스럽게 넘길 수 있는 각도를 우선한다."
         : "보도형: 짧은 논평 대본으로 풀어낼 수 있는 각도를 우선한다.",
-      "JSON 배열만 출력한다: [{id,title,summary,keywords:string[]}]",
+      "JSON 배열만 출력한다: [{id,title,summary,keywords:string[],sourceStart:number,sourceEnd:number}]",
     ].join("\n"),
     JSON.stringify({
       productionMode: options.productionMode,
@@ -55,7 +59,21 @@ export async function extractNewsAngles(
       directSource: options.directSource === true,
       transcript,
     }),
-    1200
+    1400
   )
-  return normalizeAngleOptions(JSON.parse(stripFence(response)))
+  return normalizeAngleOptions(JSON.parse(stripFence(response))).map(
+    (angle) => ({
+      ...angle,
+      evidence: transcript
+        .filter(
+          (segment) =>
+            segment.end > angle.sourceStart && segment.start < angle.sourceEnd
+        )
+        .map((segment) => segment.text.trim())
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .slice(0, 260),
+    })
+  )
 }

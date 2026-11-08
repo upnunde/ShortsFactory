@@ -7,6 +7,12 @@ type WhisperJson = {
     start?: number
     end?: number
     text?: string
+    words?: {
+      word?: string
+      start?: number
+      end?: number
+      probability?: number
+    }[]
   }[]
 }
 
@@ -24,6 +30,14 @@ export async function transcribeWithLocalWhisper(
     "whisper"
   )
   await mkdir(outputDir, { recursive: true })
+  const filename = `${path.basename(sourceFile, path.extname(sourceFile))}.json`
+  const outputFile = path.join(outputDir, filename)
+  try {
+    const cached = JSON.parse(await readFile(outputFile, "utf8")) as WhisperJson
+    if (cached.segments?.length) return timestampJson(cached)
+  } catch {
+    // 첫 분석이거나 불완전한 캐시는 아래에서 다시 전사한다.
+  }
   await run(bin, [
     sourceFile,
     "--model",
@@ -39,21 +53,39 @@ export async function transcribeWithLocalWhisper(
     "--output_dir",
     outputDir,
   ])
-  const filename = `${path.basename(sourceFile, path.extname(sourceFile))}.json`
   const parsed = JSON.parse(
-    await readFile(path.join(outputDir, filename), "utf8")
+    await readFile(outputFile, "utf8")
   ) as WhisperJson
-  const segments = parsed.segments ?? []
-  if (segments.length === 0) throw new Error("whisper-empty")
-  return segments
-    .flatMap((segment, index) => {
-      const start = number(segment.start)
-      const end = number(segment.end)
-      const text = segment.text?.trim() ?? ""
-      if (!text || end <= start) return []
-      return [`${index + 1}\n${srt(start)} --> ${srt(end)}\n${text}\n`]
+  return timestampJson(parsed)
+}
+
+function timestampJson(parsed: WhisperJson) {
+  const segments = (parsed.segments ?? []).flatMap((segment) => {
+    const start = number(segment.start)
+    const end = number(segment.end)
+    const text = segment.text?.trim() ?? ""
+    if (!text || end <= start) return []
+    const words = (segment.words ?? []).flatMap((word) => {
+      const wordStart = number(word.start)
+      const wordEnd = number(word.end)
+      const value = word.word?.trim() ?? ""
+      if (!value || wordEnd <= wordStart) return []
+      return [
+        {
+          word: value,
+          start: wordStart,
+          end: wordEnd,
+          probability: number(word.probability),
+        },
+      ]
     })
-    .join("\n")
+    return [{ start, end, text, words }]
+  })
+  if (!segments.length) throw new Error("whisper-empty")
+  return JSON.stringify({
+    format: "shortsfactory-word-timestamps-v1",
+    segments,
+  })
 }
 
 function run(bin: string, args: string[]) {
@@ -68,18 +100,4 @@ function run(bin: string, args: string[]) {
 
 function number(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0
-}
-
-function srt(value: number) {
-  const millis = Math.round(Math.max(0, value) * 1000)
-  const hours = Math.floor(millis / 3_600_000)
-  const minutes = Math.floor((millis % 3_600_000) / 60_000)
-  const seconds = Math.floor((millis % 60_000) / 1000)
-  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)},${String(
-    millis % 1000
-  ).padStart(3, "0")}`
-}
-
-function pad(value: number) {
-  return String(value).padStart(2, "0")
 }

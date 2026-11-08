@@ -4,6 +4,7 @@ import test from "node:test"
 import {
   resolveOverlappingKeeps,
   snapKeepEndsToSpeech,
+  snapSourceRangeToCompleteUtterance,
   snapSourceRangeToSpeech,
 } from "./speech-bounds.ts"
 import type { TranscriptSegment } from "./types.ts"
@@ -59,6 +60,66 @@ test("완성 발화 끝이 가까우면 그 지점까지 연장한다", () => {
 test("시작이 단어 중간이면 단어 시작으로 맞춘다", () => {
   const snapped = snapSourceRangeToSpeech(10.7, 12.5, transcript)
   assert.equal(snapped.start, 10.5)
+})
+
+test("시간 상한 없이 현재 문장이 끝나는 지점까지 연장한다", () => {
+  const longTranscript: TranscriptSegment[] = [
+    {
+      id: "1",
+      text: "그런데 이 설명만으로는",
+      start: 20,
+      end: 22,
+      speaker: "a",
+      words: [],
+    },
+    {
+      id: "2",
+      text: "앞뒤가 전혀 맞지 않았고",
+      start: 22.2,
+      end: 25,
+      speaker: "a",
+      words: [],
+    },
+    {
+      id: "3",
+      text: "결국 추가 해명이 필요했습니다.",
+      start: 25.2,
+      end: 29,
+      speaker: "a",
+      words: [],
+    },
+  ]
+  const snapped = snapSourceRangeToCompleteUtterance(20, 21.4, longTranscript)
+  assert.equal(snapped.end, 29)
+})
+
+test("완결 표지가 없으면 마지막 전사 구간까지 사용한다", () => {
+  const unfinished: TranscriptSegment[] = [
+    {
+      id: "1",
+      text: "이 설명은",
+      start: 30,
+      end: 31,
+      speaker: "a",
+      words: [],
+    },
+    {
+      id: "2",
+      text: "다음 내용으로 이어지고",
+      start: 31.2,
+      end: 34,
+      speaker: "a",
+      words: [],
+    },
+  ]
+  const snapped = snapSourceRangeToCompleteUtterance(30, 30.8, unfinished)
+  assert.equal(snapped.end, 34)
+})
+
+test("완결 발언 보정도 시작 단어를 자르지 않는다", () => {
+  const snapped = snapSourceRangeToCompleteUtterance(10.7, 13.7, transcript)
+  assert.equal(snapped.start, 10.5)
+  assert.equal(snapped.end, 16)
 })
 
 test("겹친 keep은 앞 구간 뒤로 잘라 같은 장면이 반복되지 않게 한다", () => {

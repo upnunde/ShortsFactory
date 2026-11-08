@@ -25,7 +25,7 @@ export async function POST(request: Request) {
     directSource?: unknown
   } | null
   const productionMode =
-    body?.productionMode === "buildup" ? "buildup" : "report"
+    body?.productionMode === "buildup2" ? "buildup2" : "report"
   const directSource = body?.directSource === true
   const sourceId = typeof body?.sourceId === "string" ? body.sourceId : ""
   let source = await readSource(sourceId)
@@ -46,6 +46,16 @@ export async function POST(request: Request) {
   }
   await readNewsClipSettings(newsChannelId(body?.profileId))
   let transcript = (await readStoredTranscript(sourceId)) || ""
+  // 빌드업형의 원본 발언 자막은 영상 자막의 롤링 구간이 아니라
+  // 실제 음성에서 얻은 단어 타임스탬프를 우선한다.
+  if (productionMode === "buildup2" && source.localFile) {
+    try {
+      transcript = await transcribeWithLocalWhisper(source.localFile, source.id)
+      await writeStoredTranscript(source.id, transcript)
+    } catch {
+      // 로컬 Whisper를 쓸 수 없을 때만 첨부/플랫폼 자막으로 계속한다.
+    }
+  }
   if (!transcript) {
     try {
       transcript = await transcribeWithLocalWhisper(source.localFile, source.id)

@@ -21,7 +21,13 @@ export function snapSourceRangeToSpeech(
     return { start: round(spanStart), end: round(spanEnd) }
   }
 
-  const snappedStart = snapStart(spanStart, words, transcript, maxExtend, maxTrim)
+  const snappedStart = snapStart(
+    spanStart,
+    words,
+    transcript,
+    maxExtend,
+    maxTrim
+  )
   const snappedEnd = snapEnd(
     Math.max(snappedStart + 0.12, spanEnd),
     words,
@@ -32,6 +38,59 @@ export function snapSourceRangeToSpeech(
   return {
     start: round(snappedStart),
     end: round(Math.max(snappedStart + 0.12, snappedEnd)),
+  }
+}
+
+/**
+ * 빌드업형 원본 발언은 목표 길이보다 문장 완결을 우선한다.
+ * 선택 끝이 발화 중간이면 시간 상한 없이 첫 완결 문장까지 늘린다.
+ */
+export function snapSourceRangeToCompleteUtterance(
+  start: number,
+  end: number,
+  transcript: TranscriptSegment[]
+) {
+  const spanStart = Math.max(0, Math.min(start, end))
+  const spanEnd = Math.max(spanStart + 0.12, end)
+  const segments = transcript
+    .filter(
+      (segment) =>
+        Number.isFinite(segment.start) &&
+        Number.isFinite(segment.end) &&
+        segment.end > segment.start
+    )
+    .sort((left, right) => left.start - right.start || left.end - right.end)
+  const words = collectWords(segments)
+  if (!segments.length && !words.length) {
+    return { start: round(spanStart), end: round(spanEnd) }
+  }
+
+  const snappedStart = completeUtteranceStart(spanStart, words, segments)
+  const firstEndingSegment = segments.findIndex(
+    (segment) => segment.end >= spanEnd - 0.02
+  )
+  if (firstEndingSegment < 0) {
+    const lastEnd = segments.at(-1)?.end ?? spanEnd
+    return {
+      start: round(snappedStart),
+      end: round(Math.max(snappedStart + 0.12, spanEnd, lastEnd)),
+    }
+  }
+
+  for (let index = firstEndingSegment; index < segments.length; index += 1) {
+    const segment = segments[index]!
+    if (isUtteranceEnd(segment.text)) {
+      return {
+        start: round(snappedStart),
+        end: round(Math.max(snappedStart + 0.12, spanEnd, segment.end)),
+      }
+    }
+  }
+
+  const lastEnd = segments.at(-1)?.end ?? spanEnd
+  return {
+    start: round(snappedStart),
+    end: round(Math.max(snappedStart + 0.12, spanEnd, lastEnd)),
   }
 }
 
@@ -112,7 +171,9 @@ function snapStart(
   )
   if (containing) {
     if (time - containing.start <= maxTrim) return containing.start
-    const next = transcript.find((segment) => segment.start >= containing.end - 0.05)
+    const next = transcript.find(
+      (segment) => segment.start >= containing.end - 0.05
+    )
     if (next && next.start - time <= maxExtend) return next.start
     return containing.start
   }
@@ -121,8 +182,35 @@ function snapStart(
     .reverse()
     .find((segment) => segment.end <= time + 0.05)
   if (previous && time - previous.end <= maxExtend) {
-    const next = transcript.find((segment) => segment.start >= previous.end - 0.05)
+    const next = transcript.find(
+      (segment) => segment.start >= previous.end - 0.05
+    )
     return next?.start ?? time
+  }
+  return time
+}
+
+function completeUtteranceStart(
+  time: number,
+  words: TranscriptWord[],
+  transcript: TranscriptSegment[]
+) {
+  const word = words.find(
+    (item) => time >= item.start - 0.04 && time <= item.end + 0.04
+  )
+  if (word) return word.start
+
+  const containing = transcript.find(
+    (segment) => time > segment.start + 0.08 && time < segment.end - 0.08
+  )
+  if (containing) {
+    const nextWord = words.find(
+      (item) =>
+        item.start >= time - 0.04 &&
+        item.start >= containing.start &&
+        item.end <= containing.end + 0.04
+    )
+    return nextWord?.start ?? containing.start
   }
   return time
 }
@@ -139,10 +227,7 @@ function snapEnd(
   )
   if (containing) {
     // 문장/발화 끝이 가까우면 그 끝까지 연장
-    if (
-      isUtteranceEnd(containing.text) &&
-      containing.end - time <= maxExtend
-    ) {
+    if (isUtteranceEnd(containing.text) && containing.end - time <= maxExtend) {
       return containing.end
     }
     // 말 도중이면 이전 완성 발화 끝으로 당김

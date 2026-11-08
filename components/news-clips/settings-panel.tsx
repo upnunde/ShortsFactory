@@ -180,13 +180,9 @@ export function NewsClipSettingsPanel({
   }, [])
 
   useEffect(() => {
-    if (settings.ttsProvider !== "typecast") {
-      setTypecastUsage(null)
-      setTypecastUsageNote("")
-      setTypecastUsagePending(false)
-      return
-    }
-    void loadTypecastUsage()
+    if (settings.ttsProvider !== "typecast") return
+    const timeout = window.setTimeout(() => void loadTypecastUsage(), 0)
+    return () => window.clearTimeout(timeout)
   }, [loadTypecastUsage, settings.ttsProvider])
 
   async function save() {
@@ -383,7 +379,7 @@ export function NewsClipSettingsPanel({
         <div>
           <h2 className="text-xl font-semibold">뉴스 리포트 채널 설정</h2>
           <p className="mt-1 text-sm text-muted">
-            이 채널의 프레임·TTS·길이 설정을 관리합니다.
+            이 채널의 프레임과 TTS 설정을 관리합니다.
           </p>
         </div>
         <Button variant="outline" onPress={onClose}>
@@ -398,7 +394,7 @@ export function NewsClipSettingsPanel({
         value={settingsTab}
         onChange={setSettingsTab}
         items={[
-          { id: "search", label: "검색·길이" },
+          { id: "search", label: "검색" },
           { id: "assets", label: "화면 자산" },
           { id: "text", label: "텍스트 배치" },
           { id: "audio", label: "오디오·자막" },
@@ -550,17 +546,6 @@ export function NewsClipSettingsPanel({
                     공개 커뮤니티 이슈 보조 신호
                   </span>
                 </label>
-              </div>
-              <div className="rounded-xl border border-separator bg-default p-4 md:col-span-2">
-                <p className="text-sm font-medium">
-                  최종 쇼츠 길이 · 제목 프레임 포함
-                </p>
-                <p className="mt-2 text-sm text-muted">
-                  자동 편집 참고 {settings.idealMinSeconds}~
-                  {settings.idealMaxSeconds}초 · 권장{" "}
-                  {settings.targetMinSeconds}~{settings.targetMaxSeconds}초.
-                  초안·최종 길이는 제한하지 않습니다.
-                </p>
               </div>
               <div className="rounded-xl border border-separator p-4">
                 <p className="text-sm font-medium">제목 인트로 길이</p>
@@ -804,7 +789,9 @@ export function NewsClipSettingsPanel({
                 {settings.ttsProvider === "typecast" ? (
                   <div className="flex max-w-md flex-col gap-2">
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-medium">Typecast 사용량</span>
+                      <span className="text-sm font-medium">
+                        Typecast 사용량
+                      </span>
                       <Button
                         size="sm"
                         variant="outline"

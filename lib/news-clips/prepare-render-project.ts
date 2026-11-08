@@ -1,4 +1,6 @@
-import { collapseBuildupHighlightCuts } from "./buildup.ts"
+import { collapseBuildup2HighlightCuts } from "./buildup.ts"
+import { removeTrailingCtaFromLead } from "./clip-parts.ts"
+import { snapSourceRangeToCompleteUtterance } from "./speech-bounds.ts"
 import {
   NEWS_TOTAL_GAP_SECONDS,
   appendEndCtaScenes,
@@ -33,22 +35,45 @@ export function prepareRenderProject(
 ): { project: NewsClipProject; reason: string } {
   const primarySourceId = project.source?.id ?? ""
   let reportScenes = normalizeQuoteScenes(
-    collapseBuildupHighlightCuts(project.reportScenes),
+    collapseBuildup2HighlightCuts(project.reportScenes),
     primarySourceId ? { [primarySourceId]: project.transcript } : {},
     primarySourceId,
     settings.titleVoiceRate
   )
+  if (project.productionMode === "buildup2" && project.transcript.length) {
+    reportScenes = reportScenes.map((scene) => {
+      if (scene.id !== "buildup2-quote" || scene.visual !== "quote") {
+        return scene
+      }
+      const completed = snapSourceRangeToCompleteUtterance(
+        scene.sourceStart,
+        scene.sourceEnd,
+        project.transcript
+      )
+      return {
+        ...scene,
+        sourceStart: completed.start,
+        sourceEnd: completed.end,
+      }
+    })
+  }
 
   const { body, cta } = splitEndCtaFromScript(project.reportScript)
   const existingCta = reportScenes.find((scene) => isEndCtaScene(scene))
   const ctaText = (existingCta?.narration || cta || "").trim()
+  if (project.productionMode === "buildup2" && ctaText) {
+    reportScenes = reportScenes.map((scene) =>
+      scene.id === "buildup2-lead"
+        ? {
+            ...scene,
+            narration: removeTrailingCtaFromLead(scene.narration, ctaText),
+          }
+        : scene
+    )
+  }
   if (ctaText) {
     // 기존 end-cta의 구간·크롭을 유지하도록 장면 목록을 그대로 넘긴다.
-    reportScenes = appendEndCtaScenes(
-      reportScenes,
-      ctaText,
-      primarySourceId
-    )
+    reportScenes = appendEndCtaScenes(reportScenes, ctaText, primarySourceId)
   }
 
   reportScenes = lockSceneSources(reportScenes, primarySourceId)
@@ -58,11 +83,19 @@ export function prepareRenderProject(
     return { project, reason }
   }
 
+  const subtitleBody =
+    project.productionMode === "buildup2"
+      ? reportScenes
+          .filter((scene) => !isEndCtaScene(scene))
+          .map((scene) => scene.narration.trim())
+          .filter(Boolean)
+          .join("\n")
+      : body || project.reportScript
   const generatedSubtitles = normalizeSubtitleCues(
     reportSubtitles(
       reportScenes,
       undefined,
-      reportCaptionPhrases(body || project.reportScript),
+      reportCaptionPhrases(subtitleBody),
       project.transcript
     ),
     settings.bodySubtitleText
@@ -75,19 +108,27 @@ export function prepareRenderProject(
     reportScenes,
     settings.titleVoiceRate
   )
+  const normalizedReportScript =
+    project.productionMode === "buildup2"
+      ? [
+          reportScenes.find((scene) => scene.id === "buildup2-lead")
+            ?.narration,
+          ctaText,
+        ]
+          .map((value) => value?.trim() ?? "")
+          .filter(Boolean)
+          .join("\n")
+      : project.reportScript
 
   return {
     reason: "",
     project: {
       ...project,
+      reportScript: normalizedReportScript,
       reportScenes,
       subtitles,
       outputDurationSeconds:
-        settings.titleCardSeconds +
-        outputBodyDuration +
-        NEWS_TOTAL_GAP_SECONDS,
-      // 렌더 전 계약이 바뀌면 이전 미리보기 서명을 무효화한다.
-      previewSignature: "",
+        settings.titleCardSeconds + outputBodyDuration + NEWS_TOTAL_GAP_SECONDS,
       renderSignature: "",
     },
   }
@@ -102,10 +143,7 @@ export function rebuildSubtitlesAfterSceneEdit(
   return prepareRenderProject({ ...project, reportScenes }, settings)
 }
 
-function lockSceneSources(
-  scenes: NewsReportScene[],
-  primarySourceId: string
-) {
+function lockSceneSources(scenes: NewsReportScene[], primarySourceId: string) {
   if (!primarySourceId) return scenes
   return scenes.map((scene) => ({
     ...scene,
@@ -139,12 +177,12 @@ export function renderContractReason(
       : "report-scene-narration-required"
   }
 
-  if (project.productionMode === "buildup") {
-    const hasTeaser = reportScenes.some((scene) => scene.id === "buildup-teaser")
+  if (project.productionMode === "buildup2") {
+    const hasTeaser = reportScenes.some((scene) => scene.id === "buildup2-lead")
     const hasHighlight = reportScenes.some(
       (scene) =>
-        scene.id === "buildup-highlight" ||
-        /^buildup-highlight-cut-\d+/i.test(scene.id)
+        scene.id === "buildup2-quote" ||
+        /^buildup2-quote-cut-\d+/i.test(scene.id)
     )
     if (!hasTeaser || !hasHighlight) return "report-scenes-required"
     if (!project.transcript.length) return "report-script-required"

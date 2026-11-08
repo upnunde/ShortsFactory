@@ -4,6 +4,7 @@ import { mkdir, unlink, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 import { normalizeKoreanSpeechText } from "@/lib/news-clips/korean-speech"
+import { typecastKoreanTimestampRequest } from "@/lib/news-clips/typecast-request"
 import {
   typecastTimestampedWav,
   type TypecastSpeechTiming,
@@ -33,17 +34,13 @@ export async function synthesizeTypecastKoreanSpeech(
         "X-API-KEY": apiKey,
         "User-Agent": "ShortsFactory/1.0",
       },
-      body: JSON.stringify({
-        voice_id: voiceId,
-        text: spokenText,
-        model: "ssfm-v30",
-        language: "kor",
-        output: {
-          remove_silence_ms: 300,
-          audio_tempo: Math.max(0.85, Math.min(1.08, 1 + ratePercent / 100)),
-          audio_format: "wav",
-        },
-      }),
+      body: JSON.stringify(
+        typecastKoreanTimestampRequest({
+          voiceId,
+          text: spokenText,
+          tempo: 1 + ratePercent / 100,
+        })
+      ),
       cache: "no-store",
       signal: AbortSignal.timeout(180_000),
     }

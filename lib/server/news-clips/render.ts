@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import {
+  access,
+  copyFile,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises"
 import path from "node:path"
 
 import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
@@ -23,15 +30,32 @@ import {
   NEWS_INTRO_GAP_SECONDS,
   NEWS_OUTRO_GAP_SECONDS,
   quoteTranscriptAlignment,
-  retimeSubtitleCuesToScenes,
+  applySubtitleTimingForRender,
+  reportCaptionPhrases,
+  splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
+import {
+  partitionSubtitlesByPart,
+  splitScenesByClipPart,
+} from "@/lib/news-clips/clip-parts"
+import { snapSubtitleCueTimes } from "@/lib/news-clips/frame-snap"
 import { bodySourceCreditText } from "@/lib/news-clips/source-credit"
 import { NEWS_RENDER_SCHEMA_VERSION } from "@/lib/news-clips/render-key"
+import { concatNewsClips } from "@/lib/server/news-clips/concat-clips"
+import {
+  NEWS_PART_LOUDNORM,
+  newsAudioEncodeArgs,
+  newsRenderDimensions,
+  newsVideoEncodeArgs,
+} from "@/lib/server/news-clips/render-codec"
+import { validateNewsClipOutput } from "@/lib/server/news-clips/output-validation"
 import { parseTranscript } from "@/lib/news-clips/transcript"
+import { koreanSpeechUnits } from "@/lib/news-clips/korean-speech"
 import {
   layoutTimedSubtitleCues,
   resolveTextBox,
   splitIntroTitleLines,
+  titleLineCharacterLimit,
   titleLineFits,
   titleLineRenderMetrics,
 } from "@/lib/news-clips/text-layout"
@@ -58,6 +82,7 @@ import type {
 } from "@/lib/news-clips/types"
 
 const NEWS_RENDER_VERSION = NEWS_RENDER_SCHEMA_VERSION
+const NEWS_TTS_PACING_VERSION = "ko-continuous-v3-natural-pauses"
 const NEWS_TITLE_BACKGROUND = "/news-clips/news-preview-placeholder.png"
 
 export async function renderNewsTextOverlay({
@@ -284,9 +309,25 @@ export async function renderNewsClip(
   project: NewsClipProject,
   settings: NewsClipSettings,
   mode: "preview" | "final" = "final",
-  options: { force?: boolean } = {}
+  options: {
+    force?: boolean
+    onProgress?: (percent: number, label: string) => void | Promise<void>
+    signal?: AbortSignal
+  } = {}
 ) {
+  const progress = async (percent: number, label: string) => {
+    if (options.signal?.aborted) throw new Error("render-cancelled")
+    await options.onProgress?.(percent, label)
+    if (options.signal?.aborted) throw new Error("render-cancelled")
+  }
+  await progress(2, "프로젝트 확인 중")
   const force = options.force === true
+  if (
+    mode === "final" &&
+    project.previewRevision !== project.editorialRevision
+  ) {
+    throw new Error("preview-revision-stale")
+  }
   const renderTitle = splitIntroTitleLines(
     project.title,
     settings.titleCardText
@@ -315,6 +356,7 @@ export async function renderNewsClip(
     ...project,
     detectedSilences: freshSilences,
   }
+  await progress(8, "원본 확인 완료")
   const sourceFiles = new Map(
     [...sources].map(([sourceId, item]) => [sourceId, item.localFile])
   )
@@ -337,37 +379,43 @@ export async function renderNewsClip(
     "output",
     project.id
   )
+  // 강제 재생성 시 이전 미리보기/최종 산출물·캐시·중간 파일을 모두 지운다.
+  if (force) {
+    await rm(folder, { recursive: true, force: true })
+  }
   await mkdir(folder, { recursive: true })
   const prefix = mode === "preview" ? "preview-" : ""
-  const dimensions =
-    mode === "preview"
-      ? { width: 360, height: 640, scale: 360 / 1080, preset: "ultrafast" }
-      : {
-          width: 720,
-          height: 1280,
-          scale: 720 / 1080,
-          preset: "medium",
-        }
+  const dimensions = newsRenderDimensions(mode)
   const ttsProvider = await resolveNewsTtsProvider(settings)
+  await progress(10, "음성 준비 중")
   const ttsIdentity = newsTtsCacheIdentity(ttsProvider)
   const captions = path.join(folder, "captions.srt")
-  const captionsAss = path.join(folder, `${prefix}captions.ass`)
+  const leadCaptionsAss = path.join(folder, `${prefix}lead-captions.ass`)
+  const bodyCaptionsAss = path.join(folder, `${prefix}body-captions.ass`)
+  const outroCaptionsAss = path.join(folder, `${prefix}outro-captions.ass`)
   const titleAss = path.join(folder, `${prefix}title.ass`)
+  const leadTitleAss = path.join(folder, `${prefix}lead-title.ass`)
   const bodyTitleAss = path.join(folder, `${prefix}body-title.ass`)
+  const outroTitleAss = path.join(folder, `${prefix}outro-title.ass`)
   const titleKey = createHash("sha256")
     .update(
       JSON.stringify({
         title: project.title,
+        pacing: NEWS_TTS_PACING_VERSION,
         tts: ttsIdentity,
         rate: settings.titleVoiceRate,
       })
     )
     .digest("hex")
     .slice(0, 16)
+  const titleAudioRaw = path.join(folder, `title-${titleKey}-raw.wav`)
   const titleAudio = path.join(folder, `title-${titleKey}.wav`)
-  const titleVideo = path.join(folder, `${prefix}title.mp4`)
+  const introVideo = path.join(folder, `${prefix}intro.mp4`)
+  const leadVideo = path.join(folder, `${prefix}lead.mp4`)
   const bodyVideo = path.join(folder, `${prefix}body.mp4`)
+  const outroVideo = path.join(folder, `${prefix}outro.mp4`)
   const joinedVideo = path.join(folder, `${prefix}joined.mp4`)
+  const concatList = path.join(folder, `${prefix}concat.txt`)
   const finalVideo = path.join(
     folder,
     mode === "preview" ? "preview.mp4" : "final.mp4"
@@ -375,39 +423,154 @@ export async function renderNewsClip(
   const titleFrame = path.join(folder, `${prefix}title-frame.png`)
   const thumbnail = path.join(folder, "thumbnail.png")
   const cachePath = path.join(folder, `${prefix}render-cache.json`)
-  await synthesizeSpeech(project.title, settings, titleAudio, ttsProvider)
+
+  await synthesizeSpeech(project.title, settings, titleAudioRaw, ttsProvider)
+  const titleRawDurationSeconds = await mediaDuration(titleAudioRaw)
+  await normalizePartAudio(titleAudioRaw, titleAudio, titleRawDurationSeconds)
   const titleSpeechDurationSeconds = await mediaDuration(titleAudio)
   const titleCardDurationSeconds = roundDuration(
     titleSpeechDurationSeconds + NEWS_INTRO_GAP_SECONDS
   )
-  const report = await synthesizeReport(
-    project.reportScenes,
-    settings,
-    folder,
-    sourceFiles,
-    source.id,
-    project.sourceVolume,
-    project.quoteVolume,
-    ttsProvider,
-    sourceTranscripts
-  )
-  const bodyDurationSeconds = roundDuration(
-    report.duration + NEWS_OUTRO_GAP_SECONDS
-  )
+  await progress(20, "인트로 음성 완료")
+
+  const {
+    lead: leadScenesPlanned,
+    body: bodyScenesPlanned,
+    outro: outroScenesPlanned,
+  } = splitScenesByClipPart(project.reportScenes, project.productionMode)
+
+  const primarySourceId = source.id
+  async function synthesizePart(
+    scenes: typeof leadScenesPlanned,
+    part: "lead" | "body" | "outro"
+  ) {
+    if (!scenes.length) return null
+    return synthesizeReport(
+      scenes,
+      settings,
+      folder,
+      sourceFiles,
+      primarySourceId,
+      project.sourceVolume,
+      project.quoteVolume,
+      ttsProvider,
+      sourceTranscripts,
+      part
+    )
+  }
+
+  const leadReport = await synthesizePart(leadScenesPlanned, "lead")
+  await progress(35, "도입부 음성 완료")
+  const bodyReport = await synthesizePart(bodyScenesPlanned, "body")
+  await progress(45, "본문 음성 완료")
+  const outroReport = await synthesizePart(outroScenesPlanned, "outro")
+  await progress(52, "마무리 음성 완료")
+  if (!leadReport && !bodyReport) {
+    throw new Error("report-scenes-required")
+  }
+
+  const leadDurationSeconds = roundDuration(leadReport?.duration ?? 0)
+  const bodyDurationSeconds = roundDuration(bodyReport?.duration ?? 0)
+  const outroDurationSeconds = outroReport
+    ? roundDuration(outroReport.duration + NEWS_OUTRO_GAP_SECONDS)
+    : 0
   const outputDurationSeconds = roundDuration(
-    titleCardDurationSeconds + bodyDurationSeconds
+    titleCardDurationSeconds +
+      leadDurationSeconds +
+      bodyDurationSeconds +
+      outroDurationSeconds
   )
+  const { body: bodyScript, cta: endCtaScript } = splitEndCtaFromScript(
+    project.reportScript
+  )
+  const narrationOf = (scenes: typeof leadScenesPlanned) =>
+    scenes
+      .map((scene) => scene.narration.trim())
+      .filter(Boolean)
+      .join("\n")
+  const lockedParts = partitionSubtitlesByPart(
+    project.subtitles,
+    leadScenesPlanned,
+    bodyScenesPlanned
+  )
+
+  function partSubtitles(options: {
+    planned: typeof leadScenesPlanned
+    report: NonNullable<typeof leadReport> | null
+    edited: typeof project.subtitles
+    offsetSeconds: number
+    phrases: string
+  }) {
+    if (!options.report || !options.planned.length) return []
+    const localEdited = options.edited.map((cue) => ({
+      ...cue,
+      start: Math.max(0, cue.start - options.offsetSeconds),
+      end: Math.max(0.04, cue.end - options.offsetSeconds),
+    }))
+    return snapSubtitleCueTimes(
+      layoutTimedSubtitleCues(
+        applySubtitleTimingForRender(
+          localEdited,
+          options.planned,
+          options.report.scenes,
+          {
+            lockTimings: project.subtitleTimingsLocked,
+            captionPhrases: reportCaptionPhrases(options.phrases),
+            transcript: project.transcript,
+            maxCaptionCharacters:
+              titleLineCharacterLimit(settings.bodySubtitleText) * 2,
+          }
+        ),
+        settings.bodySubtitleText
+      )
+    )
+  }
+
+  const leadSubtitles = partSubtitles({
+    planned: leadScenesPlanned,
+    report: leadReport,
+    edited: lockedParts.lead,
+    offsetSeconds: 0,
+    phrases: narrationOf(leadScenesPlanned) || bodyScript,
+  })
+  const bodySubtitles = partSubtitles({
+    planned: bodyScenesPlanned,
+    report: bodyReport,
+    edited: lockedParts.body,
+    offsetSeconds: leadDurationSeconds,
+    phrases: narrationOf(bodyScenesPlanned) || bodyScript,
+  })
+  const outroSubtitlesLocal = partSubtitles({
+    planned: outroScenesPlanned,
+    report: outroReport,
+    edited: lockedParts.outro,
+    offsetSeconds: leadDurationSeconds + bodyDurationSeconds,
+    phrases: endCtaScript,
+  })
+  const combinedSubtitles = [
+    ...leadSubtitles,
+    ...bodySubtitles.map((cue) => ({
+      ...cue,
+      start: roundDuration(cue.start + leadDurationSeconds),
+      end: roundDuration(cue.end + leadDurationSeconds),
+    })),
+    ...outroSubtitlesLocal.map((cue) => ({
+      ...cue,
+      start: roundDuration(
+        cue.start + leadDurationSeconds + bodyDurationSeconds
+      ),
+      end: roundDuration(cue.end + leadDurationSeconds + bodyDurationSeconds),
+    })),
+  ]
+  const exportSubtitles = combinedSubtitles.map((cue) => ({
+    ...cue,
+    start: roundDuration(cue.start + titleCardDurationSeconds),
+    end: roundDuration(cue.end + titleCardDurationSeconds),
+  }))
+
   const effectiveProject: NewsClipProject = {
     ...project,
-    // 실측 장면 길이에 맞춘 뒤, 줄바꿈만 적용한다(merge/재타이밍으로 싱크를 깨지 않음).
-    subtitles: layoutTimedSubtitleCues(
-      retimeSubtitleCuesToScenes(
-        project.subtitles,
-        project.reportScenes,
-        report.scenes
-      ),
-      settings.bodySubtitleText
-    ),
+    subtitles: combinedSubtitles,
     titleCardDurationSeconds,
     outputDurationSeconds,
   }
@@ -419,9 +582,11 @@ export async function renderNewsClip(
     titleStillRange,
     folder
   )
+  await progress(56, "화면 구성 완료")
   const renderCache = await readRenderCache(cachePath)
-  const titleVideoSignature = digest({
+  const introVideoSignature = digest({
     renderVersion: NEWS_RENDER_VERSION,
+    part: "intro",
     title: effectiveProject.title,
     titleVolume: effectiveProject.titleVolume,
     introStillZoom: effectiveProject.introStillZoom,
@@ -444,60 +609,138 @@ export async function renderNewsClip(
     safeMarginPercent: settings.safeMarginPercent,
     dimensions,
   })
-  const bodyVideoSignature = digest({
-    renderVersion: NEWS_RENDER_VERSION,
-    sources: [...sourceFiles],
-    reportScript: effectiveProject.reportScript,
-    reportScenes: report.scenes,
-    reportAudio: report.signature,
-    sourcePlaybackRate: NEWS_SOURCE_PLAYBACK_RATE,
-    subtitles: effectiveProject.subtitles,
-    title: effectiveProject.title,
-    crop: effectiveProject.crop,
-    sourceVolume: effectiveProject.sourceVolume,
-    quoteVolume: effectiveProject.quoteVolume,
-    bodyDurationSeconds,
-    bodyFrameImage: settings.bodyFrameImage,
-    videoRect: settings.videoRect,
-    fontFamily: settings.fontFamily,
-    bodyTitleText: settings.bodyTitleText,
-    bodyTitleColor: settings.bodyTitleColor,
-    bodySubtitleText: settings.bodySubtitleText,
-    bodySourceText: settings.bodySourceText,
-    sourceColor: settings.sourceColor,
-    sourceCredit: bodySourceCreditText(source),
-    emphasisColor: settings.emphasisColor,
-    subtitleColor: settings.subtitleColor,
-    safeMarginPercent: settings.safeMarginPercent,
-    dimensions,
+  function contentPartSignature(
+    part: "lead" | "body" | "outro",
+    report: NonNullable<typeof leadReport>,
+    subtitles: typeof leadSubtitles,
+    durationSeconds: number
+  ) {
+    return digest({
+      renderVersion: NEWS_RENDER_VERSION,
+      part,
+      sources: [...sourceFiles],
+      reportScript: bodyScript || effectiveProject.reportScript,
+      reportScenes: report.scenes,
+      reportAudio: report.signature,
+      sourcePlaybackRate: NEWS_SOURCE_PLAYBACK_RATE,
+      subtitles,
+      title: effectiveProject.title,
+      crop: effectiveProject.crop,
+      sourceVolume: effectiveProject.sourceVolume,
+      quoteVolume: effectiveProject.quoteVolume,
+      durationSeconds,
+      bodyFrameImage: settings.bodyFrameImage,
+      videoRect: settings.videoRect,
+      fontFamily: settings.fontFamily,
+      bodyTitleText: settings.bodyTitleText,
+      bodyTitleColor: settings.bodyTitleColor,
+      bodySubtitleText: settings.bodySubtitleText,
+      bodySourceText: settings.bodySourceText,
+      sourceColor: settings.sourceColor,
+      sourceCredit: bodySourceCreditText(source),
+      emphasisColor: settings.emphasisColor,
+      subtitleColor: settings.subtitleColor,
+      safeMarginPercent: settings.safeMarginPercent,
+      dimensions,
+    })
+  }
+  const leadVideoSignature = leadReport
+    ? contentPartSignature(
+        "lead",
+        leadReport,
+        leadSubtitles,
+        leadDurationSeconds
+      )
+    : "none"
+  const bodyVideoSignature = bodyReport
+    ? contentPartSignature(
+        "body",
+        bodyReport,
+        bodySubtitles,
+        bodyDurationSeconds
+      )
+    : "none"
+  const outroVideoSignature = outroReport
+    ? contentPartSignature(
+        "outro",
+        outroReport,
+        outroSubtitlesLocal,
+        outroDurationSeconds
+      )
+    : "none"
+  const joinedSignature = digest({
+    introVideoSignature,
+    leadVideoSignature,
+    bodyVideoSignature,
+    outroVideoSignature,
   })
-  const joinedSignature = digest({ titleVideoSignature, bodyVideoSignature })
   const outputSignature = digest({
     joinedSignature,
     bgmEnabled: effectiveProject.bgmEnabled,
     bgmVolume: effectiveProject.bgmVolume,
     bgmFile: settings.bgmFile,
   })
+  const leadSourceAss = path.join(folder, `${prefix}lead-source.ass`)
   const bodySourceAss = path.join(folder, `${prefix}body-source.ass`)
+  const outroSourceAss = path.join(folder, `${prefix}outro-source.ass`)
   const sourceCredit = bodySourceCreditText(source)
 
   await Promise.all([
-    writeFile(captions, subtitlesToSrt(effectiveProject.subtitles)),
-    writeFile(
-      captionsAss,
-      subtitlesToAss(effectiveProject.subtitles, settings)
-    ),
+    writeFile(captions, subtitlesToSrt(exportSubtitles)),
+    writeFile(leadCaptionsAss, subtitlesToAss(leadSubtitles, settings)),
+    writeFile(bodyCaptionsAss, subtitlesToAss(bodySubtitles, settings)),
+    writeFile(outroCaptionsAss, subtitlesToAss(outroSubtitlesLocal, settings)),
     writeFile(
       titleAss,
       titleAssText(effectiveProject.title, titleCardDurationSeconds, settings)
     ),
     writeFile(
+      leadTitleAss,
+      bodyTitleAssText(
+        effectiveProject.title,
+        Math.max(0.1, leadDurationSeconds),
+        settings
+      )
+    ),
+    writeFile(
+      leadSourceAss,
+      bodySourceAssText(
+        sourceCredit,
+        Math.max(0.1, leadDurationSeconds),
+        settings
+      )
+    ),
+    writeFile(
       bodyTitleAss,
-      bodyTitleAssText(effectiveProject.title, bodyDurationSeconds, settings)
+      bodyTitleAssText(
+        effectiveProject.title,
+        Math.max(0.1, bodyDurationSeconds),
+        settings
+      )
     ),
     writeFile(
       bodySourceAss,
-      bodySourceAssText(sourceCredit, bodyDurationSeconds, settings)
+      bodySourceAssText(
+        sourceCredit,
+        Math.max(0.1, bodyDurationSeconds),
+        settings
+      )
+    ),
+    writeFile(
+      outroTitleAss,
+      bodyTitleAssText(
+        effectiveProject.title,
+        Math.max(0.1, outroDurationSeconds),
+        settings
+      )
+    ),
+    writeFile(
+      outroSourceAss,
+      bodySourceAssText(
+        sourceCredit,
+        Math.max(0.1, outroDurationSeconds),
+        settings
+      )
     ),
     writeFile(
       path.join(folder, "manifest.json"),
@@ -508,11 +751,12 @@ export async function renderNewsClip(
       `${JSON.stringify(effectiveProject.metadata, null, 2)}\n`
     ),
   ])
+  await progress(60, "자막 준비 완료")
 
   if (
     force ||
-    renderCache.titleVideoSignature !== titleVideoSignature ||
-    !(await exists(titleVideo))
+    renderCache.introVideoSignature !== introVideoSignature ||
+    !(await exists(introVideo))
   ) {
     await makeTitleVideo(
       settings,
@@ -523,24 +767,48 @@ export async function renderNewsClip(
       effectiveProject.titleVolume,
       titleAss,
       titleAudio,
-      titleVideo,
+      introVideo,
       dimensions,
       titleCardDurationSeconds
     )
   }
+  await progress(69, "인트로 영상 완료")
   if (
-    force ||
-    renderCache.bodyVideoSignature !== bodyVideoSignature ||
-    !(await exists(bodyVideo))
+    leadReport &&
+    (force ||
+      renderCache.leadVideoSignature !== leadVideoSignature ||
+      !(await exists(leadVideo)))
   ) {
     await makeBodyVideo(
       effectiveProject,
       settings,
       sourceFiles,
       source.id,
-      report.audio,
-      report.scenes,
-      captionsAss,
+      leadReport.audio,
+      leadReport.scenes,
+      leadCaptionsAss,
+      leadTitleAss,
+      leadSourceAss,
+      leadVideo,
+      dimensions,
+      leadDurationSeconds
+    )
+  }
+  await progress(78, "도입부 영상 완료")
+  if (
+    bodyReport &&
+    (force ||
+      renderCache.bodyVideoSignature !== bodyVideoSignature ||
+      !(await exists(bodyVideo)))
+  ) {
+    await makeBodyVideo(
+      effectiveProject,
+      settings,
+      sourceFiles,
+      source.id,
+      bodyReport.audio,
+      bodyReport.scenes,
+      bodyCaptionsAss,
       bodyTitleAss,
       bodySourceAss,
       bodyVideo,
@@ -548,13 +816,43 @@ export async function renderNewsClip(
       bodyDurationSeconds
     )
   }
+  await progress(87, "본문 영상 완료")
+  if (
+    outroReport &&
+    (force ||
+      renderCache.outroVideoSignature !== outroVideoSignature ||
+      !(await exists(outroVideo)))
+  ) {
+    await makeBodyVideo(
+      effectiveProject,
+      settings,
+      sourceFiles,
+      source.id,
+      outroReport.audio,
+      outroReport.scenes,
+      outroCaptionsAss,
+      outroTitleAss,
+      outroSourceAss,
+      outroVideo,
+      dimensions,
+      outroDurationSeconds
+    )
+  }
+  await progress(92, "마무리 영상 완료")
   if (
     force ||
     renderCache.joinedSignature !== joinedSignature ||
     !(await exists(joinedVideo))
   ) {
-    await concatVideos(titleVideo, bodyVideo, joinedVideo, dimensions.preset)
+    const parts = [
+      introVideo,
+      ...(leadReport ? [leadVideo] : []),
+      ...(bodyReport ? [bodyVideo] : []),
+      ...(outroReport ? [outroVideo] : []),
+    ]
+    await concatNewsClips(parts, joinedVideo, concatList, run)
   }
+  await progress(96, "영상 합치기 완료")
   if (
     force ||
     renderCache.outputSignature !== outputSignature ||
@@ -562,13 +860,15 @@ export async function renderNewsClip(
   ) {
     await applyBgm(effectiveProject, settings, joinedVideo, finalVideo)
   }
+  await progress(98, "음향 적용 완료")
+  await validateNewsClipOutput(finalVideo, dimensions, outputDurationSeconds)
   if (mode === "final") {
     await run(ffmpegBin(), [
       "-y",
       "-ss",
       "0.15",
       "-i",
-      titleVideo,
+      introVideo,
       "-frames:v",
       "1",
       titleFrame,
@@ -579,8 +879,10 @@ export async function renderNewsClip(
     cachePath,
     `${JSON.stringify(
       {
-        titleVideoSignature,
+        introVideoSignature,
+        leadVideoSignature,
         bodyVideoSignature,
+        outroVideoSignature,
         joinedSignature,
         outputSignature,
       },
@@ -588,6 +890,7 @@ export async function renderNewsClip(
       2
     )}\n`
   )
+  await progress(100, "완료")
 
   const signature = createHash("sha256")
     .update(JSON.stringify({ project: effectiveProject, settings, mode }))
@@ -600,6 +903,16 @@ export async function renderNewsClip(
     return {
       signature,
       previewUrl: `${base}/preview.mp4?v=${previewVersion}`,
+      previewIntroUrl: `${base}/preview-intro.mp4?v=${previewVersion}`,
+      previewLeadUrl: leadReport
+        ? `${base}/preview-lead.mp4?v=${previewVersion}`
+        : "",
+      previewBodyUrl: bodyReport
+        ? `${base}/preview-body.mp4?v=${previewVersion}`
+        : "",
+      previewOutroUrl: outroReport
+        ? `${base}/preview-outro.mp4?v=${previewVersion}`
+        : "",
       titleCardDurationSeconds,
       outputDurationSeconds,
       subtitles: effectiveProject.subtitles,
@@ -612,6 +925,10 @@ export async function renderNewsClip(
   return {
     signature,
     outputUrl: `${base}/final.mp4?v=${outputVersion}`,
+    previewIntroUrl: `${base}/intro.mp4?v=${outputVersion}`,
+    previewLeadUrl: leadReport ? `${base}/lead.mp4?v=${outputVersion}` : "",
+    previewBodyUrl: bodyReport ? `${base}/body.mp4?v=${outputVersion}` : "",
+    previewOutroUrl: outroReport ? `${base}/outro.mp4?v=${outputVersion}` : "",
     thumbnailUrl: `${base}/thumbnail.png?v=${outputVersion}`,
     captionsUrl: `${base}/captions.srt`,
     titleFrameUrl: `${base}/title-frame.png`,
@@ -706,18 +1023,129 @@ async function synthesizeSpeech(
   const timingOutput = `${output}.timestamps.json`
   try {
     await access(output)
-    return await readSpeechTiming(timingOutput)
+    const timing = await readSpeechTiming(timingOutput)
+    // Typecast는 단어 타임스탬프가 자막 기준. 음성만 있고 타이밍 없으면 다시 만든다.
+    if (timing || provider.id === "free") return timing
   } catch {
     // Cache miss: synthesize this text and voice setting once.
   }
-  await synthesizeNewsSpeech(
-    text,
-    settings.titleVoiceRate,
+
+  // Typecast가 문장 전체의 문맥을 보고 한국어 억양과 호흡을 만들도록 한 번만
+  // 요청한다. 쉼표/마침표마다 별도 합성하면 매 구간에서 운율이 초기화되어
+  // 한국어 전용 음성도 단어를 끊어 읽는 듯한 억양이 생긴다.
+  if (provider.id === "typecast") {
+    await synthesizeNewsSpeech(
+      text,
+      settings.titleVoiceRate,
+      output,
+      provider,
+      timingOutput
+    )
+    const timing = await readSpeechTiming(timingOutput)
+    if (!timing) throw new Error("typecast-failed")
+    return timing
+  }
+
+  const units = koreanSpeechUnits(text)
+  if (!units.length) throw new Error("report-scene-narration-required")
+  const chunks: Array<{
+    path: string
+    duration: number
+    pauseAfterSeconds: number
+  }> = []
+  const words: TypecastSpeechTiming["words"] = []
+  const characters: TypecastSpeechTiming["characters"] = []
+  let cursor = 0
+  for (const [index, unit] of units.entries()) {
+    const chunkPath = `${output}.unit-${index + 1}.wav`
+    const chunkTimingPath = `${chunkPath}.timestamps.json`
+    let timing = await readSpeechTiming(chunkTimingPath)
+    const chunkExists = await exists(chunkPath)
+    if (!chunkExists) {
+      await synthesizeNewsSpeech(
+        unit.text,
+        settings.titleVoiceRate,
+        chunkPath,
+        provider,
+        chunkTimingPath
+      )
+      timing = await readSpeechTiming(chunkTimingPath)
+    }
+    const duration = await mediaDuration(chunkPath)
+    const appendTiming = (
+      target: TypecastSpeechTiming["words"],
+      source: TypecastSpeechTiming["words"]
+    ) => {
+      for (const segment of scaleSpeechWordsToDuration(
+        source,
+        duration,
+        timing?.audioDuration
+      )) {
+        target.push({
+          ...segment,
+          start: roundDuration(segment.start + cursor),
+          end: roundDuration(segment.end + cursor),
+        })
+      }
+    }
+    appendTiming(words, timing?.words ?? [])
+    appendTiming(characters, timing?.characters ?? [])
+    chunks.push({
+      path: chunkPath,
+      duration,
+      pauseAfterSeconds: unit.pauseAfterSeconds,
+    })
+    cursor += duration + unit.pauseAfterSeconds
+  }
+  await concatPacedSpeech(chunks, output)
+  const combinedTiming: TypecastSpeechTiming = {
+    audioDuration: roundDuration(cursor),
+    words,
+    characters,
+  }
+  await writeFile(timingOutput, JSON.stringify(combinedTiming))
+  return combinedTiming
+}
+
+async function concatPacedSpeech(
+  chunks: Array<{
+    path: string
+    duration: number
+    pauseAfterSeconds: number
+  }>,
+  output: string
+) {
+  const filters: string[] = []
+  const streams: string[] = []
+  chunks.forEach((chunk, index) => {
+    const audioLabel = `speech-${index}`
+    filters.push(
+      `[${index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration=${Math.max(0.1, chunk.duration)},asetpts=PTS-STARTPTS[${audioLabel}]`
+    )
+    streams.push(`[${audioLabel}]`)
+    if (chunk.pauseAfterSeconds > 0) {
+      const pauseLabel = `pause-${index}`
+      filters.push(
+        `anullsrc=r=48000:cl=stereo,atrim=duration=${chunk.pauseAfterSeconds},asetpts=PTS-STARTPTS[${pauseLabel}]`
+      )
+      streams.push(`[${pauseLabel}]`)
+    }
+  })
+  await run(ffmpegBin(), [
+    "-y",
+    ...chunks.flatMap((chunk) => ["-i", chunk.path]),
+    "-filter_complex",
+    `${filters.join(";")};${streams.join("")}concat=n=${streams.length}:v=0:a=1[a]`,
+    "-map",
+    "[a]",
+    "-c:a",
+    "pcm_s16le",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
     output,
-    provider,
-    timingOutput
-  )
-  return readSpeechTiming(timingOutput)
+  ])
 }
 
 type TimedReportScene = NewsReportScene & {
@@ -737,8 +1165,12 @@ async function synthesizeReport(
   ttsVolume: number,
   quoteVolume: number,
   provider: ResolvedNewsTtsProvider,
-  transcripts: Map<string, TranscriptSegment[]>
+  transcripts: Map<string, TranscriptSegment[]>,
+  part: "lead" | "body" | "outro" = "body"
 ) {
+  if (!scenes.length) {
+    throw new Error("report-scenes-required")
+  }
   const audioFiles: {
     path: string
     volume: number
@@ -757,8 +1189,8 @@ async function synthesizeReport(
         source,
         start: scene.sourceStart,
         end: scene.sourceEnd,
-        // v5: 무음컷 없이 1.2배만. 배속/캐시 버전 변경 시 키 분리.
-        tighten: "v5-rate-1.2",
+        // v7: 원배속. 이전 1.2배 캐시와 분리한다.
+        tighten: "v7-accurate-seek-rate-1",
         playbackRate: NEWS_SOURCE_PLAYBACK_RATE,
       }).slice(0, 16)
       const tightened = await tightenQuoteSegment({
@@ -766,7 +1198,7 @@ async function synthesizeReport(
         start: scene.sourceStart,
         end: scene.sourceEnd,
         folder,
-        key: `${index + 1}-${key}`,
+        key: `${part}-${index + 1}-${key}`,
       })
       audioFiles.push({
         path: tightened.audioPath,
@@ -774,10 +1206,7 @@ async function synthesizeReport(
         duration: tightened.duration,
       })
       durations.push(tightened.duration)
-      const rawQuoteSeconds = Math.max(
-        0.1,
-        scene.sourceEnd - scene.sourceStart
-      )
+      const rawQuoteSeconds = Math.max(0.1, scene.sourceEnd - scene.sourceStart)
       const alignmentScale = tightened.duration / rawQuoteSeconds
       alignments.push(
         quoteTranscriptAlignment(
@@ -799,16 +1228,12 @@ async function synthesizeReport(
     }
     const key = digest({
       narration,
+      pacing: NEWS_TTS_PACING_VERSION,
       tts: newsTtsCacheIdentity(provider),
       rate: settings.titleVoiceRate,
     }).slice(0, 16)
-    const audio = path.join(folder, `report-${index + 1}-${key}.wav`)
-    const timing = await synthesizeSpeech(
-      narration,
-      settings,
-      audio,
-      provider
-    )
+    const audio = path.join(folder, `report-${part}-${index + 1}-${key}.wav`)
+    const timing = await synthesizeSpeech(narration, settings, audio, provider)
     const duration = await mediaDuration(audio)
     audioFiles.push({
       path: audio,
@@ -816,30 +1241,51 @@ async function synthesizeReport(
       duration,
     })
     durations.push(duration)
-    alignments.push(timing?.words ?? [])
+    alignments.push(
+      scaleSpeechWordsToDuration(
+        timing?.words ?? [],
+        duration,
+        timing?.audioDuration
+      )
+    )
     tightVideoPaths.push(undefined)
   }
 
   const signature = digest({
+    part,
     audioFiles,
     durations,
-    // loudnorm 제거 후 캐시 분리
-    concatAudio: "v2-volume-atrim",
+    // 파트별 loudnorm 후 길이를 원본에 고정. concat 단계에는 필터 없음.
+    concatAudio: "v4-part-loudnorm-lock-duration",
   })
-  const audio = path.join(folder, `report-${signature.slice(0, 16)}.m4a`)
+  const audioRaw = path.join(
+    folder,
+    `report-${part}-${signature.slice(0, 16)}-raw.m4a`
+  )
+  const audio = path.join(
+    folder,
+    `report-${part}-${signature.slice(0, 16)}.m4a`
+  )
+  if (!(await exists(audioRaw))) {
+    await concatAudio(audioFiles, audioRaw)
+  }
+  const rawDuration = durations.reduce((sum, value) => sum + value, 0)
   if (!(await exists(audio))) {
-    await concatAudio(audioFiles, audio)
+    // loudnorm이 길이를 늘리/줄여도 장면·quote 영상 타임라인은 고정이므로
+    // 정규화 후 원본 길이에 맞춰 잘라/패딩한다. 스케일하면 quote 영상과 자막이 어긋난다.
+    await normalizePartAudio(audioRaw, audio, rawDuration)
   }
   let cursor = 0
   const timedScenes = scenes.map((scene, index) => {
     const start = cursor
-    cursor += durations[index]
+    cursor += durations[index] ?? 0
+    const alignment = alignments[index] ?? []
     return {
       ...scene,
       start: roundDuration(start),
       end: roundDuration(cursor),
-      duration: roundDuration(durations[index]),
-      alignment: alignments[index],
+      duration: roundDuration(durations[index] ?? 0),
+      alignment,
       tightVideoPath: tightVideoPaths[index],
     } satisfies TimedReportScene
   })
@@ -849,6 +1295,52 @@ async function synthesizeReport(
     scenes: timedScenes,
     narrationDuration: roundDuration(cursor),
     duration: roundDuration(cursor),
+  }
+}
+
+/** 파트 개별 loudnorm. 길이는 targetDuration으로 고정해 영상·자막 타임라인을 지킨다. */
+async function normalizePartAudio(
+  input: string,
+  output: string,
+  targetDuration?: number
+) {
+  const probed =
+    typeof targetDuration === "number" && Number.isFinite(targetDuration)
+      ? targetDuration
+      : await mediaDuration(input)
+  const safeDuration = Math.max(0.1, probed)
+  const lockDuration = `apad=whole_dur=${safeDuration},atrim=0:${safeDuration},asetpts=PTS-STARTPTS`
+  try {
+    await run(ffmpegBin(), [
+      "-y",
+      "-i",
+      input,
+      "-af",
+      `${NEWS_PART_LOUDNORM},${lockDuration}`,
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-t",
+      String(safeDuration),
+      output,
+    ])
+  } catch {
+    // loudnorm이 PTS를 흔들면 볼륨만 복사하고 길이만 고정한다.
+    await run(ffmpegBin(), [
+      "-y",
+      "-i",
+      input,
+      "-af",
+      `volume=1,${lockDuration}`,
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-t",
+      String(safeDuration),
+      output,
+    ])
   }
 }
 
@@ -862,6 +1354,44 @@ async function readSpeechTiming(filePath: string) {
   } catch {
     return null
   }
+}
+
+/** API 보고 길이와 실제 wav 길이가 다르면 단어 시간을 wav에 맞게 스케일한다. */
+function scaleSpeechWordsToDuration(
+  words: TypecastSpeechTiming["words"],
+  mediaSeconds: number,
+  reportedSeconds?: number
+) {
+  if (!words.length) return []
+  const reported =
+    typeof reportedSeconds === "number" &&
+    Number.isFinite(reportedSeconds) &&
+    reportedSeconds > 0.05
+      ? reportedSeconds
+      : Math.max(
+          mediaSeconds,
+          ...words.map((word) => (Number.isFinite(word.end) ? word.end : 0))
+        )
+  const target = Math.max(0.1, mediaSeconds)
+  if (reported <= 0.05 || Math.abs(reported - target) < 0.04) {
+    return words.map((word) => ({
+      ...word,
+      start: roundDuration(Math.max(0, Math.min(target, word.start))),
+      end: roundDuration(
+        Math.max(word.start + 0.04, Math.min(target, word.end))
+      ),
+    }))
+  }
+  const scale = target / reported
+  return words.map((word) => {
+    const start = Math.max(0, word.start * scale)
+    const end = Math.max(start + 0.04, word.end * scale)
+    return {
+      ...word,
+      start: roundDuration(Math.min(target, start)),
+      end: roundDuration(Math.min(target, end)),
+    }
+  })
 }
 
 async function concatAudio(
@@ -961,7 +1491,19 @@ async function makeTitleVideo(
   const introFocusY = Number.isFinite(introStillY)
     ? Math.max(0, Math.min(100, introStillY)) / 100
     : 0.5
-  const baseFilter = `[0:v]scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=increase,crop=${dimensions.width}:${dimensions.height},zoompan=z='${introZoomStart.toFixed(4)}+${introZoomDelta.toFixed(4)}*on/${zoomProgressFrames}':x='(iw-iw/zoom)*${introFocusX.toFixed(4)}':y='(ih-ih/zoom)*${introFocusY.toFixed(4)}':d=${titleFrameCount}:s=${dimensions.width}x${dimensions.height}:fps=30,setsar=1[title-bg]`
+  // FFmpeg 6 crop에는 eval=frame이 없다. 고해상도로 맞춘 뒤 zoompan으로 확대한다.
+  const maxIntroZoom = introZoomStart + introZoomDelta
+  const oversample = Math.min(6, Math.max(3, Math.ceil(maxIntroZoom * 2)))
+  const baseWidth = dimensions.width * oversample
+  const baseHeight = dimensions.height * oversample
+  const zoomExpr = `${introZoomStart.toFixed(6)}+${introZoomDelta.toFixed(6)}*on/${zoomProgressFrames}`
+  const baseFilter = [
+    `[0:v]scale=${baseWidth}:${baseHeight}:force_original_aspect_ratio=increase:flags=lanczos`,
+    `crop=${baseWidth}:${baseHeight}`,
+    "setsar=1",
+    `zoompan=z='${zoomExpr}':x='(iw-iw/zoom)*${introFocusX.toFixed(4)}':y='(ih-ih/zoom)*${introFocusY.toFixed(4)}':d=${titleFrameCount}:s=${dimensions.width}x${dimensions.height}:fps=30`,
+    "setsar=1[title-bg]",
+  ].join(",")
   const frameFilter = frame
     ? `;[1:v]scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=decrease,pad=${dimensions.width}:${dimensions.height}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,setsar=1[title-frame];[title-bg][title-frame]overlay=0:0:format=auto[title-composed]`
     : ""
@@ -981,18 +1523,8 @@ async function makeTitleVideo(
     "[v]",
     "-map",
     `${audioIndex}:a`,
-    "-r",
-    "30",
-    "-c:v",
-    "libx264",
-    "-preset",
-    dimensions.preset,
-    "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-ar",
-    "48000",
+    ...newsVideoEncodeArgs(dimensions),
+    ...newsAudioEncodeArgs(),
     "-af",
     `volume=${Math.max(0, Math.min(2, titleVolume))},apad`,
     "-shortest",
@@ -1016,10 +1548,11 @@ async function makeBodyVideo(
 ) {
   const rect = settings.videoRect
   const narrationDurationSeconds = Math.max(0.1, scenes.at(-1)?.end ?? 0.1)
+  // 파트 길이는 요청값·나레이션만 본다. 합본 자막 timeline으로 늘리면
+  // intro/body/outro 분리 시 다른 파트 길이가 섞인다.
   const bodyDurationSeconds = Math.max(
     requestedBodyDurationSeconds,
-    narrationDurationSeconds,
-    project.subtitles.at(-1)?.end ?? narrationDurationSeconds
+    narrationDurationSeconds
   )
   const endCardDuration = Math.max(
     0,
@@ -1080,7 +1613,7 @@ async function makeBodyVideo(
     const sceneWidth = Math.round(scaledRect.width * sceneZoom)
     const sceneHeight = Math.round(scaledRect.height * sceneZoom)
     const scaleCrop = `scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${scaledRect.width}:${scaledRect.height}:x='${sceneCropX}':y='${sceneCropY}',setsar=1`
-    // 원본 푸티지 공통 1.2배. fps를 고정해 setpts 배속이 프레임 타임라인에 안정적으로 반영되게 한다.
+    // 원본 푸티지 원배속. fps만 고정해 타임라인을 안정적으로 맞춘다.
     const speed = `${sourceVideoSetpts(NEWS_SOURCE_PLAYBACK_RATE)},fps=30`
     const finish = `tpad=stop_mode=clone:stop_duration=${renderDuration},trim=duration=${renderDuration},setpts=PTS-STARTPTS[scene${index}]`
     if (scene.visual === "quote") {
@@ -1088,7 +1621,7 @@ async function makeBodyVideo(
         ? tightClipIndexes.get(scene.tightVideoPath)
         : undefined
       if (tightIndex !== undefined) {
-        // quote-tighten 단계에서 이미 배속 적용됨
+        // quote-tighten 단계에서 이미 컷·원배속 적용됨
         return `[${tightIndex}:v]setpts=PTS-STARTPTS,${scaleCrop},${finish}`
       }
       const baseSourceRange = fitSceneSourceRange(
@@ -1106,10 +1639,7 @@ async function makeBodyVideo(
     )
     const packed = densifySourceKeeps(
       baseSourceRange.start,
-      Math.max(
-        baseSourceRange.end,
-        baseSourceRange.start + footageNeed
-      ),
+      Math.max(baseSourceRange.end, baseSourceRange.start + footageNeed),
       silences,
       footageNeed,
       sourceDurationSeconds,
@@ -1153,53 +1683,11 @@ async function makeBodyVideo(
     "[vout]",
     "-map",
     "[aout]",
-    "-r",
-    "30",
-    "-c:v",
-    "libx264",
-    "-preset",
-    dimensions.preset,
-    "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-ar",
-    "48000",
+    ...newsVideoEncodeArgs(dimensions),
+    ...newsAudioEncodeArgs(),
     "-t",
     String(bodyDurationSeconds),
     "-shortest",
-    output,
-  ])
-}
-
-async function concatVideos(
-  title: string,
-  body: string,
-  output: string,
-  preset: string
-) {
-  await run(ffmpegBin(), [
-    "-y",
-    "-i",
-    title,
-    "-i",
-    body,
-    "-filter_complex",
-    "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
-    "-map",
-    "[v]",
-    "-map",
-    "[a]",
-    "-c:v",
-    "libx264",
-    "-preset",
-    preset,
-    "-pix_fmt",
-    "yuv420p",
-    "-c:a",
-    "aac",
-    "-ar",
-    "48000",
     output,
   ])
 }
@@ -1654,22 +2142,12 @@ function fitSceneSourceRange(
   }
 }
 
-function extendSourceRangeEnd(
-  range: { start: number; end: number },
-  targetDuration: number,
-  sourceDuration: number
-) {
-  const end = Math.min(sourceDuration, range.start + targetDuration)
-  const start = Math.max(0, Math.min(range.start, end - targetDuration))
-  return {
-    start: roundDuration(start),
-    end: roundDuration(end),
-  }
-}
-
 type RenderCache = {
+  introVideoSignature?: string
   titleVideoSignature?: string
+  leadVideoSignature?: string
   bodyVideoSignature?: string
+  outroVideoSignature?: string
   joinedSignature?: string
   outputSignature?: string
 }

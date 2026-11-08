@@ -34,7 +34,7 @@
       "voiceId": "tc_6837dec48fc46637a9272b88"
     }
   ],
-  "titleVoiceRate": 5,
+  "titleVoiceRate": 0,
   "titleVolume": 1,
   "sourceVolume": 1,
   "quoteVolume": 1,
@@ -45,15 +45,15 @@
     "letterSpacing": -4,
     "x": 108,
     "y": 1095,
-    "width": 1037,
+    "width": 1058,
     "alignment": "center"
   },
-  "titleCardSecondFontSize": 160,
+  "titleCardSecondFontSize": 155,
   "titleCardLineHeightPercent": 100,
   "titleCardColor": "#ffffff",
   "titleCardSecondColor": "#ffd84d",
   "bodyTitleText": {
-    "fontSize": 70,
+    "fontSize": 69,
     "fontWeight": 800,
     "letterSpacing": -2,
     "x": 72,
@@ -63,12 +63,12 @@
   },
   "bodyTitleColor": "#ffd84d",
   "bodySubtitleText": {
-    "fontSize": 92,
+    "fontSize": 75,
     "fontWeight": 900,
     "letterSpacing": -4,
     "x": 22,
     "y": 1182,
-    "width": 972,
+    "width": 1037,
     "alignment": "center"
   },
   "subtitleColor": "#ffffff",

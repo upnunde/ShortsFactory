@@ -11,7 +11,6 @@ import {
   Input,
   Label,
   Modal,
-  ScrollShadow,
   Separator,
   Switch,
   TextField,
@@ -32,7 +31,10 @@ import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label
 import { NewsClipSourceStep as SourceStep } from "@/components/news-clips/source-step"
 import { NewsClipAnglesStep as AnglesStep } from "@/components/news-clips/angles-step"
 import { NewsClipReviewStep as ReviewStep } from "@/components/news-clips/review-step"
-import type { NewsAngleOption } from "@/lib/news-clips/angles"
+import {
+  normalizeAngleOptions,
+  type NewsAngleOption,
+} from "@/lib/news-clips/angles"
 import {
   normalizeNewsIssueSearchState,
   type NewsIssueSearchState,
@@ -47,9 +49,9 @@ import {
   splitIntroTitleLines,
 } from "@/lib/news-clips/text-layout"
 import {
-  buildBuildupScenes,
-  buildupHighlightBounds,
-  collapseBuildupHighlightCuts,
+  buildBuildup2Scenes,
+  buildup2HighlightBounds,
+  collapseBuildup2HighlightCuts,
 } from "@/lib/news-clips/buildup"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
 import {
@@ -124,9 +126,20 @@ export function NewsClipsApp({
   )
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState("")
+  const [previewProgress, setPreviewProgress] = useState<number | null>(null)
   const [note, setNote] = useState("")
   const [autoMode, setAutoMode] = useState(false)
   const autoAbortRef = useRef<AbortController | null>(null)
+  const angleAbortRef = useRef<AbortController | null>(null)
+  const previewAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(
+    () => () => {
+      angleAbortRef.current?.abort()
+      previewAbortRef.current?.abort()
+    },
+    []
+  )
 
   useEffect(() => {
     if (!profile) return
@@ -243,6 +256,59 @@ export function NewsClipsApp({
     transcriptDraft,
   ])
 
+  useEffect(() => {
+    if (
+      !profile ||
+      !ready ||
+      project.previewUrl ||
+      !project.selectedAngleId ||
+      project.reportScenes.length === 0
+    ) {
+      return
+    }
+    const controller = new AbortController()
+    const base = `/news-clips/output/${project.id}`
+    const files = [
+      "preview.mp4",
+      "preview-intro.mp4",
+      "preview-lead.mp4",
+      "preview-body.mp4",
+      "preview-outro.mp4",
+    ] as const
+    void Promise.all(
+      files.map(async (file) => {
+        const response = await fetch(`${base}/${file}`, {
+          method: "HEAD",
+          cache: "no-store",
+          signal: controller.signal,
+        }).catch(() => null)
+        return response?.ok ? `${base}/${file}?recovered=${Date.now()}` : ""
+      })
+    ).then(([previewUrl, intro, lead, body, outro]) => {
+      if (!previewUrl || controller.signal.aborted) return
+      setProject((current) =>
+        current.id === project.id && !current.previewUrl
+          ? {
+              ...current,
+              previewUrl,
+              previewIntroUrl: intro,
+              previewLeadUrl: lead,
+              previewBodyUrl: body,
+              previewOutroUrl: outro,
+            }
+          : current
+      )
+    })
+    return () => controller.abort()
+  }, [
+    profile,
+    project.id,
+    project.previewUrl,
+    project.reportScenes.length,
+    project.selectedAngleId,
+    ready,
+  ])
+
   async function persistHistory(
     draft: NewsClipProject,
     savedStep: NewsClipStep,
@@ -334,20 +400,91 @@ export function NewsClipsApp({
 
   const activeProfileId = profile.id
 
-  function updateProject(patch: Partial<NewsClipProject>) {
-    setProject((current) => ({
-      ...current,
-      updatedAt: new Date().toISOString(),
-      renderSignature: "",
-      outputUrl: "",
-      previewSignature: "",
-      previewUrl: "",
-      renderSettingsKey: "",
-      thumbnailUrl: "",
-      youtubeVideoId: "",
-      youtubeUploadUrl: "",
-      ...patch,
-    }))
+  function updateProject(
+    patch:
+      | Partial<NewsClipProject>
+      | ((current: NewsClipProject) => Partial<NewsClipProject>)
+  ) {
+    setProject((current) => {
+      const resolved = typeof patch === "function" ? patch(current) : patch
+      const keys = Object.keys(resolved)
+      const subtitleOnly =
+        keys.length > 0 &&
+        keys.every(
+          (key) => key === "subtitles" || key === "subtitleTimingsLocked"
+        )
+      // 초안 미디어는 2번 재생성·다시 만들기(setProject)로만 교체한다.
+      const replacesPreviewMedia =
+        "previewUrl" in resolved ||
+        "previewIntroUrl" in resolved ||
+        "previewLeadUrl" in resolved ||
+        "previewBodyUrl" in resolved ||
+        "previewOutroUrl" in resolved
+      const appliesRenderedArtifact =
+        replacesPreviewMedia || "outputUrl" in resolved
+      const artifactOnly =
+        appliesRenderedArtifact ||
+        keys.every((key) =>
+          [
+            "previewUrl",
+            "previewIntroUrl",
+            "previewLeadUrl",
+            "previewBodyUrl",
+            "previewOutroUrl",
+            "previewSignature",
+            "previewRevision",
+            "outputUrl",
+            "renderSignature",
+            "renderSettingsKey",
+            "thumbnailUrl",
+            "finalRevision",
+            "youtubeVideoId",
+            "youtubeUploadUrl",
+            "titleCardDurationSeconds",
+            "outputDurationSeconds",
+          ].includes(key)
+        )
+      const editorialRevision = artifactOnly
+        ? current.editorialRevision
+        : current.editorialRevision + 1
+      const next = {
+        ...current,
+        editorialRevision,
+        updatedAt: new Date().toISOString(),
+        ...(subtitleOnly
+          ? {
+              renderSignature: "",
+              outputUrl: "",
+              thumbnailUrl: "",
+              youtubeVideoId: "",
+              youtubeUploadUrl: "",
+            }
+          : {
+              renderSignature: "",
+              outputUrl: "",
+              renderSettingsKey: "",
+              thumbnailUrl: "",
+              youtubeVideoId: "",
+              youtubeUploadUrl: "",
+              subtitleTimingsLocked: false,
+            }),
+        ...resolved,
+      }
+      if (replacesPreviewMedia) return next
+      return {
+        ...next,
+        // 편집 중에는 이전 미리보기를 계속 재생한다.
+        // revision이 달라지므로 최종본으로는 쓸 수 없고, 새 미리보기를 만들면 교체된다.
+        previewUrl: current.previewUrl,
+        previewIntroUrl: current.previewIntroUrl,
+        previewLeadUrl: current.previewLeadUrl,
+        previewBodyUrl: current.previewBodyUrl,
+        previewOutroUrl: current.previewOutroUrl,
+        previewSignature: current.previewSignature,
+        previewRevision: current.previewRevision,
+        finalRevision: artifactOnly ? current.finalRevision : 0,
+      }
+    })
   }
 
   function applySettingsPreview(next: NewsClipSettings) {
@@ -368,15 +505,14 @@ export function NewsClipsApp({
         ? normalizeSubtitleCues(current.subtitles, next.bodySubtitleText)
         : current.subtitles,
       updatedAt: new Date().toISOString(),
-      titleCardDurationSeconds: 0,
+      editorialRevision: current.editorialRevision + 1,
+      finalRevision: 0,
       renderSignature: "",
       outputUrl: "",
-      previewSignature: "",
-      previewUrl: "",
-      renderSettingsKey: "",
       thumbnailUrl: "",
       youtubeVideoId: "",
       youtubeUploadUrl: "",
+      subtitleTimingsLocked: false,
     }))
   }
 
@@ -386,15 +522,14 @@ export function NewsClipsApp({
     setProject((current) => ({
       ...current,
       updatedAt: new Date().toISOString(),
-      titleCardDurationSeconds: 0,
+      editorialRevision: current.editorialRevision + 1,
+      finalRevision: 0,
       renderSignature: "",
       outputUrl: "",
-      previewSignature: "",
-      previewUrl: "",
-      renderSettingsKey: "",
       thumbnailUrl: "",
       youtubeVideoId: "",
       youtubeUploadUrl: "",
+      subtitleTimingsLocked: false,
     }))
     setNote("대본 공통 TTS를 저장하는 중입니다.")
     try {
@@ -455,7 +590,7 @@ export function NewsClipsApp({
       settings.titleCardText,
       settings.titleCardSecondFontSize
     )
-    const isBuildup = base.productionMode === "buildup"
+    const isBuildup2 = base.productionMode === "buildup2"
     const completeReportScript = ensureReportEndCta(
       reportScript,
       title,
@@ -463,13 +598,13 @@ export function NewsClipsApp({
     )
     const { body: bodyScript, cta: endCtaText } =
       splitEndCtaFromScript(completeReportScript)
-    const highlightBounds = buildupHighlightBounds(
+    const highlightBounds = buildup2HighlightBounds(
       reportScenes,
       candidate.sourceStart,
       candidate.sourceEnd
     )
-    const bodyScenes = isBuildup
-      ? buildBuildupScenes(
+    const bodyScenes = isBuildup2
+      ? buildBuildup2Scenes(
           bodyScript || completeReportScript,
           highlightBounds.start,
           highlightBounds.end,
@@ -556,9 +691,7 @@ export function NewsClipsApp({
           )
         : prepared.project.subtitles,
       outputDurationSeconds: prepared.reason
-        ? settings.titleCardSeconds +
-          outputBodySeconds +
-          NEWS_TOTAL_GAP_SECONDS
+        ? settings.titleCardSeconds + outputBodySeconds + NEWS_TOTAL_GAP_SECONDS
         : prepared.project.outputDurationSeconds,
       bgmEnabled: settings.bgmEnabled,
       bgmVolume: settings.bgmVolume,
@@ -574,7 +707,14 @@ export function NewsClipsApp({
         tags: ["뉴스", "시사", "쇼츠", "NewsStory"],
       },
       updatedAt: new Date().toISOString(),
+      editorialRevision: base.editorialRevision + 1,
+      previewRevision: 0,
+      finalRevision: 0,
       previewUrl: "",
+      previewIntroUrl: "",
+      previewLeadUrl: "",
+      previewBodyUrl: "",
+      previewOutroUrl: "",
       previewSignature: "",
       renderSettingsKey: "",
       outputUrl: "",
@@ -709,19 +849,72 @@ export function NewsClipsApp({
     }
   }
 
-  async function generatePreview(draft: NewsClipProject, force = false) {
-    setBusy("preview")
-    setNote("저해상도 쇼츠 초안을 만드는 중입니다.")
+  async function generatePreview(
+    draft: NewsClipProject,
+    _force?: boolean,
+    options: {
+      busyKey?: string
+      note?: string
+      clearBusy?: boolean
+      silent?: boolean
+      signal?: AbortSignal
+    } = {}
+  ) {
+    previewAbortRef.current?.abort()
+    const controller = new AbortController()
+    previewAbortRef.current = controller
+    const abortFromCaller = () => controller.abort()
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true })
+    if (options.signal?.aborted) controller.abort()
+    const busyKey = options.busyKey ?? "preview"
+    const clearBusy = options.clearBusy !== false
+    const silent = options.silent === true
+    const jobId = crypto.randomUUID()
+    let polling = true
+    setPreviewProgress(1)
+    setBusy(busyKey)
+    if (!silent) {
+      setNote(options.note ?? "저해상도 쇼츠 초안을 만드는 중입니다.")
+    }
+    const pollProgress = async () => {
+      try {
+        const response = await fetch(
+          `/api/news-clips/render-progress?jobId=${encodeURIComponent(jobId)}`,
+          { cache: "no-store" }
+        )
+        const progress = (await response.json()) as { percent?: number }
+        if (!polling || !Number.isFinite(progress.percent)) return
+        setPreviewProgress((current) =>
+          Math.max(current ?? 0, Math.min(100, Math.round(progress.percent!)))
+        )
+      } catch {
+        // 진행률 조회 실패가 렌더 작업 자체를 중단시키지는 않는다.
+      }
+    }
+    const progressTimer = window.setInterval(() => {
+      void pollProgress()
+    }, 500)
     try {
       const response = await fetch("/api/news-clips/preview", {
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ project: draft, settings, force }),
+        // 검수 수정 후에는 이전 산출물·캐시를 지우고 다시 렌더한다.
+        body: JSON.stringify({
+          project: draft,
+          settings,
+          force: true,
+          jobId,
+        }),
+        signal: controller.signal,
       })
       const body = (await response.json()) as {
         message?: string
         previewUrl?: string
+        previewIntroUrl?: string
+        previewLeadUrl?: string
+        previewBodyUrl?: string
+        previewOutroUrl?: string
         signature?: string
         titleCardDurationSeconds?: number
         outputDurationSeconds?: number
@@ -732,42 +925,83 @@ export function NewsClipsApp({
         setNote(body.message || "저해상도 초안을 만들지 못했습니다.")
         return false
       }
+      setPreviewProgress(100)
       setProject((current) => {
         if (current.id !== draft.id) return current
-        const isLatestRevision = current.updatedAt === draft.updatedAt
+        // updatedAt은 저장·UI 동기화 과정에서도 바뀔 수 있다. 실제 편집본의
+        // 동일성은 editorialRevision으로 확인해야 새 렌더의 자막을 버리지 않는다.
+        const isLatestRevision =
+          current.editorialRevision === draft.editorialRevision
         const previewUrl = refreshMediaUrl(body.previewUrl ?? "")
+        const previewIntroUrl = refreshMediaUrl(body.previewIntroUrl ?? "")
+        const previewLeadUrl = refreshMediaUrl(body.previewLeadUrl ?? "")
+        const previewBodyUrl = refreshMediaUrl(body.previewBodyUrl ?? "")
+        const previewOutroUrl = refreshMediaUrl(body.previewOutroUrl ?? "")
         if (!isLatestRevision) {
-          return {
-            ...current,
-            previewUrl,
-            previewSignature: "",
-          }
+          return current
         }
         return {
           ...current,
           previewUrl,
+          previewIntroUrl,
+          previewLeadUrl,
+          previewBodyUrl,
+          previewOutroUrl,
           previewSignature: body.signature ?? "",
+          previewRevision: draft.editorialRevision,
+          finalRevision: 0,
           renderSettingsKey: newsRenderSettingsKey(settings),
           titleCardDurationSeconds:
             body.titleCardDurationSeconds ?? current.titleCardDurationSeconds,
           outputDurationSeconds:
             body.outputDurationSeconds ?? current.outputDurationSeconds,
-          subtitles: body.subtitles ?? current.subtitles,
+          // 미리보기와 함께 렌더 서버가 실측한 최신 자막 구간으로 교체한다.
+          subtitles: Array.isArray(body.subtitles) ? body.subtitles : [],
+          subtitleTimingsLocked: true,
           reportScenes: body.reportScenes ?? current.reportScenes,
         }
       })
-      setNote(body.message || "저해상도 초안을 만들었습니다.")
+      if (!silent) {
+        setNote(body.message || "저해상도 초안을 만들었습니다.")
+      } else {
+        setNote("")
+      }
       return true
     } catch {
+      if (controller.signal.aborted) return false
       setNote("저해상도 초안을 만들지 못했습니다.")
       return false
     } finally {
-      setBusy("")
+      options.signal?.removeEventListener("abort", abortFromCaller)
+      polling = false
+      window.clearInterval(progressTimer)
+      void fetch(
+        `/api/news-clips/render-progress?jobId=${encodeURIComponent(jobId)}`,
+        { method: "DELETE" }
+      ).catch(() => undefined)
+      if (previewAbortRef.current === controller) {
+        previewAbortRef.current = null
+        setPreviewProgress(null)
+        if (clearBusy) setBusy("")
+      }
     }
+  }
+
+  function cancelPreview() {
+    const controller = previewAbortRef.current
+    if (!controller) return
+    controller.abort()
+    previewAbortRef.current = null
+    setPreviewProgress(null)
+    setBusy("")
+    setNote("미리보기 만들기를 취소했습니다.")
   }
 
   async function reselectCandidate(target: "all" | "title" | "script" = "all") {
     if (!project.source) return
+    const selectedAngle = project.angleOptions.find(
+      (item) => item.id === project.selectedAngleId
+    )
     const busyKey =
       target === "title"
         ? "rewrite-title"
@@ -802,6 +1036,18 @@ export function NewsClipsApp({
           productionMode: project.productionMode,
           directSource: project.selectedIssue?.directSource === true,
           reselect: true,
+          previousTitle: project.title,
+          previousTitles: project.titleOptions,
+          previousScript: project.reportScript,
+          ...(selectedAngle
+            ? {
+                angleTitle: selectedAngle.title,
+                angleSummary: selectedAngle.summary,
+                angleKeywords: selectedAngle.keywords,
+                angleSourceStart: selectedAngle.sourceStart,
+                angleSourceEnd: selectedAngle.sourceEnd,
+              }
+            : {}),
         }),
       })
       const body = (await response.json()) as {
@@ -843,15 +1089,19 @@ export function NewsClipsApp({
         }
       )
       if (target === "title") {
+        const fittedTitles = draft.titleOptions.map((option) =>
+          fitTitleToLineLayouts(option, settings.titleCardText, {
+            ...settings.titleCardText,
+            fontSize: settings.titleCardSecondFontSize,
+          })
+        )
+        const currentCompact = project.title.replace(/\s+/g, "")
         const title =
-          draft.titleOptions
-            .map((option) =>
-              fitTitleToLineLayouts(option, settings.titleCardText, {
-                ...settings.titleCardText,
-                fontSize: settings.titleCardSecondFontSize,
-              })
-            )
-            .find((option) => option !== project.title) ?? draft.title
+          fittedTitles.find(
+            (option) => option.replace(/\s+/g, "") !== currentCompact
+          ) ??
+          fittedTitles[0] ??
+          draft.title
         updateProject({
           title,
           titleOptions: draft.titleOptions,
@@ -863,19 +1113,47 @@ export function NewsClipsApp({
         })
         setNote("제목만 다시 작성했습니다.")
       } else if (target === "script") {
+        const keepCta = splitEndCtaFromScript(project.reportScript).cta
+        const newLeadOrBody = splitEndCtaFromScript(draft.reportScript).body
+        const reportScript =
+          keepCta && newLeadOrBody
+            ? `${newLeadOrBody}\n${keepCta}`
+            : draft.reportScript
+        const endCta = keepCta || splitEndCtaFromScript(draft.reportScript).cta
+        const reportScenes = appendEndCtaScenes(
+          draft.reportScenes.filter((scene) => !isEndCtaScene(scene)),
+          endCta,
+          project.source?.id ?? ""
+        )
         setProject({
           ...draft,
           title: project.title,
           titleOptions: project.titleOptions,
+          reportScript,
+          reportScenes,
           introStillTimeSeconds: project.introStillTimeSeconds,
           metadata: {
             ...draft.metadata,
             youtubeTitle: project.metadata.youtubeTitle,
           },
+          previewUrl: project.previewUrl,
+          previewIntroUrl: project.previewIntroUrl,
+          previewLeadUrl: project.previewLeadUrl,
+          previewBodyUrl: project.previewBodyUrl,
+          previewOutroUrl: project.previewOutroUrl,
+          previewSignature: project.previewSignature,
         })
-        setNote("본문과 문장별 화면 연출만 다시 작성했습니다.")
+        setNote("대본과 문장별 화면 연출만 다시 작성했습니다.")
       } else {
-        setProject(draft)
+        setProject({
+          ...draft,
+          previewUrl: project.previewUrl,
+          previewIntroUrl: project.previewIntroUrl,
+          previewLeadUrl: project.previewLeadUrl,
+          previewBodyUrl: project.previewBodyUrl,
+          previewOutroUrl: project.previewOutroUrl,
+          previewSignature: project.previewSignature,
+        })
         setNote("제목, 본문과 화면 연출을 다시 작성했습니다.")
       }
     } catch {
@@ -883,6 +1161,13 @@ export function NewsClipsApp({
     } finally {
       setBusy("")
     }
+  }
+
+  function leaveSideView() {
+    if (!showSettings && !showHistory) return
+    router.push(
+      `/studio/news-clips?channel=${encodeURIComponent(activeProfileId)}`
+    )
   }
 
   function newProject() {
@@ -893,6 +1178,7 @@ export function NewsClipsApp({
     setStep("issue")
     setFurthestStep("issue")
     setNote("")
+    leaveSideView()
   }
 
   function openStep(nextStep: NewsClipStep) {
@@ -900,11 +1186,7 @@ export function NewsClipsApp({
       setProject((current) => balanceProjectSubtitles(current, settings))
     }
     setStep(nextStep)
-    if (showSettings) {
-      router.push(
-        `/studio/news-clips?channel=${encodeURIComponent(activeProfileId)}`
-      )
-    }
+    leaveSideView()
   }
 
   function advanceStep(nextStep: NewsClipStep) {
@@ -1011,9 +1293,7 @@ export function NewsClipsApp({
       status: "complete",
     })
     setProject(sourceProject)
-    setBusy(
-      sourceLabel === "파일" ? "file-source:script" : "url-source:script"
-    )
+    setBusy(sourceLabel === "파일" ? "file-source:script" : "url-source:script")
     await loadAnglesForSource(sourceProject, source, selectedIssue, true)
   }
 
@@ -1055,7 +1335,7 @@ export function NewsClipsApp({
       source: nextSource,
       transcript: body.transcript ?? [],
       detectedSilences: body.detectedSilences ?? [],
-      angleOptions: body.angles,
+      angleOptions: normalizeAngleOptions(body.angles),
       selectedAngleId: "",
     })
     setTranscriptDraft("")
@@ -1065,8 +1345,13 @@ export function NewsClipsApp({
 
   async function runSelectedAngle(angle: NewsAngleOption) {
     if (!project.source) return
+    angleAbortRef.current?.abort()
+    const controller = new AbortController()
+    angleAbortRef.current = controller
+    const signal = controller.signal
     const selectedIssue = project.selectedIssue
     const directSource = selectedIssue?.directSource === true
+    setProject((current) => ({ ...current, selectedAngleId: angle.id }))
     setBusy(`select-angle:${angle.id}:script`)
     setNote("")
     try {
@@ -1087,7 +1372,10 @@ export function NewsClipsApp({
           angleTitle: angle.title,
           angleSummary: angle.summary,
           angleKeywords: angle.keywords,
+          angleSourceStart: angle.sourceStart,
+          angleSourceEnd: angle.sourceEnd,
         }),
+        signal,
       })
       const analysis = (await analyzeResponse.json()) as {
         transcript?: NewsClipProject["transcript"]
@@ -1102,6 +1390,7 @@ export function NewsClipsApp({
         sourceTitle?: string
         message?: string
       }
+      if (signal.aborted) return
       if (
         !analyzeResponse.ok ||
         !analysis.transcript ||
@@ -1130,20 +1419,48 @@ export function NewsClipsApp({
           title: analysis.sourceTitle,
         }
       )
-      setProject({
+      const nextProject: NewsClipProject = {
         ...draft,
         angleOptions: project.angleOptions,
         selectedAngleId: angle.id,
+        // 초안 렌더에서 실측 자막을 다시 잡는다. 기존 미리보기는 새 영상이 올 때까지 유지.
+        subtitles: [],
+        subtitleTimingsLocked: false,
+      }
+      setProject(nextProject)
+      setBusy(`select-angle:${angle.id}:preview`)
+      const created = await generatePreview(nextProject, true, {
+        busyKey: `select-angle:${angle.id}:preview`,
+        clearBusy: false,
+        silent: true,
+        signal,
       })
+      if (signal.aborted) return
       advanceStep("preview")
-      setNote("")
+      if (!created) {
+        setNote("초안 영상을 만들지 못했습니다.")
+      }
     } catch (error) {
+      if (signal.aborted) return
       setNote(
         error instanceof Error ? error.message : "대본을 만들지 못했습니다."
       )
     } finally {
-      setBusy("")
+      if (angleAbortRef.current === controller) {
+        angleAbortRef.current = null
+        setBusy("")
+      }
     }
+  }
+
+  function cancelSelectedAngle() {
+    angleAbortRef.current?.abort()
+    angleAbortRef.current = null
+    setProject((current) => resetAngleSelection(current))
+    setBusy("")
+    setNote("핵심 내용 선택을 취소했습니다.")
+    setStep("angles")
+    setFurthestStep("angles")
   }
 
   async function runAutomaticGeneration(query = "") {
@@ -1188,9 +1505,7 @@ export function NewsClipsApp({
       })
       setProject(issueProject)
       setBusy("auto:sources")
-      setNote(
-        `자동생성 · ‘${selectedIssue.title}’ 관련 원본을 찾고 있습니다.`
-      )
+      setNote(`자동생성 · ‘${selectedIssue.title}’ 관련 원본을 찾고 있습니다.`)
 
       const sourceResponse = await fetch(
         `/api/news-clips/source?profileId=${encodeURIComponent(activeProfileId)}&query=${encodeURIComponent(selectedIssue.searchQuery)}&topic=${encodeURIComponent(selectedIssue.title)}&keywords=${encodeURIComponent(selectedIssue.keywords.join(","))}`,
@@ -1264,7 +1579,8 @@ export function NewsClipsApp({
         throw new Error(anglesBody.message || "핵심 각도를 만들지 못했습니다.")
       }
       ensureRunning()
-      const autoAngle = anglesBody.angles[0]!
+      const autoAngles = normalizeAngleOptions(anglesBody.angles)
+      const autoAngle = autoAngles[0]!
       const angledSource: NewsSource = {
         ...primarySource,
         channel: anglesBody.sourceChannel?.trim() || primarySource.channel,
@@ -1287,6 +1603,8 @@ export function NewsClipsApp({
           angleTitle: autoAngle.title,
           angleSummary: autoAngle.summary,
           angleKeywords: autoAngle.keywords,
+          angleSourceStart: autoAngle.sourceStart,
+          angleSourceEnd: autoAngle.sourceEnd,
         }),
         signal,
       })
@@ -1316,7 +1634,7 @@ export function NewsClipsApp({
         {
           ...sourceProject,
           source: angledSource,
-          angleOptions: anglesBody.angles,
+          angleOptions: autoAngles,
           selectedAngleId: autoAngle.id,
           transcript: anglesBody.transcript ?? [],
           detectedSilences: anglesBody.detectedSilences ?? [],
@@ -1337,7 +1655,7 @@ export function NewsClipsApp({
       )
       setProject({
         ...draft,
-        angleOptions: anglesBody.angles,
+        angleOptions: autoAngles,
         selectedAngleId: autoAngle.id,
       })
       setBusy("auto:preview")
@@ -1404,7 +1722,7 @@ export function NewsClipsApp({
               <span className="truncate">홈</span>
             </span>
           </Button>
-          <div className="flex items-center gap-2 py-2 pl-3 pr-0">
+          <div className="flex items-center gap-2 py-2 pr-0 pl-3">
             <Avatar className="size-10 shrink-0">
               {profile.avatarUrl ? (
                 <Avatar.Image
@@ -1516,7 +1834,7 @@ export function NewsClipsApp({
         </div>
       </aside>
 
-      <ScrollShadow className="h-svh min-h-0 flex-1 overflow-y-auto">
+      <div className="h-svh min-h-0 flex-1 overflow-y-auto">
         <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-6">
           <div className="sticky top-0 z-30 -mx-6 -mt-6 flex min-h-14 items-center justify-end gap-3 border-b border-separator bg-background/95 px-6 py-3 backdrop-blur">
             {busy.startsWith("auto:") ? (
@@ -1524,19 +1842,25 @@ export function NewsClipsApp({
                 {automaticModeStatus(busy)} · OFF로 중지
               </span>
             ) : null}
-            <Switch
-              isSelected={autoMode}
-              isDisabled={busy !== "" && !busy.startsWith("auto:")}
-              onChange={toggleAutoMode}
-              aria-label="자동생성 모드"
-            >
-              <Switch.Content>
-                <Switch.Control>
-                  <Switch.Thumb />
-                </Switch.Control>
-                자동생성
-              </Switch.Content>
-            </Switch>
+            {project.productionMode === "report" ? (
+              <Switch
+                isSelected={autoMode}
+                isDisabled={busy !== "" && !busy.startsWith("auto:")}
+                onChange={toggleAutoMode}
+                aria-label="자동생성 모드"
+              >
+                <Switch.Content>
+                  <Switch.Control>
+                    <Switch.Thumb />
+                  </Switch.Control>
+                  자동생성
+                </Switch.Content>
+              </Switch>
+            ) : (
+              <span className="rounded-full bg-default px-3 py-1.5 text-xs font-medium">
+                빌드업형
+              </span>
+            )}
             <Button
               size="sm"
               variant="outline"
@@ -1586,6 +1910,7 @@ export function NewsClipsApp({
               note={note}
               onBack={() => openStep("issue")}
               onSelect={(angle) => void runSelectedAngle(angle)}
+              onCancelSelection={cancelSelectedAngle}
             />
           ) : step === "issue" || step === "source" ? (
             <SourceStep
@@ -1655,11 +1980,14 @@ export function NewsClipsApp({
             />
           ) : (
             <ReviewStep
-              mode={step as Exclude<NewsClipStep, "issue" | "source" | "angles">}
+              mode={
+                step as Exclude<NewsClipStep, "issue" | "source" | "angles">
+              }
               project={project}
               settings={settings}
               note={note}
               busy={busy}
+              previewProgress={previewProgress}
               onBack={() => openStep(previousReviewStep(step))}
               onNext={() => advanceStep(nextReviewStep(step))}
               onProject={updateProject}
@@ -1669,6 +1997,7 @@ export function NewsClipsApp({
               onPreview={(force, draft) =>
                 generatePreview(draft ?? project, force)
               }
+              onCancelPreview={cancelPreview}
               onReselect={(target) => reselectCandidate(target)}
               onFinalized={(finalizedProject) =>
                 persistHistory(finalizedProject, "final", "final", true)
@@ -1676,7 +2005,7 @@ export function NewsClipsApp({
             />
           )}
         </main>
-      </ScrollShadow>
+      </div>
     </div>
   )
 }
@@ -1765,12 +2094,16 @@ async function renderAutomaticProject(
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ project, settings }),
+    body: JSON.stringify({ project, settings, force: true }),
     signal,
   })
   const body = (await response.json()) as {
     message?: string
     previewUrl?: string
+    previewIntroUrl?: string
+    previewLeadUrl?: string
+    previewBodyUrl?: string
+    previewOutroUrl?: string
     outputUrl?: string
     thumbnailUrl?: string
     signature?: string
@@ -1787,8 +2120,15 @@ async function renderAutomaticProject(
           : "최종 영상을 만들지 못했습니다.")
     )
   }
+  const partUrls = {
+    previewIntroUrl: body.previewIntroUrl ?? "",
+    previewLeadUrl: body.previewLeadUrl ?? "",
+    previewBodyUrl: body.previewBodyUrl ?? "",
+    previewOutroUrl: body.previewOutroUrl ?? "",
+  }
   const common = {
     ...project,
+    ...partUrls,
     renderSettingsKey: newsRenderSettingsKey(settings),
     titleCardDurationSeconds:
       body.titleCardDurationSeconds ?? project.titleCardDurationSeconds,
@@ -1802,12 +2142,17 @@ async function renderAutomaticProject(
         ...common,
         previewUrl: body.previewUrl ?? "",
         previewSignature: body.signature ?? "",
+        previewRevision: project.editorialRevision,
+        finalRevision: 0,
+        subtitleTimingsLocked: true,
       }
     : {
         ...common,
         outputUrl: body.outputUrl ?? "",
         thumbnailUrl: body.thumbnailUrl ?? "",
         renderSignature: body.signature ?? "",
+        finalRevision: project.editorialRevision,
+        subtitleTimingsLocked: true,
       }
 }
 
@@ -1833,12 +2178,53 @@ function balanceProjectSubtitles(
     updatedAt: new Date().toISOString(),
     renderSignature: "",
     outputUrl: "",
-    previewSignature: "",
+    renderSettingsKey: settingsChanged ? "" : project.renderSettingsKey,
+    thumbnailUrl: "",
+    youtubeVideoId: "",
+    youtubeUploadUrl: "",
+    previewUrl: project.previewUrl,
+    previewIntroUrl: project.previewIntroUrl,
+    previewLeadUrl: project.previewLeadUrl,
+    previewBodyUrl: project.previewBodyUrl,
+    previewOutroUrl: project.previewOutroUrl,
+    previewSignature: project.previewSignature,
+  }
+}
+
+function resetAngleSelection(project: NewsClipProject): NewsClipProject {
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    editorialRevision: project.editorialRevision + 1,
+    previewRevision: 0,
+    finalRevision: 0,
+    selectedAngleId: "",
+    candidates: [],
+    selectedCandidateId: "",
+    title: "",
+    titleOptions: [],
+    reportScript: "",
+    reportScenes: [],
+    removedRanges: [],
+    keepRanges: [],
+    subtitles: [],
+    subtitleTimingsLocked: false,
+    introStillTimeSeconds: null,
+    titleCardDurationSeconds: 0,
+    outputDurationSeconds: 0,
+    renderSignature: "",
+    outputUrl: "",
     previewUrl: "",
+    previewIntroUrl: "",
+    previewLeadUrl: "",
+    previewBodyUrl: "",
+    previewOutroUrl: "",
+    previewSignature: "",
     renderSettingsKey: "",
     thumbnailUrl: "",
     youtubeVideoId: "",
     youtubeUploadUrl: "",
+    metadata: { youtubeTitle: "", description: "", tags: [] },
   }
 }
 
@@ -2129,7 +2515,7 @@ function NewsChannelPicker({
 }
 
 function storageKey(profileId: string) {
-  return `shorts-factory.news-clips.${profileId}`
+  return `shorts-factory.news-clips.buildup2.${profileId}`
 }
 
 function refreshMediaUrl(url: string) {
@@ -2149,6 +2535,31 @@ function hasSavableProgress(project: NewsClipProject) {
   )
 }
 
+function migrateLegacyBuildupScenes(scenes: NewsReportScene[]) {
+  return scenes.map((scene) => {
+    if (scene.id === "buildup-teaser") {
+      return { ...scene, id: "buildup2-lead" }
+    }
+    if (scene.id === "buildup-highlight") {
+      return {
+        ...scene,
+        id: "buildup2-quote",
+        narration: "",
+        visual: "quote" as const,
+      }
+    }
+    if (scene.id.startsWith("buildup-highlight-cut-")) {
+      return {
+        ...scene,
+        id: scene.id.replace("buildup-highlight-cut-", "buildup2-quote-cut-"),
+        narration: "",
+        visual: "quote" as const,
+      }
+    }
+    return scene
+  })
+}
+
 function normalizeSavedNewsProject(
   saved: NewsClipProject,
   profileId: string
@@ -2163,29 +2574,32 @@ function normalizeSavedNewsProject(
     .map((cue) => cue.text.trim())
     .filter(Boolean)
     .join("\n")
-  const reportScript = ensureReportEndCta(
+  let reportScript = ensureReportEndCta(
     savedReportScript,
     saved.title,
     saved.selectedIssue?.keywords,
     legacyEndCtaText
   )
-  const isBuildup = saved.productionMode === "buildup"
+  const isBuildup2 =
+    saved.productionMode === "buildup2" ||
+    (saved.productionMode as string) === "buildup"
   const savedReportScenes = Array.isArray(saved.reportScenes)
     ? saved.reportScenes.map((scene): NewsReportScene => {
         const isHighlight =
+          scene.id === "buildup2-quote" ||
           scene.id === "buildup-highlight" ||
+          scene.id.startsWith("buildup2-quote") ||
           scene.id.startsWith("buildup-highlight")
         return {
           ...scene,
           // 빌드업 하이라이트는 항상 원본 음성. 잘못 TTS로 남은 대본은 비운다.
           visual:
-            isBuildup && isHighlight
+            isBuildup2 && isHighlight
               ? "quote"
               : scene.visual === "quote"
                 ? "quote"
                 : "source",
-          narration:
-            isBuildup && isHighlight ? "" : scene.narration,
+          narration: isBuildup2 && isHighlight ? "" : scene.narration,
           sourceId:
             typeof scene.sourceId === "string"
               ? scene.sourceId
@@ -2198,8 +2612,8 @@ function normalizeSavedNewsProject(
   )
   let reportScenes =
     reportScript !== savedReportScript && selectedCandidate
-      ? isBuildup
-        ? buildBuildupScenes(
+      ? isBuildup2
+        ? buildBuildup2Scenes(
             splitEndCtaFromScript(reportScript).body || reportScript,
             selectedCandidate.sourceStart,
             selectedCandidate.sourceEnd,
@@ -2236,15 +2650,17 @@ function normalizeSavedNewsProject(
       )
     }
   }
-  if (isBuildup && reportScenes.length) {
-    reportScenes = collapseBuildupHighlightCuts(reportScenes)
+  if (isBuildup2 && reportScenes.length) {
+    reportScenes = collapseBuildup2HighlightCuts(
+      migrateLegacyBuildupScenes(reportScenes)
+    )
     const highlight = reportScenes.find(
-      (scene) => scene.id === "buildup-highlight"
+      (scene) => scene.id === "buildup2-quote"
     )
     if (highlight) {
       // 기존 기준: 티저 B-roll = 하이라이트 시작 ~3초
       reportScenes = reportScenes.map((scene) =>
-        scene.id === "buildup-teaser"
+        scene.id === "buildup2-lead"
           ? {
               ...scene,
               sourceStart: highlight.sourceStart,
@@ -2262,7 +2678,7 @@ function normalizeSavedNewsProject(
     ...fallback,
     ...saved,
     profileId,
-    productionMode: isBuildup ? ("buildup" as const) : ("report" as const),
+    productionMode: isBuildup2 ? ("buildup2" as const) : ("report" as const),
     reportScript,
     reportScenes,
     transcript: Array.isArray(saved.transcript) ? saved.transcript : [],
@@ -2276,6 +2692,7 @@ function normalizeSavedNewsProject(
     : { project: draftForPrepare, reason: "report-scenes-required" }
   if (!prepared.reason) {
     reportScenes = prepared.project.reportScenes
+    reportScript = prepared.project.reportScript
   }
   const rebuiltSubtitles = prepared.reason
     ? reportScenes.length
@@ -2287,7 +2704,7 @@ function normalizeSavedNewsProject(
         )
       : saved.subtitles
     : prepared.project.subtitles
-  const subtitles = isBuildup
+  const subtitles = isBuildup2
     ? rebuiltSubtitles
     : reportScript !== savedReportScript && legacyEndCtaCues.length
       ? migrateLegacyEndCtaCues(saved.subtitles, reportScenes)
@@ -2296,8 +2713,7 @@ function normalizeSavedNewsProject(
         : reportScenes.some((scene) => isEndCtaScene(scene)) &&
             Array.isArray(saved.subtitles) &&
             !saved.subtitles.some(
-              (cue) =>
-                cue.sceneId === "end-cta" || cue.id.startsWith("end-cta")
+              (cue) => cue.sceneId === "end-cta" || cue.id.startsWith("end-cta")
             )
           ? rebuiltSubtitles
           : saved.subtitles
@@ -2306,12 +2722,20 @@ function normalizeSavedNewsProject(
     ...fallback,
     ...saved,
     profileId,
-    productionMode:
-      saved.productionMode === "buildup" ? "buildup" : "report",
+    productionMode: isBuildup2 ? "buildup2" : "report",
+    editorialRevision: Number.isFinite(saved.editorialRevision)
+      ? Math.max(1, Math.floor(saved.editorialRevision))
+      : 1,
+    previewRevision: Number.isFinite(saved.previewRevision)
+      ? Math.max(0, Math.floor(saved.previewRevision))
+      : 0,
+    finalRevision: Number.isFinite(saved.finalRevision)
+      ? Math.max(0, Math.floor(saved.finalRevision))
+      : 0,
     supportingSources: Array.isArray(saved.supportingSources)
       ? saved.supportingSources
       : [],
-    angleOptions: Array.isArray(saved.angleOptions) ? saved.angleOptions : [],
+    angleOptions: normalizeAngleOptions(saved.angleOptions),
     selectedAngleId:
       typeof saved.selectedAngleId === "string" ? saved.selectedAngleId : "",
     reportScript,
@@ -2321,6 +2745,11 @@ function normalizeSavedNewsProject(
         : "",
     reportScenes,
     subtitles: Array.isArray(subtitles) ? subtitles : [],
+    subtitleTimingsLocked:
+      saved.subtitleTimingsLocked === true ||
+      (Array.isArray(subtitles) &&
+        subtitles.length > 0 &&
+        Boolean(saved.previewUrl || saved.outputUrl)),
     detectedSilences: Array.isArray(saved.detectedSilences)
       ? saved.detectedSilences
       : [],
@@ -2338,6 +2767,14 @@ function normalizeSavedNewsProject(
     titleCardDurationSeconds: Number.isFinite(saved.titleCardDurationSeconds)
       ? saved.titleCardDurationSeconds
       : 0,
+    previewIntroUrl:
+      typeof saved.previewIntroUrl === "string" ? saved.previewIntroUrl : "",
+    previewLeadUrl:
+      typeof saved.previewLeadUrl === "string" ? saved.previewLeadUrl : "",
+    previewBodyUrl:
+      typeof saved.previewBodyUrl === "string" ? saved.previewBodyUrl : "",
+    previewOutroUrl:
+      typeof saved.previewOutroUrl === "string" ? saved.previewOutroUrl : "",
     renderSettingsKey:
       typeof saved.renderSettingsKey === "string"
         ? saved.renderSettingsKey

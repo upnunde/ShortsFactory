@@ -14,6 +14,9 @@ import {
   quoteTranscriptAlignment,
   reportCaptionPhrases,
   reportSubtitles,
+  subtitleCuesFromSpeechAlignment,
+  applySubtitleTimingForRender,
+  mergeEditedSubtitleText,
   retimeSubtitleCuesToScenes,
 } from "./report.ts"
 import type { NewsReportScene, TranscriptSegment } from "./types.ts"
@@ -160,12 +163,12 @@ test("직접 발언 장면은 TTS 분량이 아닌 원본 구간 길이를 사�
     sourceStart: 12.25,
     sourceEnd: 18.75,
   }
-  // 원본 6.5초 구간은 기본 배속(1.2x) 적용 후 출력 길이로 잡힌다.
-  assert.equal(estimateReportScenesDuration([scenes[0]]), 5.417)
-  const subtitles = reportSubtitles(scenes, [5.417, 3.25])
-  assert.equal(subtitles[0].end, 5.417)
-  assert.equal(subtitles[1].start, 5.417)
-  assert.equal(subtitles[1].end, 8.667)
+  // 원본 6.5초 구간은 원배속 그대로 출력 길이가 된다.
+  assert.equal(estimateReportScenesDuration([scenes[0]]), 6.5)
+  const subtitles = reportSubtitles(scenes, [6.5, 3.25])
+  assert.equal(subtitles[0].end, 6.5)
+  assert.equal(subtitles[1].start, 6.5)
+  assert.equal(subtitles[1].end, 9.75)
 })
 
 test("원문과 발화 길이가 맞는 직접 발언은 원본 음성을 유지한다", () => {
@@ -243,7 +246,7 @@ test("직접 발언 자막을 원본 자막 타임코드에 맞춘다", () => {
 
 test("겹친 전사 단어 타임스탬프를 섞지 않고 문장 순서를 유지한다", () => {
   const scene: NewsReportScene = {
-    id: "buildup-highlight",
+    id: "buildup2-quote",
     narration: "",
     visual: "quote",
     sourceStart: 80,
@@ -355,7 +358,7 @@ test("일반 자료 화면은 직접 발언 검증과 관계없이 유지한다"
 
 test("무음컷으로 나눈 빈 나레이션 직접 발언은 원본 음성 장면으로 유지한다", () => {
   const scene: NewsReportScene = {
-    id: "buildup-highlight-cut-2",
+    id: "buildup2-quote-cut-2",
     narration: "",
     visual: "quote",
     sourceId: "primary",
@@ -364,15 +367,14 @@ test("무음컷으로 나눈 빈 나레이션 직접 발언은 원본 음성 장
   }
 
   assert.equal(
-    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0]
-      .visual,
+    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0].visual,
     "quote"
   )
 })
 
 test("무음컷 첫 조각에 원문 대본이 남아 있어도 TTS로 바꾸지 않는다", () => {
   const scene: NewsReportScene = {
-    id: "buildup-highlight-cut-1",
+    id: "buildup2-quote-cut-1",
     narration: "현직 대통령이 체포되어 갔습니다.",
     visual: "quote",
     sourceId: "primary",
@@ -381,8 +383,7 @@ test("무음컷 첫 조각에 원문 대본이 남아 있어도 TTS로 바꾸지
   }
 
   assert.equal(
-    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0]
-      .visual,
+    normalizeQuoteScenes([scene], { primary: transcript }, "primary")[0].visual,
     "quote"
   )
 })
@@ -421,7 +422,126 @@ test("실제 장면별 오디오 길이에 맞춰 자막 싱크를 다시 계산
   )
 })
 
-test("Typecast 단어 타임스탬프를 자막 경계에 우선 적용한다", () => {
+test("잠긴 자막은 음성 실측 타임코드를 쓰고 오타 문구만 반영한다", () => {
+  const scenes = [
+    {
+      id: "scene-1",
+      narration: "첫 장면입니다.",
+      visual: "source" as const,
+      sourceId: "source-1",
+      sourceStart: 0,
+      sourceEnd: 5,
+      crop: { x: 50, y: 50, zoom: 1.02, faceTracking: false },
+    },
+  ]
+  const edited = [
+    {
+      id: "cue-1",
+      sceneId: "scene-1",
+      start: 1.2,
+      end: 3.4,
+      text: "오타 수정 후",
+      emphasis: ["수정"],
+      emphasisColor: "yellow" as const,
+      edited: true,
+    },
+  ]
+  const timedScenes = [{ ...scenes[0], start: 0, end: 5 }]
+  const rendered = applySubtitleTimingForRender(edited, scenes, timedScenes, {
+    lockTimings: true,
+  })
+  // 락이어도 타임코드는 이번 렌더 실측, 문구·강조만 편집본.
+  assert.equal(rendered[0].start, 0)
+  assert.equal(rendered[0].end, 5)
+  assert.equal(rendered[0].text, "오타 수정 후")
+  assert.deepEqual(rendered[0].emphasis, ["수정"])
+})
+
+test("편집 문구 병합은 id·장면 순서로 맞춘다", () => {
+  const timed = [
+    {
+      id: "a",
+      sceneId: "s1",
+      start: 0,
+      end: 1,
+      text: "원본A",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "b",
+      sceneId: "s1",
+      start: 1,
+      end: 2,
+      text: "원본B",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const edited = [
+    {
+      id: "a",
+      sceneId: "s1",
+      start: 9,
+      end: 9.5,
+      text: "수정A",
+      emphasis: ["A"],
+      emphasisColor: "yellow" as const,
+      edited: true,
+    },
+    {
+      id: "other",
+      sceneId: "s1",
+      start: 9.5,
+      end: 10,
+      text: "수정B",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+      edited: true,
+    },
+  ]
+  const merged = mergeEditedSubtitleText(timed, edited)
+  assert.equal(merged[0].text, "수정A")
+  assert.equal(merged[0].start, 0)
+  assert.equal(merged[0].edited, true)
+  assert.equal(merged[1].text, "수정B")
+  assert.equal(merged[1].start, 1)
+  assert.equal(merged[1].edited, true)
+})
+
+test("락된 자막은 문구만 덮고 start/end를 유지한다", () => {
+  const timed = [
+    {
+      id: "a",
+      sceneId: "s1",
+      start: 0,
+      end: 1,
+      text: "새타이밍",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const edited = [
+    {
+      id: "a",
+      sceneId: "s1",
+      start: 0.4,
+      end: 1.2,
+      text: "오타수정",
+      emphasis: ["오타"],
+      emphasisColor: "yellow" as const,
+      edited: true,
+    },
+  ]
+  const merged = mergeEditedSubtitleText(timed, edited, { preserveTimes: true })
+  assert.equal(merged[0]?.text, "오타수정")
+  assert.equal(merged[0]?.start, 0.4)
+  assert.equal(merged[0]?.end, 1.2)
+  assert.deepEqual(merged[0]?.emphasis, ["오타"])
+  assert.equal(merged[0]?.edited, true)
+})
+
+test("음성 단어 타임스탬프는 읽기 좋은 자막 칸으로 묶는다", () => {
   const scenes = buildReportScenes(
     "첫 장면은 두 자막으로 설명합니다.",
     transcript,
@@ -450,10 +570,48 @@ test("Typecast 단어 타임스탬프를 자막 경계에 우선 적용한다", 
 
   const retimed = retimeSubtitleCuesToScenes(cues, scenes, timedScenes)
 
-  assert.equal(retimed[0].start, 5)
-  assert.equal(retimed[0].end, 6.2)
-  assert.equal(retimed[1].start, 6.2)
-  assert.equal(retimed[1].end, 8)
+  // 단어 5개가 아니라 호흡 단위로 묶인다.
+  assert.ok(retimed.length >= 1 && retimed.length <= 3)
+  assert.equal(retimed[0].start, 5.05)
+  assert.match(retimed[0].text, /첫/)
+  assert.ok(retimed[0].text.includes(" "))
+  assert.ok(retimed.at(-1)!.end <= 8)
+  assert.ok(retimed.every((cue) => cue.id.startsWith("speech-caption-")))
+})
+
+test("원본 음성 자막은 글자 수가 아니라 한국어 의미 단위에서 전환한다", () => {
+  const words =
+    "인구 감소 지역 주민에게 , 월 15만 원씩 지역 상품권을 주는 농어촌 기본소득 사업이 내년부터 2년간 시범 시행됩니다 .".split(
+      " "
+    )
+  const cues = subtitleCuesFromSpeechAlignment(
+    {
+      id: "buildup2-quote",
+      narration: "",
+      visual: "quote",
+      sourceStart: 0,
+      sourceEnd: 10,
+      start: 0,
+      end: 10,
+      alignment: words.map((text, index) => ({
+        text,
+        start: index * 0.35,
+        end: index * 0.35 + 0.3,
+      })),
+    },
+    { maxCharacters: 20 }
+  )
+
+  assert.deepEqual(
+    cues.map((cue) => cue.text),
+    [
+      "인구 감소 지역 주민에게,",
+      "월 15만 원씩 지역 상품권을 주는",
+      "농어촌 기본소득 사업이",
+      "내년부터 2년간 시범 시행됩니다.",
+    ]
+  )
+  assert.ok(cues.every((cue) => !/^(?:만|은|는|이|가|을|를)\s/u.test(cue.text)))
 })
 
 test("장면 정보가 없는 기존 자막도 문장 순서로 장면 싱크를 복원한다", () => {
@@ -534,14 +692,30 @@ test("댓글 유도 문구는 본편 다음 별도 장면으로 분리한다", (
   assert.match(script, /댓글로 남겨줘\.$/)
   assert.equal(scenes.at(-1)?.id, "end-cta")
   assert.match(scenes.at(-1)?.narration ?? "", /댓글/)
-  assert.ok(
-    scenes
-      .slice(0, -1)
-      .every((scene) => !/댓글/.test(scene.narration))
-  )
+  assert.ok(scenes.slice(0, -1).every((scene) => !/댓글/.test(scene.narration)))
   assert.match(subtitles.at(-1)?.text ?? "", /댓글/)
   assert.ok(subtitles.at(-1)?.id.startsWith("end-cta"))
   assert.equal(ensureReportEndCta(script, "다른 제목"), script)
+})
+
+test("문장부호 없는 서두와 마무리 CTA를 줄 단위로 분리한다", () => {
+  const script = [
+    "예산은 늘었다는데, 현장 얘기는 정반대야",
+    "조작기소에 대해 어떻게 생각해?",
+    "댓글로 남겨줘.",
+  ].join("\n")
+  const { body, cta } = splitEndCtaFromScript(script)
+  assert.equal(body, "예산은 늘었다는데, 현장 얘기는 정반대야")
+  assert.equal(cta, "조작기소에 대해 어떻게 생각해?\n댓글로 남겨줘.")
+  assert.doesNotMatch(cta, /예산은/)
+})
+
+test("마무리 장면에 서두가 섞여 있어도 CTA만 골라낸다", () => {
+  const polluted =
+    "이 말, 앞뒤가 안 맞아.\n김계리의 의견에 어떻게 생각해?\n댓글로 남겨줘."
+  const { body, cta } = splitEndCtaFromScript(polluted)
+  assert.equal(body, "이 말, 앞뒤가 안 맞아.")
+  assert.equal(cta, "김계리의 의견에 어떻게 생각해?\n댓글로 남겨줘.")
 })
 
 test("이미 있는 마무리 장면의 구간·크롭은 다시 붙일 때 유지한다", () => {
@@ -558,7 +732,7 @@ test("이미 있는 마무리 장면의 구간·크롭은 다시 붙일 때 유�
           ...scene,
           sourceStart: 12,
           sourceEnd: 18,
-          crop: { x: 40, y: 30, zoom: 1.25 },
+          crop: { x: 40, y: 30, zoom: 1.25, faceTracking: false },
         }
       : scene
   )
@@ -568,7 +742,12 @@ test("이미 있는 마무리 장면의 구간·크롭은 다시 붙일 때 유�
   assert.equal(cta?.id, "end-cta")
   assert.equal(cta?.sourceStart, 12)
   assert.equal(cta?.sourceEnd, 18)
-  assert.deepEqual(cta?.crop, { x: 40, y: 30, zoom: 1.25 })
+  assert.deepEqual(cta?.crop, {
+    x: 40,
+    y: 30,
+    zoom: 1.25,
+    faceTracking: false,
+  })
 })
 
 test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않는다", () => {
@@ -598,14 +777,14 @@ test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않�
   ]
   const scenes = [
     {
-      id: "buildup-teaser",
+      id: "buildup2-lead",
       narration: phrases.slice(0, 3).join("\n"),
       visual: "source" as const,
       sourceStart: 10,
       sourceEnd: 13,
     },
     {
-      id: "buildup-highlight",
+      id: "buildup2-quote",
       narration: "",
       visual: "quote" as const,
       sourceStart: 20,
@@ -619,10 +798,13 @@ test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않�
       sourceEnd: 70,
     },
   ]
-  const subtitles = reportSubtitles(scenes, [9, 50, 4], phrases, quoteTranscript)
-  const quoteSubs = subtitles.filter(
-    (cue) => cue.sceneId === "buildup-highlight"
+  const subtitles = reportSubtitles(
+    scenes,
+    [9, 50, 4],
+    phrases,
+    quoteTranscript
   )
+  const quoteSubs = subtitles.filter((cue) => cue.sceneId === "buildup2-quote")
   const ctaSubs = subtitles.filter((cue) => cue.sceneId === "end-cta")
 
   assert.ok(quoteSubs.every((cue) => !/댓글|어떻게 생각/.test(cue.text)))

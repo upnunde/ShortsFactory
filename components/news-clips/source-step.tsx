@@ -31,7 +31,7 @@ const field =
 export function NewsClipSourceStep({
   mode,
   profileId,
-  productionMode = "report",
+  productionMode = "buildup2",
   selectedIssue,
   source,
   transcript,
@@ -56,7 +56,7 @@ export function NewsClipSourceStep({
 }: {
   mode: "issue" | "source"
   profileId: string
-  productionMode?: "report" | "buildup"
+  productionMode?: "report" | "buildup2"
   selectedIssue: RecommendedNewsIssue | null
   source: NewsSource | null
   transcript: string
@@ -65,7 +65,7 @@ export function NewsClipSourceStep({
   note: string
   busy: string
   autoMode: boolean
-  onProductionMode: (mode: "report" | "buildup") => void
+  onProductionMode: (mode: "report" | "buildup2") => void
   onTranscript: (value: string) => void
   onIssueSearch: (patch: Partial<NewsIssueSearchState>) => void
   onSourceSearch: (patch: Partial<NewsSourceSearchState>) => void
@@ -102,10 +102,13 @@ export function NewsClipSourceStep({
   const [subtitle, setSubtitle] = useState<File | null>(null)
   const directVideoInputRef = useRef<HTMLInputElement>(null)
   const directYoutubeUrl = extractYouTubeUrl(query)
+  const isBuildup2 = productionMode === "buildup2"
 
   function runIssueAction() {
     if (directYoutubeUrl) {
       onYoutubeUrl(directYoutubeUrl)
+    } else if (isBuildup2) {
+      setIssueMessage("YouTube URL을 입력하거나 영상 파일을 추가해 주세요.")
     } else if (autoMode) {
       onAutomaticGeneration(query)
     } else {
@@ -412,21 +415,21 @@ export function NewsClipSourceStep({
     <>
       {mode === "issue" ? (
         <>
-          <Heading title="이슈 고르기" />
+          <Heading title={isBuildup2 ? "원본 추가" : "이슈 고르기"} />
           <Card>
             <Card.Content className="flex flex-col gap-5">
               <SegmentedTabs
                 ariaLabel="제작 형식"
                 className="w-fit"
                 equalWidth={false}
-                value={productionMode === "buildup" ? "buildup" : "report"}
+                value={isBuildup2 ? "buildup2" : "report"}
                 onChange={(modeId) => {
                   if (busy.startsWith("auto:")) return
                   onProductionMode(modeId)
                 }}
                 items={[
                   {
-                    id: "buildup",
+                    id: "buildup2",
                     label: "빌드업형",
                     disabled: busy.startsWith("auto:"),
                   },
@@ -437,7 +440,9 @@ export function NewsClipSourceStep({
                   },
                 ]}
               />
-              <Card.Title>추천 이슈</Card.Title>
+              <Card.Title>
+                {isBuildup2 ? "분석할 원본" : "추천 이슈"}
+              </Card.Title>
             </Card.Content>
             <Card.Content className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
@@ -452,7 +457,11 @@ export function NewsClipSourceStep({
                     }
                   }}
                   className={`${field} min-w-0 flex-1`}
-                  placeholder="주제 또는 YouTube URL 입력"
+                  placeholder={
+                    isBuildup2
+                      ? "YouTube URL 입력"
+                      : "주제 또는 YouTube URL 입력"
+                  }
                 />
                 <input
                   ref={directVideoInputRef}
@@ -497,13 +506,15 @@ export function NewsClipSourceStep({
                       "auto",
                     ])}
                     label={
-                      directYoutubeUrl
-                        ? "URL로 시작"
-                        : autoMode
-                          ? "이슈 자동 검색"
-                          : query.trim()
-                            ? "이슈 검색"
-                            : "이슈 자동 검색"
+                      isBuildup2
+                        ? "원본 분석"
+                        : directYoutubeUrl
+                          ? "URL로 시작"
+                          : autoMode
+                            ? "이슈 자동 검색"
+                            : query.trim()
+                              ? "이슈 검색"
+                              : "이슈 자동 검색"
                     }
                     loadingLabel={
                       busy === "url-source:script"
@@ -519,7 +530,7 @@ export function NewsClipSourceStep({
                   />
                 </Button>
               </div>
-              {autoMode && !directYoutubeUrl ? (
+              {!isBuildup2 && autoMode && !directYoutubeUrl ? (
                 <p className="text-xs leading-5 text-muted">
                   ON 상태에서는 이슈 자동 검색 후 원본 선택부터 최종 렌더링까지
                   이어서 진행합니다.
@@ -536,12 +547,10 @@ export function NewsClipSourceStep({
                 </div>
               ) : null}
             </Card.Content>
-            {issues.length ? (
+            {!isBuildup2 && issues.length ? (
               <Card.Content className="grid gap-3 border-t border-separator pt-4 md:grid-cols-2">
                 {issues.map((issue) => {
-                  const selecting = busy.startsWith(
-                    `select-issue:${issue.id}`
-                  )
+                  const selecting = busy.startsWith(`select-issue:${issue.id}`)
                   return (
                     <div
                       key={issue.id}
@@ -918,9 +927,7 @@ export function NewsClipSourceStep({
                   </label>
                   <div className="flex flex-wrap justify-end gap-2">
                     <Button
-                      isDisabled={
-                        !video || buttonBusyDisabled(busy, "upload")
-                      }
+                      isDisabled={!video || buttonBusyDisabled(busy, "upload")}
                       onPress={() => void upload()}
                     >
                       <LoadingButtonLabel

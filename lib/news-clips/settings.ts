@@ -96,7 +96,7 @@ export function normalizeNewsClipSettings(
       typecastVoices
     ),
     typecastVoices,
-    titleVoiceRate: number(raw.titleVoiceRate, -15, 8, -4),
+    titleVoiceRate: number(raw.titleVoiceRate, -15, 8, 0),
     titleVolume: number(raw.titleVolume, 0, 2, 1),
     sourceVolume: number(raw.sourceVolume, 0, 2, 1),
     quoteVolume: number(raw.quoteVolume, 0, 2, 1),

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 
-import { Button, ScrollShadow, Separator } from "@heroui/react"
+import { Button, Separator } from "@heroui/react"
 import { ArrowLeftRight, Home } from "lucide-react"
 import { ChannelHub } from "@/components/studio/channel-hub"
 import { DirectionStep } from "@/components/studio/direction-step"
@@ -1078,7 +1078,7 @@ export function StudioApp({
         </div>
       </aside>
 
-      <ScrollShadow className="h-svh min-h-0 flex-1 overflow-y-auto">
+      <div className="h-svh min-h-0 flex-1 overflow-y-auto">
         <main className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-6">
           {showHistory ? (
             <HistoryPanel
@@ -1252,7 +1252,7 @@ export function StudioApp({
             </>
           )}
         </main>
-      </ScrollShadow>
+      </div>
     </div>
   )
 }

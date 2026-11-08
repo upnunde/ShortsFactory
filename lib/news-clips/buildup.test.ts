@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
-  collapseBuildupHighlightCuts,
+  collapseBuildup2HighlightCuts,
   densifySourceKeeps,
   expandScenesWithSilenceCuts,
   keepRangesInside,
@@ -28,7 +28,7 @@ test("원본 음성 quote는 무음 기준으로 장면을 쪼개지 않는다",
   const scenes = expandScenesWithSilenceCuts(
     [
       {
-        id: "buildup-highlight",
+        id: "buildup2-quote",
         narration: "원본 발언",
         visual: "quote",
         sourceStart: 10,
@@ -38,7 +38,7 @@ test("원본 음성 quote는 무음 기준으로 장면을 쪼개지 않는다",
     [{ id: "s1", start: 12, end: 15, reason: "silence", restored: false }]
   )
   assert.equal(scenes.length, 1)
-  assert.equal(scenes[0]?.id, "buildup-highlight")
+  assert.equal(scenes[0]?.id, "buildup2-quote")
   assert.equal(scenes[0]?.sourceStart, 10)
   assert.equal(scenes[0]?.sourceEnd, 20)
 })
@@ -60,23 +60,23 @@ test("자료 화면은 TTS 길이에 맞춰 무음을 건너뛴 keep을 모은�
 })
 
 test("겹친 하이라이트 컷을 한 장면으로 합친다", () => {
-  const collapsed = collapseBuildupHighlightCuts([
+  const collapsed = collapseBuildup2HighlightCuts([
     {
-      id: "buildup-teaser",
+      id: "buildup2-lead",
       narration: "들어봐",
       visual: "source",
       sourceStart: 100,
       sourceEnd: 103,
     },
     {
-      id: "buildup-highlight-cut-1",
+      id: "buildup2-quote-cut-1",
       narration: "",
       visual: "quote",
       sourceStart: 100,
       sourceEnd: 105,
     },
     {
-      id: "buildup-highlight-cut-2",
+      id: "buildup2-quote-cut-2",
       narration: "",
       visual: "quote",
       sourceStart: 100,
@@ -91,7 +91,7 @@ test("겹친 하이라이트 컷을 한 장면으로 합친다", () => {
     },
   ])
   assert.equal(collapsed.length, 3)
-  assert.equal(collapsed[1]?.id, "buildup-highlight")
+  assert.equal(collapsed[1]?.id, "buildup2-quote")
   assert.equal(collapsed[1]?.sourceStart, 100)
   assert.equal(collapsed[1]?.sourceEnd, 112)
 })

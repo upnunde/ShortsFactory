@@ -3,6 +3,7 @@ import test from "node:test"
 
 import {
   buildCandidateWindows,
+  buildCompleteUtteranceCandidates,
   detectSilenceRanges,
   editedDuration,
   expandSourceRange,
@@ -62,6 +63,47 @@ test("전체 녹취에서 중복을 줄인 후보 3개를 만든다", () => {
     candidates.every((candidate) => candidate.titleOptions.length === 3)
   )
   assert.ok(candidates[0].scores.total >= 0)
+})
+
+test("빌드업형 후보는 시간 목표가 아니라 완결 발화 단위로 만든다", () => {
+  const segments: TranscriptSegment[] = [
+    {
+      id: "a",
+      text: "정부 설명은 여기서",
+      start: 0,
+      end: 12,
+      speaker: "speaker-1",
+      words: [],
+    },
+    {
+      id: "b",
+      text: "앞뒤가 맞지 않았습니다.",
+      start: 12.2,
+      end: 31,
+      speaker: "speaker-1",
+      words: [],
+    },
+    {
+      id: "c",
+      text: "추가 해명도 필요했습니다.",
+      start: 40,
+      end: 43,
+      speaker: "speaker-1",
+      words: [],
+    },
+  ]
+  const candidates = buildCompleteUtteranceCandidates(segments)
+  assert.equal(candidates.length, 2)
+  assert.ok(
+    candidates.some(
+      (candidate) => candidate.sourceStart === 0 && candidate.sourceEnd === 31
+    )
+  )
+  assert.ok(
+    candidates.some(
+      (candidate) => candidate.sourceStart === 40 && candidate.sourceEnd === 43
+    )
+  )
 })
 
 test("제목 프레임을 포함해 50~55초로 낮은 핵심도 문장을 제거한다", () => {

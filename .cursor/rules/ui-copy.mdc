@@ -1,0 +1,13 @@
+---
+description: UI copy and structure — minimize guidance text
+globs: "**/*.{tsx,jsx,css}"
+alwaysApply: false
+---
+
+# UI copy
+
+- Prefer clear structure and flow over explanatory copy.
+- Minimize helper text, tips, completion criteria, and “please wait / please save first” banners.
+- Titles and labels should name the thing; do not restate what the controls already make obvious.
+- Disable buttons when needed instead of explaining why in yellow warning text.
+- Keep error `note`s short and factual only when an action actually failed.

@@ -17,7 +17,7 @@ export type QuoteTightenResult = {
 }
 
 /**
- * 직접 발언 구간을 잘라 재생 배속만 적용한다.
+ * 직접 발언 구간을 원배속으로 자른다.
  * 무음 점프컷은 자막 타임코드와 비선형으로 어긋나서 쓰지 않는다.
  */
 export async function tightenQuoteSegment(input: {
@@ -65,12 +65,14 @@ async function extractSegment(
   duration: number,
   output: string
 ) {
+  // -ss를 입력 뒤에 둬 프레임 단위로 자른다.
+  // 입력 앞 -ss(키프레임 점프)는 ASR 타임코드와 수 초까지 어긋날 수 있다.
   await run(ffmpegBin(), [
     "-y",
-    "-ss",
-    String(start),
     "-i",
     source,
+    "-ss",
+    String(start),
     "-t",
     String(duration),
     "-map",
@@ -87,6 +89,8 @@ async function extractSegment(
     "aac",
     "-ar",
     "48000",
+    "-avoid_negative_ts",
+    "make_zero",
     output,
   ])
 }

@@ -39,9 +39,14 @@ export async function POST(request: Request) {
     angleTitle?: unknown
     angleSummary?: unknown
     angleKeywords?: unknown
+    angleSourceStart?: unknown
+    angleSourceEnd?: unknown
+    previousTitle?: unknown
+    previousTitles?: unknown
+    previousScript?: unknown
   } | null
   const productionMode =
-    body?.productionMode === "buildup" ? "buildup" : "report"
+    body?.productionMode === "buildup2" ? "buildup2" : "report"
   const directSource = body?.directSource === true
   const angleTitle =
     typeof body?.angleTitle === "string" ? body.angleTitle.trim() : ""
@@ -54,6 +59,17 @@ export async function POST(request: Request) {
         .filter(Boolean)
         .slice(0, 8)
     : []
+  const angleSourceStart = Number(body?.angleSourceStart)
+  const angleSourceEnd = Number(body?.angleSourceEnd)
+  const lockedAngleRange =
+    Number.isFinite(angleSourceStart) &&
+    Number.isFinite(angleSourceEnd) &&
+    Math.abs(angleSourceEnd - angleSourceStart) >= 3
+      ? {
+          start: Math.min(angleSourceStart, angleSourceEnd),
+          end: Math.max(angleSourceStart, angleSourceEnd),
+        }
+      : undefined
   const sourceId = typeof body?.sourceId === "string" ? body.sourceId : ""
   let source = await readSource(sourceId)
   if (!source || !source.approved) {
@@ -269,6 +285,31 @@ export async function POST(request: Request) {
       : source.localFile
         ? await detectAudioSilence(source.localFile).catch(() => [])
         : []
+    const previousTitle =
+      typeof body?.previousTitle === "string" ? body.previousTitle.trim() : ""
+    const previousTitles = Array.isArray(body?.previousTitles)
+      ? body.previousTitles
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .slice(0, 8)
+      : []
+    const previousScript =
+      typeof body?.previousScript === "string"
+        ? body.previousScript.trim().slice(0, 4000)
+        : ""
+    const avoidPrevious =
+      body?.reselect === true &&
+      (previousTitle || previousTitles.length || previousScript)
+        ? {
+            titles: [
+              ...new Set(
+                [previousTitle, ...previousTitles].filter(Boolean)
+              ),
+            ].slice(0, 8),
+            script: previousScript,
+          }
+        : undefined
     const analysis = await analyzeNewsTranscript(
       transcript,
       settings,
@@ -284,6 +325,8 @@ export async function POST(request: Request) {
         supplementalContext,
         channelDirection: settings.issueSearchGuidance,
         directSource,
+        avoidPrevious,
+        lockedRange: lockedAngleRange,
       },
       productionMode,
       detectedSilences

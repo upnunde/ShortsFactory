@@ -1,8 +1,9 @@
-/** 원본 영상(자료·직접 발언) 기본 재생 배속. 모든 뉴스 쇼츠 공통. */
-export const NEWS_SOURCE_PLAYBACK_RATE = 1.2
+/** 원본 영상(자료·직접 발언) 재생 배속. 1 = 원배속(배속 없음). */
+export const NEWS_SOURCE_PLAYBACK_RATE = 1
 
 export function sourceVideoSetpts(rate = NEWS_SOURCE_PLAYBACK_RATE) {
   const safe = clampPlaybackRate(rate)
+  if (Math.abs(safe - 1) < 0.001) return "setpts=PTS-STARTPTS"
   return `setpts=PTS/${safe}`
 }
 
@@ -17,7 +18,7 @@ export function sourceFootageSecondsForOutput(
   return Math.max(0.1, outputSeconds * clampPlaybackRate(rate))
 }
 
-/** 원본 구간이 배속 적용 후 출력에서 차지하는 초. */
+/** 원본 구간이 출력에서 차지하는 초. */
 export function quoteOutputDurationSeconds(
   sourceStart: number,
   sourceEnd: number,
@@ -27,7 +28,7 @@ export function quoteOutputDurationSeconds(
   return Math.max(0.5, raw / clampPlaybackRate(rate))
 }
 
-/** 원본 타임코드(구간 상대)를 배속 출력 타임라인으로 변환한다. */
+/** 원본 타임코드(구간 상대)를 출력 타임라인으로 변환한다. */
 export function scaleQuoteTimelineSeconds(
   seconds: number,
   rate = NEWS_SOURCE_PLAYBACK_RATE

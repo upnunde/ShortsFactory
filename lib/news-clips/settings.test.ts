@@ -16,6 +16,7 @@ test("뉴스 TTS는 한국어 전용 모델을 기본 선택한다", () => {
 
   assert.equal(defaults.titleVoice, "mms-kor")
   assert.equal(defaults.ttsProvider, "auto")
+  assert.equal(defaults.titleVoiceRate, 0)
   assert.equal(defaults.typecastVoiceId, "tc_5e4f7a5da82e1f000aca31af")
   assert.deepEqual(defaults.typecastVoices, [
     {

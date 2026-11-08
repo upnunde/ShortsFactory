@@ -54,7 +54,7 @@ export function newsTtsCacheIdentity(provider: ResolvedNewsTtsProvider) {
   return provider.id === "typecast"
     ? {
         provider: provider.id,
-        alignment: "word-timestamps-v1",
+        alignment: "word-timestamps-v4-ssfm31-natural-pauses",
         voiceId: provider.typecastVoiceId,
         fallbackVoiceId: provider.localVoiceId,
         fallbackAllowed: provider.fallbackAllowed,

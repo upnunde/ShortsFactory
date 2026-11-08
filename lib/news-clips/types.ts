@@ -4,7 +4,7 @@ import { isPrimarilyKorean } from "./language.ts"
 
 export type ProjectType = "character" | "news_clip"
 
-export type NewsClipProductionMode = "report" | "buildup"
+export type NewsClipProductionMode = "report" | "buildup2"
 
 export type NewsChannelProfile = {
   id: string
@@ -162,6 +162,11 @@ export type SubtitleCue = {
   text: string
   emphasis: string[]
   emphasisColor: "yellow" | "green"
+  /** 사용자가 문구나 강조를 직접 고친 cue만 새 실측 타이밍에 다시 얹는다. */
+  edited?: boolean
+  /** 개별 초기화를 위해 마지막 자동 생성 문구·강조를 보관한다. */
+  originalText?: string
+  originalEmphasis?: string[]
 }
 
 export type NewsReportScene = {
@@ -252,6 +257,13 @@ export type NewsClipProject = {
   createdAt: string
   updatedAt: string
   productionMode: NewsClipProductionMode
+  /**
+   * 빌드업형 편집 스냅샷의 일련번호. 대본·자막·구간·스타일이 바뀌면 증가한다.
+   * 미리보기와 최종본은 이 번호를 저장해 예전 영상이 현재 편집본과 섞이지 않게 한다.
+   */
+  editorialRevision: number
+  previewRevision: number
+  finalRevision: number
   source: NewsSource | null
   supportingSources: NewsSource[]
   sourceIssueId: string
@@ -270,6 +282,8 @@ export type NewsClipProject = {
   removedRanges: RemovedRange[]
   keepRanges: KeepRange[]
   subtitles: SubtitleCue[]
+  /** 미리보기 이후 확정된 자막 구간. true면 재렌더 때 start/end를 다시 나누지 않는다. */
+  subtitleTimingsLocked: boolean
   crop: CropPosition
   bgmEnabled: boolean
   bgmVolume: number
@@ -285,6 +299,11 @@ export type NewsClipProject = {
   renderSignature: string
   outputUrl: string
   previewUrl: string
+  /** 4클립 분리 미리보기. 없으면 합본 previewUrl만 쓴다. */
+  previewIntroUrl: string
+  previewLeadUrl: string
+  previewBodyUrl: string
+  previewOutroUrl: string
   previewSignature: string
   renderSettingsKey: string
   thumbnailUrl: string
@@ -294,13 +313,7 @@ export type NewsClipProject = {
 }
 
 export type NewsClipStep =
-  | "issue"
-  | "source"
-  | "angles"
-  | "script"
-  | "direction"
-  | "preview"
-  | "final"
+  "issue" | "source" | "angles" | "script" | "direction" | "preview" | "final"
 
 export type NewsClipStudioState = {
   projectType: "news_clip"
@@ -313,24 +326,24 @@ export const NEWS_CLIP_STEPS: {
   label: string
   role: string
 }[] = [
-  { id: "issue", label: "이슈·원본 선택", role: "주제와 원본 결정" },
+  { id: "issue", label: "원본 추가", role: "YouTube URL 또는 영상 파일" },
   { id: "source", label: "원본 영상 선택", role: "보도 근거 결정" },
   {
     id: "angles",
-    label: "주제고르기",
-    role: "원본 주제를 고른 뒤 대본 제작",
+    label: "핵심 내용 확인",
+    role: "원본 근거와 사용할 논점 확정",
   },
   { id: "script", label: "보도 대본 검수", role: "제목·보도문 확정" },
   { id: "direction", label: "화면 연출 구성", role: "장면·음성 방식 확정" },
   {
     id: "preview",
-    label: "검수·수정",
-    role: "대본·자막·화면·음향 수정",
+    label: "초안 검수·수정",
+    role: "실제 영상을 보며 제목·대본·자막·구간 수정",
   },
   {
     id: "final",
-    label: "미리보기·업로드",
-    role: "초안 확인 후 최종본·예약 업로드",
+    label: "최종본",
+    role: "720×1280 최종 렌더·품질 검사·업로드",
   },
 ]
 
@@ -371,7 +384,7 @@ export const defaultNewsClipSettings: NewsClipSettings = {
       voiceId: "tc_5e4f7a5da82e1f000aca31af",
     },
   ],
-  titleVoiceRate: -4,
+  titleVoiceRate: 0,
   titleVolume: 1,
   sourceVolume: 1,
   quoteVolume: 1,
@@ -435,7 +448,10 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     profileId,
     createdAt: now,
     updatedAt: now,
-    productionMode: "report",
+    productionMode: "buildup2",
+    editorialRevision: 1,
+    previewRevision: 0,
+    finalRevision: 0,
     source: null,
     supportingSources: [],
     sourceIssueId: "",
@@ -454,6 +470,7 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     removedRanges: [],
     keepRanges: [],
     subtitles: [],
+    subtitleTimingsLocked: false,
     crop: { x: 50, y: 50, zoom: 1.02, faceTracking: false },
     bgmEnabled: true,
     bgmVolume: 0.12,
@@ -469,6 +486,10 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     renderSignature: "",
     outputUrl: "",
     previewUrl: "",
+    previewIntroUrl: "",
+    previewLeadUrl: "",
+    previewBodyUrl: "",
+    previewOutroUrl: "",
     previewSignature: "",
     renderSettingsKey: "",
     thumbnailUrl: "",

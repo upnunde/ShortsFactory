@@ -2,6 +2,10 @@ import { NextResponse } from "next/server"
 
 import type { NewsClipProject, NewsClipSettings } from "@/lib/news-clips/types"
 import { renderNewsClip } from "@/lib/server/news-clips/render"
+import {
+  validRenderJobId,
+  writeNewsRenderProgress,
+} from "@/lib/server/news-clips/render-progress"
 import { newsTtsErrorMessage } from "@/lib/server/news-clips/tts-provider"
 
 export const runtime = "nodejs"
@@ -12,6 +16,7 @@ export async function POST(request: Request) {
     project?: NewsClipProject
     settings?: NewsClipSettings
     force?: boolean
+    jobId?: string
   } | null
   if (!body?.project || !body.settings) {
     return NextResponse.json(
@@ -20,12 +25,19 @@ export async function POST(request: Request) {
     )
   }
   try {
+    const jobId = validRenderJobId(body.jobId) ? body.jobId : ""
+    if (jobId) await writeNewsRenderProgress(jobId, 1, "준비 중")
     const result = await renderNewsClip(
       body.project,
       body.settings,
       "preview",
       {
         force: body.force === true,
+        signal: request.signal,
+        onProgress: jobId
+          ? (percent, label) =>
+              writeNewsRenderProgress(jobId, percent, label)
+          : undefined,
       }
     )
     return NextResponse.json(
@@ -37,6 +49,12 @@ export async function POST(request: Request) {
     )
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
+    if (code === "render-cancelled" || request.signal.aborted) {
+      return NextResponse.json(
+        { message: "미리보기 만들기를 취소했습니다." },
+        { status: 499 }
+      )
+    }
     const ttsMessage = newsTtsErrorMessage(code)
     const message =
       ttsMessage ||
@@ -69,7 +87,9 @@ export async function POST(request: Request) {
                                 ? "직접 발언 장면의 원본 구간이 올바르지 않습니다."
                                 : code === "invalid-project"
                                   ? "제목, 보도 대본과 문장별 화면 구성을 확인해 주세요."
-                                  : "저해상도 초안을 만들지 못했습니다.")
+                                  : code.startsWith("output-validation-")
+                                    ? "초안의 영상·음성 동기화 검사를 통과하지 못했습니다. 초안을 다시 만들어 주세요."
+                                    : "저해상도 초안을 만들지 못했습니다.")
     return NextResponse.json({ message }, { status: 422 })
   }
 }

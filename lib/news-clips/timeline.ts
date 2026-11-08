@@ -313,6 +313,47 @@ export function buildCandidateWindows(
   }))
 }
 
+/**
+ * 빌드업형 후보는 초 단위 목표 없이 완결된 발화 묶음으로 만든다.
+ * 전사 문장이 여러 조각으로 나뉜 경우 첫 문장 종결까지 하나로 묶는다.
+ */
+export function buildCompleteUtteranceCandidates(
+  segments: TranscriptSegment[]
+): NewsClipCandidate[] {
+  if (segments.length === 0) return []
+  const ordered = [...segments].sort(
+    (left, right) => left.start - right.start || left.end - right.end
+  )
+  const utterances: NewsClipCandidate[] = []
+  let startIndex = 0
+  for (let index = 0; index < ordered.length; index += 1) {
+    const isLast = index === ordered.length - 1
+    const complete =
+      /(?:[.!?。！？…]|다|요|죠|까|네|군|구나|습니다|습니까)\s*["'”’)]*\s*$/.test(
+        ordered[index]!.text.trim()
+      )
+    if (!isLast && !complete) continue
+
+    const slice = ordered.slice(startIndex, index + 1)
+    const sourceStart = slice[0]!.start
+    const sourceEnd = slice.at(-1)!.end
+    const text = slice.map((segment) => segment.text).join(" ")
+    utterances.push(candidateOf(text, sourceStart, sourceEnd, startIndex))
+    startIndex = index + 1
+  }
+
+  return utterances
+    .sort((left, right) => right.scores.total - left.scores.total)
+    .slice(0, 3)
+    .map((candidate, index) => ({
+      ...candidate,
+      id: `candidate-${index + 1}`,
+      estimatedFinalSeconds: round(
+        Math.max(0, candidate.sourceEnd - candidate.sourceStart)
+      ),
+    }))
+}
+
 function candidateOf(
   text: string,
   sourceStart: number,
@@ -451,7 +492,8 @@ function localTitleOptions(titleBase: string, preview: string) {
     .split(/\s+/)
     .filter((token) => token.length >= 2)
   const line2 =
-    nouns.find((token) => token !== line1 && token.length <= 10) ?? "직접 들어봐"
+    nouns.find((token) => token !== line1 && token.length <= 10) ??
+    "직접 들어봐"
   const alt = nouns.find((token) => ![line1, line2].includes(token)) ?? line2
   return [
     `${line1}\n${line2.slice(0, 12)}`,

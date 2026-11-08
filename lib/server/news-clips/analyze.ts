@@ -1,6 +1,7 @@
 import { claudeText } from "@/lib/server/anthropic"
 import {
   buildCandidateWindows,
+  buildCompleteUtteranceCandidates,
   fitEditPlan,
 } from "@/lib/news-clips/timeline"
 import {
@@ -14,8 +15,8 @@ import {
 } from "@/lib/news-clips/text-layout"
 import { parseTranscript } from "@/lib/news-clips/transcript"
 import {
-  buildBuildupScenes,
-  localBuildupDraft,
+  buildBuildup2Scenes,
+  localBuildup2Draft,
 } from "@/lib/news-clips/buildup"
 import {
   appendEndCtaScenes,
@@ -54,6 +55,16 @@ export type NewsAnalysisSourceContext = {
   supplementalContext: string
   channelDirection: string
   directSource?: boolean
+  /** 재작성 시 재탕 금지용. 있으면 새 표현으로 다시 쓴다. */
+  avoidPrevious?: {
+    titles?: string[]
+    script?: string
+  }
+  /** 주제고르기에서 확정한 원본 구간. 있으면 하이라이트를 이 구간으로 고정한다. */
+  lockedRange?: {
+    start: number
+    end: number
+  }
 }
 
 export async function analyzeNewsTranscript(
@@ -74,7 +85,10 @@ export async function analyzeNewsTranscript(
 ) {
   const transcript = parseTranscript(transcriptText)
   if (transcript.length === 0) throw new Error("empty-transcript")
-  const localCandidates = buildCandidateWindows(transcript, settings)
+  const localCandidates =
+    productionMode === "buildup2"
+      ? buildCompleteUtteranceCandidates(transcript)
+      : buildCandidateWindows(transcript, settings)
   if (localCandidates.length === 0) throw new Error("no-candidates")
   let candidates = fitCandidateTitles(localCandidates, settings)
   let analysisMode: "claude" | "local" = "local"
@@ -90,7 +104,8 @@ export async function analyzeNewsTranscript(
           sourceContext.directSource === true
             ? ""
             : sourceContext.channelDirection,
-          sourceContext.directSource === true
+          sourceContext.directSource === true,
+          sourceContext.avoidPrevious?.titles ?? []
         ),
         settings
       )
@@ -99,9 +114,13 @@ export async function analyzeNewsTranscript(
       candidates = fitCandidateTitles(localCandidates, settings)
     }
   }
-  const selectedCandidate = bestCandidate(candidates, sourceContext.issue)
-  if (productionMode === "buildup") {
-    return analyzeBuildupTranscript(
+  const selectedCandidate = lockCandidateToAngleRange(
+    bestCandidate(candidates, sourceContext.issue),
+    transcript,
+    sourceContext.lockedRange
+  )
+  if (productionMode === "buildup2") {
+    return analyzeBuildup2Transcript(
       transcript,
       selectedCandidate,
       candidates,
@@ -209,7 +228,7 @@ export async function analyzeNewsTranscript(
   }
 }
 
-async function analyzeBuildupTranscript(
+async function analyzeBuildup2Transcript(
   transcript: TranscriptSegment[],
   selectedCandidate: NewsClipCandidate,
   candidates: NewsClipCandidate[],
@@ -219,7 +238,7 @@ async function analyzeBuildupTranscript(
   analysisMode: "claude" | "local",
   detectedSilences: RemovedRange[]
 ) {
-  let draft = localBuildupDraft(
+  let draft = localBuildup2Draft(
     transcript,
     selectedCandidate,
     settings,
@@ -229,19 +248,25 @@ async function analyzeBuildupTranscript(
   let mode = analysisMode
   if (useClaude) {
     try {
-      const claudeDraft = await buildupWithClaude(
+      const claudeDraft = await buildup2WithClaude(
         transcript,
         selectedCandidate,
-        settings,
         sourceContext
       )
+      const locked = sourceContext.lockedRange
+      const highlightStart = locked
+        ? Math.min(locked.start, locked.end)
+        : claudeDraft.highlightStart
+      const highlightEnd = locked
+        ? Math.max(locked.start, locked.end)
+        : claudeDraft.highlightEnd
       draft = {
         ...draft,
         script: claudeDraft.script,
-        preferred: buildBuildupScenes(
+        preferred: buildBuildup2Scenes(
           claudeDraft.script,
-          claudeDraft.highlightStart,
-          claudeDraft.highlightEnd,
+          highlightStart,
+          highlightEnd,
           transcript,
           sourceContext.primarySourceId,
           claudeDraft.preferred
@@ -259,12 +284,15 @@ async function analyzeBuildupTranscript(
   )
   const { body: bodyScript, cta: endCtaText } =
     splitEndCtaFromScript(reportScript)
-  const highlightStart =
-    draft.preferred[1]?.sourceStart ?? selectedCandidate.sourceStart
-  const highlightEnd =
-    draft.preferred[1]?.sourceEnd ?? selectedCandidate.sourceEnd
+  const locked = sourceContext.lockedRange
+  const highlightStart = locked
+    ? Math.min(locked.start, locked.end)
+    : (draft.preferred[1]?.sourceStart ?? selectedCandidate.sourceStart)
+  const highlightEnd = locked
+    ? Math.max(locked.start, locked.end)
+    : (draft.preferred[1]?.sourceEnd ?? selectedCandidate.sourceEnd)
   const reportScenes = appendEndCtaScenes(
-    buildBuildupScenes(
+    buildBuildup2Scenes(
       bodyScript || reportScript,
       highlightStart,
       highlightEnd,
@@ -275,10 +303,23 @@ async function analyzeBuildupTranscript(
     endCtaText,
     sourceContext.primarySourceId
   )
+  const completedHighlight = reportScenes.find(
+    (scene) => scene.id === "buildup2-quote"
+  )
+  const completedStart =
+    completedHighlight?.sourceStart ??
+    draft.preferred[1]?.sourceStart ??
+    highlightStart
+  const completedEnd =
+    completedHighlight?.sourceEnd ??
+    draft.preferred[1]?.sourceEnd ??
+    highlightEnd
+  const completedDuration = Math.max(0.12, completedEnd - completedStart)
   const rangedCandidate = {
     ...selectedCandidate,
-    sourceStart: highlightStart,
-    sourceEnd: highlightEnd,
+    sourceStart: completedStart,
+    sourceEnd: completedEnd,
+    estimatedFinalSeconds: completedDuration,
   }
   return {
     transcript,
@@ -286,16 +327,22 @@ async function analyzeBuildupTranscript(
     selectedCandidate: rangedCandidate,
     reportScript,
     reportScenes,
-    removedRanges: draft.removedRanges,
-    keepRanges: draft.keepRanges,
+    removedRanges: [],
+    keepRanges: [
+      {
+        sourceStart: completedStart,
+        sourceEnd: completedEnd,
+        outputStart: 0,
+        outputEnd: completedDuration,
+      },
+    ],
     analysisMode: mode,
   }
 }
 
-async function buildupWithClaude(
+async function buildup2WithClaude(
   transcript: TranscriptSegment[],
   candidate: NewsClipCandidate,
-  settings: NewsClipSettings,
   sourceContext: NewsAnalysisSourceContext
 ) {
   const relevant = sourceContext.directSource
@@ -305,17 +352,56 @@ async function buildupWithClaude(
           segment.end >= candidate.sourceStart - 15 &&
           segment.start <= candidate.sourceEnd + 15
       )
+  const highlightQuote = relevant
+    .filter(
+      (segment) =>
+        segment.end > candidate.sourceStart &&
+        segment.start < candidate.sourceEnd
+    )
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160)
+  const avoidScript = sourceContext.avoidPrevious?.script?.trim() || ""
+  const avoidLead = avoidScript
+    ? splitEndCtaFromScript(avoidScript).body || avoidScript
+    : ""
+  const locked = sourceContext.lockedRange
+  const lockedStart = locked
+    ? Math.min(locked.start, locked.end)
+    : candidate.sourceStart
+  const lockedEnd = locked
+    ? Math.max(locked.start, locked.end)
+    : candidate.sourceEnd
   const response = await claudeText(
     [
       "너는 정치/시사 쇼츠의 빌드업형 오프닝 멘트를 쓰는 작가다.",
       "결과 영상은 제목 TTS 인트로 다음에, 짧은 서두 TTS를 읽고 바로 원본 하이라이트 발언을 들려준다.",
       "원문 밖의 사실을 만들지 않는다.",
       sourceContext.directSource
-        ? "사용자가 지정한 원본 영상이 기준이다. selectedIssue(고른 핵심 각도)와 transcript만으로 서두를 쓰고 다른 이슈로 바꾸지 않는다."
-        : "selectedIssue(고른 핵심 각도)와 원본 발언을 함께 보고 서두를 만든다.",
-      "teaser는 시청자 호기심을 끄는 시니컬한 한국어 반말 1~2문장이다. 존댓말을 쓰지 않는다.",
-      "teaser 끝은 '들어봐', '직접 들어봐'처럼 원본으로 넘기는 연결로 마무리한다.",
-      "highlight_start와 highlight_end는 가장 화제성 높은 연속 발언 구간이며 약 45~55초 분량을 우선한다.",
+        ? "사용자가 지정한 원본 영상이 기준이다. selectedIssue(고른 핵심 각도)와 highlightQuote·transcript만으로 서두를 쓰고 다른 이슈로 바꾸지 않는다."
+        : "selectedIssue(고른 핵심 각도)와 highlightQuote(핵심 발언)를 먼저 보고 서두를 만든다. transcript는 구간 확인용이다.",
+      "말투는 옆 사람에게 중요한 사실을 조근조근 알려 주는 차분한 반말이다. 시니컬하게 연기하거나 방송 멘트처럼 쓰지 않는다.",
+      "teaser는 한국어 해체 반말 1~2문장만 쓴다. 존댓말(~요, ~습니다, ~죠)은 쓰지 않는다.",
+      "첫 문장은 highlightQuote에서 가장 도드라진 사실·모순·온도만 한 조각 짚는다. 발언을 길게 요약하거나 그대로 복붙하지 않는다.",
+      "둘째 문장(또는 한 문장일 때 끝)은 원본으로 자연스럽게 넘긴다. 연결 문구는 매번 다르게 쓰고, 고정 훅을 반복하지 않는다.",
+      "금지: '들어봐', '직접 들어봐', '어떤 내용인지 들어봐', '그냥 넘기기 어렵더라', '충격적', '비밀', '오늘 알아볼게', 훈계·연설조, 댓글 유도.",
+      "teaser에는 마무리 CTA('어떻게 생각해?', '댓글로 남겨줘.' 등)를 절대 넣지 않는다. CTA는 시스템이 따로 붙인다.",
+      ...(avoidLead
+        ? [
+            "avoidPrevious.teaser는 직전에 쓴 서두다. 같은 문장·비슷한 말순서·같은 훅을 재탕하지 말고, 사실만 유지한 채 완전히 새 표현으로 다시 쓴다.",
+            "단어 몇 개만 바꾸거나 앞뒤만 뒤집지 않는다. 첫 구절부터 다르게 시작한다.",
+          ]
+        : []),
+      "나쁜 예: '이 발언, 그냥 넘기기 어렵더라. 직접 들어봐.'",
+      "나쁜 예: '충격적인 발언이 나왔어. 어떤 내용인지 들어봐.'",
+      "좋은 예: '예산은 늘었다는데, 현장 얘기는 정반대야.'",
+      "좋은 예: '본인은 문제 없다는데, 숫자 설명이 안 맞아.'",
+      locked
+        ? "selectedRange는 주제고르기에서 확정한 핵심 구간이다. 시작점은 유지하고, 끝점은 현재 문장과 생각이 자연스럽게 끝나는 지점까지 잡는다."
+        : "highlight_start와 highlight_end는 가장 강하고 맥락이 완결된 연속 발언 구간으로 잡는다. 고정된 목표 시간은 없으며 문장과 생각을 중간에서 자르지 않는다.",
       "JSON 객체만 출력한다: {teaser:string,highlight_start:number,highlight_end:number}",
     ].join("\n"),
     JSON.stringify({
@@ -325,13 +411,12 @@ async function buildupWithClaude(
       directSource: sourceContext.directSource === true,
       selectedIssue: sourceContext.issue,
       supplementalContext: sourceContext.supplementalContext,
+      highlightQuote,
+      rangeLocked: Boolean(locked),
+      ...(avoidLead ? { avoidPrevious: { teaser: avoidLead } } : {}),
       selectedRange: {
-        start: candidate.sourceStart,
-        end: candidate.sourceEnd,
-      },
-      targetSeconds: {
-        min: settings.targetMinSeconds,
-        max: settings.targetMaxSeconds,
+        start: lockedStart,
+        end: lockedEnd,
       },
       transcript: relevant.map((segment) => ({
         start: segment.start,
@@ -346,15 +431,30 @@ async function buildupWithClaude(
     highlight_start?: unknown
     highlight_end?: unknown
   }
-  const script = typeof value.teaser === "string" ? value.teaser.trim() : ""
-  if (!script) throw new Error("empty-buildup")
-  const highlightStart = Number(value.highlight_start)
-  const highlightEnd = Number(value.highlight_end)
+  let script = typeof value.teaser === "string" ? value.teaser.trim() : ""
+  if (!script) throw new Error("empty-buildup2")
+  if (avoidLead && textsTooSimilar(script, avoidLead)) {
+    const retry = await claudeText(
+      [
+        "직전 서두와 너무 비슷하다. 같은 사실이라도 문장 구조·어휘·시작 구절을 완전히 바꿔 새 서두 1~2문장만 JSON으로 출력한다.",
+        "JSON: {teaser:string}",
+        `금지 서두: ${avoidLead}`,
+      ].join("\n"),
+      JSON.stringify({ highlightQuote, avoidTeaser: avoidLead }),
+      400
+    )
+    const retryValue = JSON.parse(stripFence(retry)) as { teaser?: unknown }
+    const retryScript =
+      typeof retryValue.teaser === "string" ? retryValue.teaser.trim() : ""
+    if (retryScript) script = retryScript
+  }
+  const highlightStart = locked ? lockedStart : Number(value.highlight_start)
+  const highlightEnd = locked ? lockedEnd : Number(value.highlight_end)
   const start = Number.isFinite(highlightStart)
     ? highlightStart
     : candidate.sourceStart
   const end = Number.isFinite(highlightEnd) ? highlightEnd : candidate.sourceEnd
-  const preferred = buildBuildupScenes(
+  const preferred = buildBuildup2Scenes(
     script,
     Math.min(start, end),
     Math.max(start, end),
@@ -366,6 +466,31 @@ async function buildupWithClaude(
     highlightStart: Math.min(start, end),
     highlightEnd: Math.max(start, end),
     preferred,
+  }
+}
+
+function lockCandidateToAngleRange(
+  fallback: NewsClipCandidate,
+  transcript: TranscriptSegment[],
+  locked: NewsAnalysisSourceContext["lockedRange"]
+): NewsClipCandidate {
+  if (!locked) return fallback
+  const start = Math.min(locked.start, locked.end)
+  const end = Math.max(locked.start, locked.end)
+  if (end - start < 3) return fallback
+  const text = transcript
+    .filter((segment) => segment.end > start && segment.start < end)
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join(" ")
+  return {
+    ...fallback,
+    id: "angle-locked",
+    sourceStart: Math.round(start * 100) / 100,
+    sourceEnd: Math.round(end * 100) / 100,
+    preview: (text || fallback.preview).slice(0, 180),
+    reason: "주제고르기에서 확정한 구간",
+    estimatedFinalSeconds: end - start,
   }
 }
 
@@ -509,6 +634,12 @@ async function reportWithClaude(
       "quote 다음 문장은 원본 발언을 다시 반복하지 말고, '그런데', '이 말의 핵심은', '문제는'처럼 방금 들은 발언에서 다음 근거나 평가로 자연스럽게 이어지는 TTS 해설로 쓴다.",
       "quote 앞뒤 문장을 이어 읽었을 때 주어와 논점이 갑자기 바뀌거나 같은 내용을 두 번 설명하지 않도록 전체 흐름을 검토한다.",
       "source와 quote에는 해당 근거가 실제 등장하는 sourceStart와 sourceEnd를 원본 타임코드 안에서 지정한다.",
+      ...(sourceContext.avoidPrevious?.script?.trim()
+        ? [
+            "avoidPrevious.script는 직전에 쓴 대본이다. 문장·말순서·훅을 재탕하지 말고 같은 논점이라도 완전히 새 표현으로 다시 쓴다.",
+            "단어만 살짝 바꾸거나 문장 앞뒤만 뒤집지 않는다. 도입 첫 문장부터 다르게 시작한다.",
+          ]
+        : []),
       "JSON 객체만 출력한다: {script:string, visuals:[{visual:'source'|'quote',sourceId:string,sourceStart:number,sourceEnd:number}]}",
     ].join("\n"),
     JSON.stringify({
@@ -518,6 +649,13 @@ async function reportWithClaude(
       directSource: sourceContext.directSource === true,
       selectedIssue: sourceContext.issue,
       supplementalContext: sourceContext.supplementalContext,
+      ...(sourceContext.avoidPrevious?.script?.trim()
+        ? {
+            avoidPrevious: {
+              script: sourceContext.avoidPrevious.script.trim().slice(0, 1200),
+            },
+          }
+        : {}),
       selectedRange: {
         start: candidate.sourceStart,
         end: candidate.sourceEnd,
@@ -558,8 +696,36 @@ async function reportWithClaude(
     script?: unknown
     visuals?: unknown
   }
-  const script = typeof value.script === "string" ? value.script.trim() : ""
+  let script = typeof value.script === "string" ? value.script.trim() : ""
   if (!script) throw new Error("empty-report")
+  const avoidScript = sourceContext.avoidPrevious?.script?.trim() || ""
+  if (avoidScript && textsTooSimilar(script, avoidScript)) {
+    const retry = await claudeText(
+      [
+        "직전 대본과 너무 비슷하다. 같은 논점이라도 문장 구조·어휘·도입을 완전히 바꿔 새 대본을 다시 쓴다.",
+        "기존 작성 규칙을 유지하고 JSON만 출력한다: {script:string, visuals:[{visual:'source'|'quote',sourceId:string,sourceStart:number,sourceEnd:number}]}",
+      ].join("\n"),
+      JSON.stringify({
+        avoidPrevious: { script: avoidScript.slice(0, 1200) },
+        selectedIssue: sourceContext.issue,
+        selectedRange: {
+          start: candidate.sourceStart,
+          end: candidate.sourceEnd,
+        },
+      }),
+      1600
+    )
+    const retryValue = JSON.parse(stripFence(retry)) as {
+      script?: unknown
+      visuals?: unknown
+    }
+    const retryScript =
+      typeof retryValue.script === "string" ? retryValue.script.trim() : ""
+    if (retryScript) {
+      script = retryScript
+      value.visuals = retryValue.visuals ?? value.visuals
+    }
+  }
   if (
     !sourceContext.directSource &&
     !scriptMatchesIssueFocus(script, sourceContext.issue)
@@ -648,13 +814,18 @@ async function refineWithClaude(
   issue: NewsIssueFocus,
   supplementalContext: string,
   channelDirection = settings.issueSearchGuidance,
-  directSource = false
+  directSource = false,
+  avoidTitles: string[] = []
 ) {
   const firstLineLimit = titleLineCharacterLimit(settings.titleCardText)
   const secondLineLimit = titleLineCharacterLimit({
     ...settings.titleCardText,
     fontSize: settings.titleCardSecondFontSize,
   })
+  const avoidTitleList = avoidTitles
+    .map((title) => title.trim())
+    .filter(Boolean)
+    .slice(0, 8)
   const response = await claudeText(
     [
       "너는 뉴스스토리 채널의 시사 논평 쇼츠를 기획하는 편집자다.",
@@ -679,6 +850,11 @@ async function refineWithClaude(
       "어색한 조사 생략·말꼬리 자르기를 피하고, 평소 뉴스 쇼츠에서 자연스럽게 읽히는 한국어로 쓴다.",
       "인트로 제목은 의미가 독립된 짧은 구절 2개를 만들어 반드시 줄바꿈(\\n)으로 구분한다. 각 구절은 한 줄만 사용한다.",
       `1단은 공백 제외 ${firstLineLimit}자 이내, 2단은 공백 제외 ${secondLineLimit}자 이내로 작성한다.`,
+      ...(avoidTitleList.length
+        ? [
+            "avoidPrevious.titles는 직전에 쓴 제목들이다. 같은 제목·비슷한 1단/2단 조합을 재탕하지 말고 완전히 새 헤드라인 3개를 만든다.",
+          ]
+        : []),
       "JSON 배열만 출력한다. 각 항목은 id, reason, contextRisk(low|medium|high), titleOptions(정확히 3개)를 갖는다.",
     ]
       .filter(Boolean)
@@ -688,6 +864,9 @@ async function refineWithClaude(
       directSource,
       selectedIssue: issue,
       supplementalContext,
+      ...(avoidTitleList.length
+        ? { avoidPrevious: { titles: avoidTitleList } }
+        : {}),
       candidates: candidates.map((item) => ({
         id: item.id,
         start: item.sourceStart,
@@ -765,6 +944,20 @@ function replaceCandidate(
   return candidates.map((candidate) =>
     candidate.id === next.id ? next : candidate
   )
+}
+
+function textsTooSimilar(left: string, right: string) {
+  const a = left.replace(/\s+/g, "")
+  const b = right.replace(/\s+/g, "")
+  if (!a || !b) return false
+  if (a === b) return true
+  const sample = Math.min(a.length, b.length, 48)
+  if (sample < 12) return a === b
+  let same = 0
+  for (let index = 0; index < sample; index += 1) {
+    if (a[index] === b[index]) same += 1
+  }
+  return same / sample >= 0.82
 }
 
 function stripFence(value: string) {
