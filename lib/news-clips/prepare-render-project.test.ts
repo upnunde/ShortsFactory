@@ -136,6 +136,36 @@ test("빌드업형 렌더 직전에도 원본 발언을 완결 문장까지 연�
   assert.equal(quote?.sourceEnd, 18)
 })
 
+test("잠긴 타임라인은 미리보기를 다시 만들어도 영상 컷 구간을 유지한다", () => {
+  const base = sampleProject()
+  const locked = {
+    ...base,
+    subtitleTimingsLocked: true,
+    reportScenes: base.reportScenes.map((scene) =>
+      scene.id === "buildup2-quote-cut-1"
+        ? { ...scene, sourceStart: 10.25, sourceEnd: 13.75 }
+        : scene
+    ),
+  }
+  const { project, reason } = prepareRenderProject(
+    locked,
+    defaultNewsClipSettings,
+    { lockTimeline: true }
+  )
+  const firstCut = project.reportScenes.find(
+    (scene) => scene.id === "buildup2-quote-cut-1"
+  )
+  const secondCut = project.reportScenes.find(
+    (scene) => scene.id === "buildup2-quote-cut-2"
+  )
+
+  assert.equal(reason, "")
+  assert.equal(firstCut?.sourceStart, 10.25)
+  assert.equal(firstCut?.sourceEnd, 13.75)
+  assert.equal(secondCut?.sourceStart, 14)
+  assert.equal(secondCut?.sourceEnd, 18)
+})
+
 test("prepareRenderProject는 end-cta 구간·크롭을 유지한다", () => {
   const base = sampleProject()
   const withCrop = {

@@ -250,7 +250,7 @@ test("한 줄을 넘는 문장은 단어를 보존한 두 줄 자막으로 구�
   )
 
   assert.equal(cues.length, 2)
-  assert.equal(cues[0].text, "정부가 대책을 발표했습니다.")
+  assert.equal(cues[0].text.replace(/\n/g, " "), "정부가 대책을 발표했습니다.")
   assert.equal(
     cues[1].text.replace(/\n/g, " "),
     "시행 시점은 아직 정해지지 않았습니다."
@@ -282,6 +282,36 @@ test("실제 글리프 폭으로 들어가는 짧은 문장은 한 줄로 유지
 
   assert.equal(cues.length, 1)
   assert.equal(cues[0].text, "2년간 시범 시행됩니다.")
+})
+
+test("첫 미리보기 자막은 수정 여유를 위해 한 줄 최대 폭의 80%만 사용한다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    fontSize: 58,
+    letterSpacing: 0,
+    width: 1037,
+  }
+  const cues = normalizeSubtitleCues(
+    [
+      {
+        id: "caption-with-editing-room",
+        start: 0,
+        end: 3,
+        text: "정부정책변화이지역경제와일자리에미치는영향",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    layout
+  )
+  const automaticLimit = Math.floor(titleLineCharacterLimit(layout) * 0.8)
+
+  assert.ok(cues.length >= 1)
+  assert.ok(
+    cues.every((cue) =>
+      cue.text.split("\n").every((line) => [...line].length <= automaticLimit)
+    )
+  )
 })
 
 test("사용자가 제거한 불필요한 줄바꿈은 편집 완료 후 다시 생기지 않는다", () => {
@@ -389,7 +419,7 @@ test("빈 자막 수정은 구간을 삭제하지 않고 자동 문구로 초기
   assert.equal(edited[0]?.edited, false)
 })
 
-test("두 줄 자막은 균등 분할보다 자연스러운 절 경계를 우선한다", () => {
+test("여유 폭으로 나눈 자막도 자연스러운 절 경계를 우선한다", () => {
   const cues = layoutTimedSubtitleCues(
     [
       {
@@ -408,8 +438,9 @@ test("두 줄 자막은 균등 분할보다 자연스러운 절 경계를 우선
     }
   )
 
-  assert.equal(cues.length, 1)
-  assert.equal(cues[0]?.text, "예산은 늘었다는데,\n현장 얘기는 정반대야.")
+  assert.equal(cues.length, 2)
+  assert.equal(cues[0]?.text.replace(/\n/g, " "), "예산은 늘었다는데,")
+  assert.equal(cues[1]?.text.replace(/\n/g, " "), "현장 얘기는 정반대야.")
 })
 
 test("짧은 문장도 단어를 자르지 않는 한 줄 자막으로 유지한다", () => {

@@ -329,9 +329,7 @@ export async function renderNewsClip(
   await progress(2, "프로젝트 확인 중")
   const force = options.force === true
   const finalPlaybackRate =
-    mode === "final"
-      ? normalizeFinalPlaybackRate(options.finalPlaybackRate)
-      : 1
+    mode === "final" ? normalizeFinalPlaybackRate(options.finalPlaybackRate) : 1
   if (
     mode === "final" &&
     project.previewRevision !== project.editorialRevision
@@ -352,7 +350,9 @@ export async function renderNewsClip(
       youtubeTitle: renderTitle.replace(/\s*\n\s*/g, " "),
     },
   }
-  const prepared = prepareRenderProject(project, settings)
+  const prepared = prepareRenderProject(project, settings, {
+    lockTimeline: project.subtitleTimingsLocked,
+  })
   if (prepared.reason) throw new Error(prepared.reason)
   project = prepared.project
   validateProject(project, settings)
@@ -516,6 +516,15 @@ export async function renderNewsClip(
     phrases: string
   }) {
     if (!options.report || !options.planned.length) return []
+    if (project.subtitleTimingsLocked && options.edited.length) {
+      // 파트 로컬 좌표로만 옮긴 뒤 합칠 때 같은 오프셋을 되돌려
+      // 승인된 전역 start/end를 오차 없이 보존한다.
+      return options.edited.map((cue) => ({
+        ...cue,
+        start: cue.start - options.offsetSeconds,
+        end: cue.end - options.offsetSeconds,
+      }))
+    }
     const localEdited = options.edited.map((cue) => ({
       ...cue,
       start: Math.max(0, cue.start - options.offsetSeconds),

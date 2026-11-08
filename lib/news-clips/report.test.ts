@@ -422,7 +422,7 @@ test("실제 장면별 오디오 길이에 맞춰 자막 싱크를 다시 계산
   )
 })
 
-test("잠긴 자막은 음성 실측 타임코드를 쓰고 오타 문구만 반영한다", () => {
+test("잠긴 자막은 재렌더해도 승인한 타임코드와 문구를 유지한다", () => {
   const scenes = [
     {
       id: "scene-1",
@@ -450,11 +450,70 @@ test("잠긴 자막은 음성 실측 타임코드를 쓰고 오타 문구만 반
   const rendered = applySubtitleTimingForRender(edited, scenes, timedScenes, {
     lockTimings: true,
   })
-  // 락이어도 타임코드는 이번 렌더 실측, 문구·강조만 편집본.
-  assert.equal(rendered[0].start, 0)
-  assert.equal(rendered[0].end, 5)
+  // 잠긴 자막은 승인한 구간과 문구를 모두 유지한다.
+  assert.equal(rendered[0].start, 1.2)
+  assert.equal(rendered[0].end, 3.4)
   assert.equal(rendered[0].text, "오타 수정 후")
   assert.deepEqual(rendered[0].emphasis, ["수정"])
+})
+
+test("잠긴 자막은 미리보기를 다시 만들어도 문구와 구간 개수를 유지한다", () => {
+  const scenes = [
+    {
+      id: "scene-locked",
+      narration: "첫 문장과 둘째 문장",
+      visual: "source" as const,
+      sourceId: "source-1",
+      sourceStart: 0,
+      sourceEnd: 4,
+      crop: { x: 50, y: 50, zoom: 1.02, faceTracking: false },
+    },
+  ]
+  const locked = [
+    {
+      id: "locked-1",
+      sceneId: "scene-locked",
+      start: 0,
+      end: 1,
+      text: "첫 문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "locked-2",
+      sceneId: "scene-locked",
+      start: 1,
+      end: 4,
+      text: "둘째 문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const rendered = applySubtitleTimingForRender(
+    locked,
+    scenes,
+    [
+      {
+        ...scenes[0],
+        start: 0,
+        end: 8,
+        alignment: [{ text: "전혀 다른 분할", start: 0, end: 8 }],
+      },
+    ],
+    { lockTimings: true }
+  )
+
+  assert.deepEqual(
+    rendered.map((cue) => [cue.id, cue.text]),
+    [
+      ["locked-1", "첫 문장"],
+      ["locked-2", "둘째 문장"],
+    ]
+  )
+  assert.equal(rendered[0]?.start, 0)
+  assert.equal(rendered[0]?.end, 1)
+  assert.equal(rendered[1]?.start, 1)
+  assert.equal(rendered[1]?.end, 4)
 })
 
 test("편집 문구 병합은 id·장면 순서로 맞춘다", () => {

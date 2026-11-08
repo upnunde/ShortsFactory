@@ -153,6 +153,7 @@ function titleAvailableWidth(layout: NewsTextLayout) {
 
 // Pretendard 한글 실제 폭 ≈ 1em. 0.9면 줄에 글자를 너무 많이 넣어 ASS에서 화면을 넘는다.
 const TEXT_GLYPH_WIDTH_RATIO = 1.05
+const AUTO_SUBTITLE_FILL_RATIO = 0.8
 
 export function normalizeSubtitleCues(
   cues: SubtitleCue[],
@@ -169,7 +170,7 @@ export function layoutTimedSubtitleCues(
   cues: SubtitleCue[],
   layout: NewsTextLayout
 ): SubtitleCue[] {
-  const lineLimit = unitsPerLine(layout)
+  const lineLimit = automaticSubtitleLineLimit(layout)
   return cues.flatMap((cue) => {
     const raw = cue.text.replace(/\r\n/g, "\n").trim()
     if (!raw) return []
@@ -193,10 +194,14 @@ export function layoutTimedSubtitleCues(
       ]
     }
 
-    const chunks = splitIntoSubtitleChunks(raw.replace(/\n+/g, " "), layout)
+    const chunks = splitIntoSubtitleChunks(
+      raw.replace(/\n+/g, " "),
+      layout,
+      lineLimit
+    )
     if (!chunks.length) return []
     if (chunks.length === 1) {
-      const text = wrapSubtitleChunkToTwoLines(chunks[0]!, layout)
+      const text = wrapSubtitleChunkToTwoLines(chunks[0]!, layout, lineLimit)
       return [
         {
           ...cue,
@@ -217,7 +222,7 @@ export function layoutTimedSubtitleCues(
         index === chunks.length - 1
           ? cue.end
           : cue.start + (duration * elapsedWeight) / totalWeight
-      const text = wrapSubtitleChunkToTwoLines(chunk, layout)
+      const text = wrapSubtitleChunkToTwoLines(chunk, layout, lineLimit)
       return {
         ...cue,
         id: `${cue.id}-${index + 1}`,
@@ -231,8 +236,9 @@ export function layoutTimedSubtitleCues(
 }
 
 function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
+  const lineLimit = automaticSubtitleLineLimit(layout)
   return cues.flatMap((cue) => {
-    const chunks = splitIntoSubtitleChunks(cue.text, layout)
+    const chunks = splitIntoSubtitleChunks(cue.text, layout, lineLimit)
     if (chunks.length === 0) return []
     const weights = chunks.map((chunk) => Math.max(1, visualUnits(chunk)))
     const totalWeight = weights.reduce((sum, value) => sum + value, 0)
@@ -251,7 +257,7 @@ function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
         id: chunks.length === 1 ? cue.id : `${cue.id}-${index + 1}`,
         start: round(start),
         end: round(end),
-        text: wrapSubtitleChunkToTwoLines(chunk, layout),
+        text: wrapSubtitleChunkToTwoLines(chunk, layout, lineLimit),
         emphasis: cue.emphasis.filter((word) => chunk.includes(word)),
       }
     })
@@ -379,10 +385,14 @@ export function retimeSubtitleCues(cues: SubtitleCue[], duration: number) {
   })
 }
 
-export function splitIntoSubtitleChunks(text: string, layout: NewsTextLayout) {
+export function splitIntoSubtitleChunks(
+  text: string,
+  layout: NewsTextLayout,
+  lineLimit = unitsPerLine(layout)
+) {
   const normalized = normalizeText(text)
   if (!normalized) return []
-  const chunkLimit = unitsPerLine(layout) * 2
+  const chunkLimit = lineLimit * 2
   const sentences = normalized
     .match(/[^.!?。！？]+[.!?。！？]?/g)
     ?.map((value) => value.trim()) ?? [normalized]
@@ -395,9 +405,12 @@ export function splitIntoSubtitleChunks(text: string, layout: NewsTextLayout) {
   return balanceChunkBoundaries(chunks, chunkLimit)
 }
 
-function wrapSubtitleChunkToTwoLines(text: string, layout: NewsTextLayout) {
+function wrapSubtitleChunkToTwoLines(
+  text: string,
+  layout: NewsTextLayout,
+  lineLimit = unitsPerLine(layout)
+) {
   const normalized = normalizeText(text)
-  const lineLimit = unitsPerLine(layout)
   if (visualUnits(normalized) <= lineLimit) return normalized
   const words = normalized.split(" ").filter(Boolean)
   if (words.length < 2) {
@@ -673,6 +686,13 @@ function unitsPerLine(layout: NewsTextLayout) {
   // ASS \pos는 Margin을 무시하므로, 설정 폭보다 살짝 보수적으로 잡는다.
   const available = Math.max(1, layout.width - 16)
   return Math.max(4, Math.floor(available / advance))
+}
+
+function automaticSubtitleLineLimit(layout: NewsTextLayout) {
+  return Math.max(
+    4,
+    Math.floor(unitsPerLine(layout) * AUTO_SUBTITLE_FILL_RATIO)
+  )
 }
 
 function visualUnits(value: string) {

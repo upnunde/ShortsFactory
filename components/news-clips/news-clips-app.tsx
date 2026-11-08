@@ -963,7 +963,11 @@ export function NewsClipsApp({
           // 미리보기와 함께 렌더 서버가 실측한 최신 자막 구간으로 교체한다.
           subtitles: Array.isArray(body.subtitles) ? body.subtitles : [],
           subtitleTimingsLocked: true,
-          reportScenes: body.reportScenes ?? current.reportScenes,
+          // 다시 만들 때는 승인한 영상 선택·컷 구간을 그대로 유지한다.
+          // 첫 초안이나 대본/연출을 명시적으로 바꾼 경우에만 서버 구성을 받는다.
+          reportScenes: draft.subtitleTimingsLocked
+            ? current.reportScenes
+            : (body.reportScenes ?? current.reportScenes),
         }
       })
       if (!silent) {

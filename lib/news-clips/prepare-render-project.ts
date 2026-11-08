@@ -31,16 +31,22 @@ type PrepareSettings = Pick<
 export function prepareRenderProject(
   project: NewsClipProject,
   settings: PrepareSettings,
-  options: { rebuildSubtitles?: boolean } = {}
+  options: { rebuildSubtitles?: boolean; lockTimeline?: boolean } = {}
 ): { project: NewsClipProject; reason: string } {
   const primarySourceId = project.source?.id ?? ""
-  let reportScenes = normalizeQuoteScenes(
-    collapseBuildup2HighlightCuts(project.reportScenes),
-    primarySourceId ? { [primarySourceId]: project.transcript } : {},
-    primarySourceId,
-    settings.titleVoiceRate
-  )
-  if (project.productionMode === "buildup2" && project.transcript.length) {
+  let reportScenes = options.lockTimeline
+    ? project.reportScenes.map((scene) => ({ ...scene }))
+    : normalizeQuoteScenes(
+        collapseBuildup2HighlightCuts(project.reportScenes),
+        primarySourceId ? { [primarySourceId]: project.transcript } : {},
+        primarySourceId,
+        settings.titleVoiceRate
+      )
+  if (
+    !options.lockTimeline &&
+    project.productionMode === "buildup2" &&
+    project.transcript.length
+  ) {
     reportScenes = reportScenes.map((scene) => {
       if (scene.id !== "buildup2-quote" || scene.visual !== "quote") {
         return scene
@@ -111,8 +117,7 @@ export function prepareRenderProject(
   const normalizedReportScript =
     project.productionMode === "buildup2"
       ? [
-          reportScenes.find((scene) => scene.id === "buildup2-lead")
-            ?.narration,
+          reportScenes.find((scene) => scene.id === "buildup2-lead")?.narration,
           ctaText,
         ]
           .map((value) => value?.trim() ?? "")

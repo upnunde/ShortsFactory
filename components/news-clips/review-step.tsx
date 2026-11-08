@@ -70,6 +70,21 @@ const cardDescriptionClass = "mt-1 text-sm leading-5 text-muted"
 const sectionHeaderClass = "flex min-h-10 items-center justify-between gap-4"
 const sectionTitleClass = "text-base font-semibold leading-6"
 
+function splitSubtitleLines(value: string): [string, string] {
+  const lines = value.replace(/\r\n/g, "\n").split("\n")
+  return [lines[0] ?? "", lines.slice(1).join(" ").trim()]
+}
+
+function serializeSubtitleLines(first: string, second: string) {
+  return second ? `${first}\n${second}` : first
+}
+
+function commitSubtitleLines(first: string, second: string) {
+  const normalizedFirst = first.replace(/\s+/g, " ").trim()
+  const normalizedSecond = second.replace(/\s+/g, " ").trim()
+  return [normalizedFirst, normalizedSecond].filter(Boolean).join("\n")
+}
+
 type ReviewMode = Exclude<NewsClipStep, "issue" | "source" | "angles">
 type EditorTab = "script" | "captions" | "scenes" | "media"
 type CompositionPane = "all" | "intro" | "lead" | "body" | "outro"
@@ -2626,63 +2641,55 @@ export function NewsClipReviewStep({
                               </div>
                             </div>
                             <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-                              <label className="flex min-w-0 flex-col gap-2">
-                                <span className="text-sm">자막</span>
-                                <textarea
-                                  rows={2}
-                                  value={caption.text}
-                                  onFocus={() =>
-                                    setSelectedSubtitleId(caption.id)
-                                  }
-                                  onChange={(event) => {
-                                    const text = event.currentTarget.value
-                                    onProject((current) => {
-                                      const subtitles = current.subtitles.map(
-                                        (item) =>
-                                          item.id === caption.id
-                                            ? {
-                                                ...item,
-                                                originalText:
-                                                  item.originalText ??
-                                                  item.text,
-                                                originalEmphasis:
-                                                  item.originalEmphasis ?? [
-                                                    ...item.emphasis,
-                                                  ],
-                                                text:
-                                                  text ||
-                                                  item.originalText ||
-                                                  item.text,
-                                                edited: true,
-                                              }
-                                            : item
-                                      )
-                                      return syncNarrationFromSubtitleEdit(
-                                        current,
-                                        subtitles,
-                                        caption.id
-                                      )
-                                    })
-                                  }}
-                                  onBlur={(event) => {
-                                    const text = event.currentTarget.value
-                                    onProject((current) => {
-                                      const subtitles = updateEditedSubtitleCue(
-                                        current.subtitles,
-                                        caption.id,
-                                        text,
-                                        settings.bodySubtitleText
-                                      )
-                                      return syncNarrationFromSubtitleEdit(
-                                        current,
-                                        subtitles,
-                                        caption.id
-                                      )
-                                    })
-                                  }}
-                                  className={field}
-                                />
-                              </label>
+                              <SubtitleLineFields
+                                value={caption.text}
+                                characterLimit={titleLineCharacterLimit(
+                                  settings.bodySubtitleText
+                                )}
+                                onFocus={() =>
+                                  setSelectedSubtitleId(caption.id)
+                                }
+                                onChange={(text) => {
+                                  onProject((current) => {
+                                    const subtitles = current.subtitles.map(
+                                      (item) =>
+                                        item.id === caption.id
+                                          ? {
+                                              ...item,
+                                              originalText:
+                                                item.originalText ?? item.text,
+                                              originalEmphasis:
+                                                item.originalEmphasis ?? [
+                                                  ...item.emphasis,
+                                                ],
+                                              text,
+                                              edited: true,
+                                            }
+                                          : item
+                                    )
+                                    return syncNarrationFromSubtitleEdit(
+                                      current,
+                                      subtitles,
+                                      caption.id
+                                    )
+                                  })
+                                }}
+                                onCommit={(text) => {
+                                  onProject((current) => {
+                                    const subtitles = updateEditedSubtitleCue(
+                                      current.subtitles,
+                                      caption.id,
+                                      text,
+                                      settings.bodySubtitleText
+                                    )
+                                    return syncNarrationFromSubtitleEdit(
+                                      current,
+                                      subtitles,
+                                      caption.id
+                                    )
+                                  })
+                                }}
+                              />
                               <label className="flex min-w-0 flex-col gap-2">
                                 <span className="text-sm">강조 단어</span>
                                 <input
@@ -3019,6 +3026,108 @@ const REVIEW_STEP_COPY = {
   Exclude<NewsClipStep, "issue" | "source" | "angles">,
   { title: string }
 >
+
+function SubtitleLineFields({
+  value,
+  characterLimit,
+  onFocus,
+  onChange,
+  onCommit,
+}: {
+  value: string
+  characterLimit: number
+  onFocus: () => void
+  onChange: (value: string) => void
+  onCommit: (value: string) => void
+}) {
+  const [draft, setDraft] = useState<[string, string]>(() =>
+    splitSubtitleLines(value)
+  )
+  const editingRef = useRef(false)
+  const safeLimit = Math.max(1, characterLimit)
+  const firstLineLength = [...draft[0]].length
+  const secondLineLength = [...draft[1]].length
+  const firstLineOver = firstLineLength > safeLimit
+  const secondLineOver = secondLineLength > safeLimit
+
+  useEffect(() => {
+    if (!editingRef.current) setDraft(splitSubtitleLines(value))
+  }, [value])
+
+  function updateLine(index: 0 | 1, nextValue: string) {
+    const next: [string, string] = [draft[0], draft[1]]
+    next[index] = nextValue
+    setDraft(next)
+    onChange(serializeSubtitleLines(next[0], next[1]))
+  }
+
+  function commit() {
+    editingRef.current = false
+    const nextValue = commitSubtitleLines(draft[0], draft[1])
+    setDraft(splitSubtitleLines(nextValue || value))
+    onCommit(nextValue)
+  }
+
+  return (
+    <div
+      className="grid min-w-0 gap-3"
+      onFocusCapture={() => {
+        editingRef.current = true
+        onFocus()
+      }}
+      onBlurCapture={(event) => {
+        const nextTarget = event.relatedTarget as Node | null
+        if (event.currentTarget.contains(nextTarget)) return
+        commit()
+      }}
+    >
+      <label className="flex min-w-0 flex-col gap-2">
+        <span className="text-sm">
+          1줄 · 최대 {safeLimit}자
+          {firstLineOver ? (
+            <span className="ml-2 text-danger">폭 초과</span>
+          ) : null}
+        </span>
+        <div className="relative">
+          <input
+            aria-label="자막 1줄"
+            value={draft[0]}
+            maxLength={safeLimit}
+            onChange={(event) => updateLine(0, event.currentTarget.value)}
+            className={`${field} pr-14 ${firstLineOver ? "border-danger" : ""}`}
+          />
+          <span
+            className={`pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums ${firstLineOver ? "text-danger" : "text-muted"}`}
+          >
+            {firstLineLength}/{safeLimit}
+          </span>
+        </div>
+      </label>
+      <label className="flex min-w-0 flex-col gap-2">
+        <span className="text-sm">
+          2줄 · 선택 · 최대 {safeLimit}자
+          {secondLineOver ? (
+            <span className="ml-2 text-danger">폭 초과</span>
+          ) : null}
+        </span>
+        <div className="relative">
+          <input
+            aria-label="자막 2줄"
+            value={draft[1]}
+            maxLength={safeLimit}
+            onChange={(event) => updateLine(1, event.currentTarget.value)}
+            className={`${field} pr-14 ${secondLineOver ? "border-danger" : ""}`}
+          />
+          <span
+            className={`pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums ${secondLineOver ? "text-danger" : "text-muted"}`}
+          >
+            {secondLineLength}/{safeLimit}
+          </span>
+        </div>
+      </label>
+    </div>
+  )
+}
 
 function SceneCropPreview({
   sourceUrl,

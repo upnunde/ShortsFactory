@@ -556,8 +556,7 @@ function chunkCaptionText(value: string, maxChars = 24) {
 /**
  * 1) 음성/ASR 단어 타임스탬프 → 자막 내용·구간
  * 2) 없으면 실측 장면 길이에 대본 문구를 얹음
- * lockTimings면 오타 수정 문구·강조만 기존 자막에서 덮는다.
- * start/end는 이번 렌더 음성 실측을 항상 우선한다(옛 락 타임코드로 싱크를 깨지 않음).
+ * lockTimings면 승인된 자막의 문구·개수·구분·start/end를 그대로 유지한다.
  */
 export function applySubtitleTimingForRender(
   cues: SubtitleCue[],
@@ -576,6 +575,9 @@ export function applySubtitleTimingForRender(
     maxCaptionCharacters?: number
   } = {}
 ) {
+  if (options.lockTimings && cues.length) {
+    return cues
+  }
   const durations = timedScenes.map((scene) =>
     Math.max(0.1, scene.end - scene.start)
   )
@@ -589,9 +591,7 @@ export function applySubtitleTimingForRender(
   const timed = retimeSubtitleCuesToScenes(fresh, plannedScenes, timedScenes, {
     maxCaptionCharacters: options.maxCaptionCharacters,
   })
-  if (!options.lockTimings || !cues.length) return timed
-  // 문구·강조만 편집본에서 가져오고, 타임코드는 이번 음성 실측을 유지한다.
-  return mergeEditedSubtitleText(timed, cues, { preserveTimes: false })
+  return timed
 }
 
 /** 실측으로 다시 잡은 구간에 사용자가 고친 문구·강조만 얹는다. */
