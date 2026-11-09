@@ -10,15 +10,18 @@ export function snapSecondsToFrame(
   return Math.round(seconds * safeFps) / safeFps
 }
 
-export function snapSubtitleCueTimes<
-  T extends { start: number; end: number },
->(cues: T[], fps = NEWS_RENDER_FPS): T[] {
+export function snapSubtitleCueTimes<T extends { start: number; end: number }>(
+  cues: T[],
+  fps = NEWS_RENDER_FPS
+): T[] {
+  let previousEnd = 0
   return cues.map((cue) => {
-    const start = snapSecondsToFrame(cue.start, fps)
+    const start = Math.max(previousEnd, snapSecondsToFrame(cue.start, fps))
     const end = Math.max(
       start + 1 / Math.max(1, fps),
       snapSecondsToFrame(cue.end, fps)
     )
+    previousEnd = end
     return { ...cue, start, end }
   })
 }

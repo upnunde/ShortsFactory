@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server"
 
-import type { NewsClipProject, NewsClipSettings } from "@/lib/news-clips/types"
+import type {
+  NewsClipProject,
+  NewsClipSettings,
+  NewsPreviewPart,
+} from "@/lib/news-clips/types"
 import { renderNewsClip } from "@/lib/server/news-clips/render"
 import {
   validRenderJobId,
@@ -16,6 +20,7 @@ export async function POST(request: Request) {
     project?: NewsClipProject
     settings?: NewsClipSettings
     force?: boolean
+    previewPart?: NewsPreviewPart
     jobId?: string
   } | null
   if (!body?.project || !body.settings) {
@@ -33,10 +38,10 @@ export async function POST(request: Request) {
       "preview",
       {
         force: body.force === true,
+        previewPart: body.previewPart,
         signal: request.signal,
         onProgress: jobId
-          ? (percent, label) =>
-              writeNewsRenderProgress(jobId, percent, label)
+          ? (percent, label) => writeNewsRenderProgress(jobId, percent, label)
           : undefined,
       }
     )
@@ -68,28 +73,30 @@ export async function POST(request: Request) {
               ? "뉴스 채널 정보가 올바르지 않습니다."
               : code === "invalid-project-id"
                 ? "프로젝트 ID가 올바르지 않습니다."
-                : code === "source-not-approved"
-                  ? "승인된 원본 영상이 필요합니다."
-                  : code === "title-required"
-                    ? "인트로 제목을 입력해 주세요."
-                    : code === "title-second-line-required"
-                      ? "인트로 제목 2단을 입력해 주세요."
-                      : code === "title-first-line-overflow" ||
-                          code === "title-second-line-overflow"
-                        ? "인트로 제목 폭이 초과됐습니다. 길이를 줄여 주세요."
-                        : code === "report-script-required"
-                          ? "보도 대본을 입력해 주세요."
-                          : code === "report-scenes-required"
-                            ? "화면 구성 장면이 없습니다. 대본을 저장해 장면을 만들어 주세요."
-                            : code === "report-scene-narration-required"
-                              ? "나레이션이 비어 있는 장면이 있습니다."
-                              : code === "report-scene-quote-range-invalid"
-                                ? "직접 발언 장면의 원본 구간이 올바르지 않습니다."
-                                : code === "invalid-project"
-                                  ? "제목, 보도 대본과 문장별 화면 구성을 확인해 주세요."
-                                  : code.startsWith("output-validation-")
-                                    ? "초안의 영상·음성 동기화 검사를 통과하지 못했습니다. 초안을 다시 만들어 주세요."
-                                    : "저해상도 초안을 만들지 못했습니다.")
+                : code === "ffmpeg-failed"
+                  ? "영상 인코딩이 일시적으로 실패했습니다. 완료된 구간은 보존되며 다시 만들면 이어서 진행합니다."
+                  : code === "source-not-approved"
+                    ? "승인된 원본 영상이 필요합니다."
+                    : code === "title-required"
+                      ? "인트로 제목을 입력해 주세요."
+                      : code === "title-second-line-required"
+                        ? "인트로 제목 2단을 입력해 주세요."
+                        : code === "title-first-line-overflow" ||
+                            code === "title-second-line-overflow"
+                          ? "인트로 제목 폭이 초과됐습니다. 길이를 줄여 주세요."
+                          : code === "report-script-required"
+                            ? "보도 대본을 입력해 주세요."
+                            : code === "report-scenes-required"
+                              ? "화면 구성 장면이 없습니다. 대본을 저장해 장면을 만들어 주세요."
+                              : code === "report-scene-narration-required"
+                                ? "나레이션이 비어 있는 장면이 있습니다."
+                                : code === "report-scene-quote-range-invalid"
+                                  ? "직접 발언 장면의 원본 구간이 올바르지 않습니다."
+                                  : code === "invalid-project"
+                                    ? "제목, 보도 대본과 문장별 화면 구성을 확인해 주세요."
+                                    : code.startsWith("output-validation-")
+                                      ? "초안의 영상·음성 동기화 검사를 통과하지 못했습니다. 초안을 다시 만들어 주세요."
+                                      : "저해상도 초안을 만들지 못했습니다.")
     return NextResponse.json({ message }, { status: 422 })
   }
 }

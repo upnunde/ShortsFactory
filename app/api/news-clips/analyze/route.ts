@@ -1,10 +1,18 @@
+import { createHash } from "node:crypto"
+
 import { NextResponse } from "next/server"
 
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import { isPrimarilyKorean } from "@/lib/news-clips/language"
 import { scoreSourceRelevance } from "@/lib/news-clips/source-relevance"
 import { analyzeNewsTranscript } from "@/lib/server/news-clips/analyze"
-import { parseTranscript } from "@/lib/news-clips/transcript"
+import {
+  parseTranscript,
+  normalizeKoreanRecognitionText,
+  replaceTranscriptRange,
+  serializeTranscript,
+  updateTranscriptSegmentText,
+} from "@/lib/news-clips/transcript"
 import { newsChannelId } from "@/lib/server/news-clips/channels"
 import { readNewsClipSettings } from "@/lib/server/news-clips/settings"
 import {
@@ -15,7 +23,10 @@ import {
   writeAnalysisCache,
   writeStoredTranscript,
 } from "@/lib/server/news-clips/source-store"
-import { transcribeWithLocalWhisper } from "@/lib/server/news-clips/whisper"
+import {
+  transcribeRangeWithLocalWhisper,
+  transcribeWithLocalWhisper,
+} from "@/lib/server/news-clips/whisper"
 import { detectAudioSilence } from "@/lib/server/news-clips/vad"
 import type { RemovedRange } from "@/lib/news-clips/types"
 
@@ -132,8 +143,13 @@ export async function POST(request: Request) {
         articleTitles: baseIssueContext.articleTitles,
       }
     : baseIssueContext
+  const pasted =
+    typeof body?.transcript === "string" ? body.transcript.trim() : ""
+  const transcriptKey = pasted
+    ? createHash("sha256").update(pasted).digest("hex")
+    : "stored-transcript"
   const sourceSetKey = [
-    "issue-script-v4-angle",
+    "issue-script-v5-local-range-stt",
     productionMode,
     directSource ? "direct" : "issue",
     sourceId,
@@ -143,6 +159,7 @@ export async function POST(request: Request) {
     ...issueContext.keywords,
     issueContext.reason,
     ...issueContext.articleTitles,
+    transcriptKey,
     typeof body?.supplementalContext === "string"
       ? body.supplementalContext.trim().slice(0, 5000)
       : "",
@@ -151,8 +168,6 @@ export async function POST(request: Request) {
     typeof body?.supplementalContext === "string"
       ? body.supplementalContext.trim().slice(0, 5000)
       : ""
-  const pasted =
-    typeof body?.transcript === "string" ? body.transcript.trim() : ""
   const cached = await readAnalysisCache(sourceId)
   if (body?.reselect !== true) {
     if (
@@ -202,7 +217,10 @@ export async function POST(request: Request) {
       { status: 422 }
     )
   }
-  if (!isPrimarilyKorean(transcript)) {
+  const transcriptLanguageText = parseTranscript(transcript)
+    .map((segment) => segment.text)
+    .join(" ")
+  if (!isPrimarilyKorean(transcriptLanguageText)) {
     return NextResponse.json(
       {
         message:
@@ -255,7 +273,10 @@ export async function POST(request: Request) {
             supportingTranscript = ""
           }
         }
-        if (!isPrimarilyKorean(supportingTranscript)) return null
+        const supportingSpokenText = parseTranscript(supportingTranscript)
+          .map((segment) => segment.text)
+          .join(" ")
+        if (!isPrimarilyKorean(supportingSpokenText)) return null
         if (issueContext.title) {
           const relevance = scoreSourceRelevance(issueContext, {
             title: supporting.title,
@@ -303,31 +324,71 @@ export async function POST(request: Request) {
       (previousTitle || previousTitles.length || previousScript)
         ? {
             titles: [
-              ...new Set(
-                [previousTitle, ...previousTitles].filter(Boolean)
-              ),
+              ...new Set([previousTitle, ...previousTitles].filter(Boolean)),
             ].slice(0, 8),
             script: previousScript,
           }
         : undefined
+    const analysisContext = {
+      primarySourceId: source.id,
+      primarySourceTitle: source.title,
+      primarySourceSummary: source.summary,
+      supportingSources: supportingSources.filter(
+        (item): item is NonNullable<typeof item> => Boolean(item)
+      ),
+      issue: issueContext,
+      supplementalContext,
+      channelDirection: settings.issueSearchGuidance,
+      directSource,
+      avoidPrevious,
+      lockedRange: lockedAngleRange,
+    }
+    let transcriptForAnalysis = transcript
+    let refinedRange = lockedAngleRange
+    if (source.localFile && !pasted) {
+      try {
+        if (!refinedRange) {
+          const preliminary = await analyzeNewsTranscript(
+            transcript,
+            settings,
+            false,
+            analysisContext,
+            productionMode,
+            detectedSilences
+          )
+          refinedRange = {
+            start: preliminary.selectedCandidate.sourceStart,
+            end: preliminary.selectedCandidate.sourceEnd,
+          }
+        }
+        const refinedTimedText = await transcribeRangeWithLocalWhisper(
+          source.localFile,
+          source.id,
+          refinedRange
+        )
+        const refinedSegments = parseTranscript(refinedTimedText).map(
+          (segment) =>
+            updateTranscriptSegmentText(
+              segment,
+              normalizeKoreanRecognitionText(segment.text)
+            )
+        )
+        transcriptForAnalysis = serializeTranscript(
+          replaceTranscriptRange(
+            parseTranscript(transcript),
+            refinedSegments,
+            refinedRange
+          )
+        )
+      } catch {
+        // 로컬 2차 전사가 불가능하면 기존 자막으로 계속 진행한다.
+      }
+    }
     const analysis = await analyzeNewsTranscript(
-      transcript,
+      transcriptForAnalysis,
       settings,
       body?.useClaude !== false,
-      {
-        primarySourceId: source.id,
-        primarySourceTitle: source.title,
-        primarySourceSummary: source.summary,
-        supportingSources: supportingSources.filter(
-          (item): item is NonNullable<typeof item> => Boolean(item)
-        ),
-        issue: issueContext,
-        supplementalContext,
-        channelDirection: settings.issueSearchGuidance,
-        directSource,
-        avoidPrevious,
-        lockedRange: lockedAngleRange,
-      },
+      { ...analysisContext, lockedRange: refinedRange },
       productionMode,
       detectedSilences
     )

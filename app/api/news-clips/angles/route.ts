@@ -73,7 +73,9 @@ export async function POST(request: Request) {
       { status: 422 }
     )
   }
-  if (!isPrimarilyKorean(transcript)) {
+  const parsedTranscript = parseTranscript(transcript)
+  const spokenText = parsedTranscript.map((segment) => segment.text).join(" ")
+  if (!isPrimarilyKorean(spokenText)) {
     return NextResponse.json(
       {
         message:
@@ -100,7 +102,7 @@ export async function POST(request: Request) {
       () => []
     )
     return NextResponse.json({
-      transcript: parseTranscript(transcript),
+      transcript: parsedTranscript,
       angles,
       detectedSilences,
       sourceChannel: source.channel,

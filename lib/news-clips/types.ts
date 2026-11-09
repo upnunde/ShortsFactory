@@ -5,6 +5,7 @@ import { isPrimarilyKorean } from "./language.ts"
 export type ProjectType = "character" | "news_clip"
 
 export type NewsClipProductionMode = "report" | "buildup2"
+export type NewsPreviewPart = "all" | "intro" | "lead" | "body" | "outro"
 
 export type NewsChannelProfile = {
   id: string
@@ -114,6 +115,14 @@ export type TranscriptSegment = {
   end: number
   speaker: string
   words: TranscriptWord[]
+  /** STT가 처음 만든 불변 원문. 사용자 오타 수정과 분리한다. */
+  originalText?: string
+  /** STT가 처음 만든 불변 단어 타임라인. */
+  originalWords?: TranscriptWord[]
+  /** 검수 화면에서 확정한 자막 종료 경계. 다음 구간의 시작점은 변경하지 않는다. */
+  captionBoundaryAfter?: boolean
+  /** 자동 전사 경계와 구분되는 사용자 확정 경계. */
+  captionBoundarySource?: "automatic" | "manual"
 }
 
 export type CandidateScores = {
@@ -334,7 +343,11 @@ export const NEWS_CLIP_STEPS: {
     label: "핵심 내용 확인",
     role: "원본 근거와 사용할 논점 확정",
   },
-  { id: "script", label: "보도 대본 검수", role: "제목·보도문 확정" },
+  {
+    id: "script",
+    label: "내용 검수·확정",
+    role: "인트로·서두·본문·마무리 내용 확정",
+  },
   { id: "direction", label: "화면 연출 구성", role: "장면·음성 방식 확정" },
   {
     id: "preview",

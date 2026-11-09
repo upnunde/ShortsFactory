@@ -6,6 +6,7 @@ import {
   type NewsHistoryEntry,
   type NewsHistorySnapshot,
 } from "@/lib/news-clips/history"
+import { repairLegacyOverlappingTranscript } from "@/lib/news-clips/transcript"
 
 const root = path.join(process.cwd(), "outputs", "news-clips", "history")
 const indexPath = path.join(root, "index.json")
@@ -66,11 +67,61 @@ export async function readNewsHistory(id: string, profileId: string) {
       const snapshot = JSON.parse(
         await readFile(path.join(root, id, "project.json"), "utf8")
       ) as NewsHistorySnapshot
-      return snapshot.project.profileId === profileId ? snapshot : null
+      if (snapshot.project.profileId !== profileId) return null
+      return repairLegacyHistoryTranscript(snapshot)
     } catch {
       return null
     }
   })
+}
+
+async function repairLegacyHistoryTranscript(snapshot: NewsHistorySnapshot) {
+  const sourceId = snapshot.project.source?.id ?? ""
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(sourceId)) return snapshot
+
+  const sourceFolder = path.join(
+    process.cwd(),
+    "outputs",
+    "news-clips",
+    sourceId
+  )
+  let timedText = ""
+  for (const filename of ["source.ko.srt", "transcript.srt"]) {
+    try {
+      timedText = await readFile(path.join(sourceFolder, filename), "utf8")
+      if (timedText.trim()) break
+    } catch {
+      // 다음 전사 파일을 확인한다.
+    }
+  }
+  if (!timedText.trim()) return snapshot
+
+  const transcript = repairLegacyOverlappingTranscript(
+    snapshot.project.transcript,
+    timedText
+  )
+  if (transcript === snapshot.project.transcript) return snapshot
+
+  return {
+    ...snapshot,
+    project: {
+      ...snapshot.project,
+      transcript,
+      subtitles: [],
+      subtitleTimingsLocked: false,
+      previewUrl: "",
+      previewIntroUrl: "",
+      previewLeadUrl: "",
+      previewBodyUrl: "",
+      previewOutroUrl: "",
+      previewSignature: "",
+      outputUrl: "",
+      thumbnailUrl: "",
+      renderSignature: "",
+      youtubeVideoId: "",
+      youtubeUploadUrl: "",
+    },
+  }
 }
 
 export async function deleteNewsHistory(id: string, profileId: string) {

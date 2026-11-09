@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process"
-import { mkdir, readFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { access, mkdir, readFile } from "node:fs/promises"
 import path from "node:path"
+
+import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
 
 type WhisperJson = {
   segments?: {
@@ -18,10 +21,14 @@ type WhisperJson = {
 
 export async function transcribeWithLocalWhisper(
   sourceFile: string,
-  projectId: string
+  projectId: string,
+  initialPrompt = ""
 ) {
-  const bin = process.env.WHISPER_BIN?.trim() || "whisper"
-  const model = process.env.WHISPER_MODEL?.trim() || "small"
+  const bin = await whisperBin()
+  const mlx = path.basename(bin) === "mlx_whisper"
+  const model =
+    process.env.WHISPER_MODEL?.trim() ||
+    (mlx ? "mlx-community/whisper-large-v3-turbo" : "small")
   const outputDir = path.join(
     process.cwd(),
     "outputs",
@@ -33,30 +40,115 @@ export async function transcribeWithLocalWhisper(
   const filename = `${path.basename(sourceFile, path.extname(sourceFile))}.json`
   const outputFile = path.join(outputDir, filename)
   try {
-    const cached = JSON.parse(await readFile(outputFile, "utf8")) as WhisperJson
+    const cached = parseWhisperJson(await readFile(outputFile, "utf8"))
     if (cached.segments?.length) return timestampJson(cached)
   } catch {
     // 첫 분석이거나 불완전한 캐시는 아래에서 다시 전사한다.
   }
-  await run(bin, [
-    sourceFile,
-    "--model",
-    model,
-    "--language",
-    "ko",
-    "--task",
-    "transcribe",
-    "--word_timestamps",
-    "True",
-    "--output_format",
-    "json",
-    "--output_dir",
-    outputDir,
-  ])
-  const parsed = JSON.parse(
-    await readFile(outputFile, "utf8")
-  ) as WhisperJson
+  const promptArgs = initialPrompt.trim()
+    ? mlx
+      ? ["--initial-prompt", initialPrompt.trim()]
+      : ["--initial_prompt", initialPrompt.trim()]
+    : []
+  await run(
+    bin,
+    mlx
+      ? [
+          sourceFile,
+          "--model",
+          model,
+          "--language",
+          "ko",
+          "--task",
+          "transcribe",
+          "--word-timestamps",
+          "True",
+          "--output-format",
+          "json",
+          "--output-dir",
+          outputDir,
+          "--verbose",
+          "False",
+          ...promptArgs,
+        ]
+      : [
+          sourceFile,
+          "--model",
+          model,
+          "--language",
+          "ko",
+          "--task",
+          "transcribe",
+          "--word_timestamps",
+          "True",
+          "--output_format",
+          "json",
+          "--output_dir",
+          outputDir,
+          ...promptArgs,
+        ]
+  )
+  const parsed = parseWhisperJson(await readFile(outputFile, "utf8"))
   return timestampJson(parsed)
+}
+
+/** 선택한 실제 사용 구간만 원본 음성에서 다시 전사한다. */
+export async function transcribeRangeWithLocalWhisper(
+  sourceFile: string,
+  projectId: string,
+  range: { start: number; end: number },
+  initialPrompt = ""
+) {
+  const start = Math.max(0, Math.min(range.start, range.end) - 1.5)
+  const end = Math.max(start + 0.5, Math.max(range.start, range.end) + 1.5)
+  const key = createHash("sha256")
+    .update(JSON.stringify({ sourceFile, start, end, initialPrompt }))
+    .digest("hex")
+    .slice(0, 16)
+  const folder = path.join(
+    process.cwd(),
+    "outputs",
+    "news-clips",
+    projectId,
+    "whisper-ranges"
+  )
+  const clip = path.join(folder, `range-${key}.wav`)
+  await mkdir(folder, { recursive: true })
+  try {
+    await access(clip)
+  } catch {
+    await run(ffmpegBin(), [
+      "-y",
+      "-ss",
+      String(start),
+      "-i",
+      sourceFile,
+      "-t",
+      String(end - start),
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_s16le",
+      clip,
+    ])
+  }
+  const relative = JSON.parse(
+    await transcribeWithLocalWhisper(clip, projectId, initialPrompt)
+  ) as WhisperJson
+  const segments = (relative.segments ?? []).map((segment) => ({
+    ...segment,
+    start: number(segment.start) + start,
+    end: number(segment.end) + start,
+    words: (segment.words ?? []).map((word) => ({
+      ...word,
+      start: number(word.start) + start,
+      end: number(word.end) + start,
+    })),
+  }))
+  return timestampJson({ segments })
 }
 
 function timestampJson(parsed: WhisperJson) {
@@ -88,14 +180,54 @@ function timestampJson(parsed: WhisperJson) {
   })
 }
 
+function parseWhisperJson(value: string): WhisperJson {
+  // mlx-whisper가 극히 낮은 확률 구간에 JSON 표준이 아닌 NaN을 기록할 수 있다.
+  // 해당 메타값은 타임스탬프에 쓰지 않으므로 null로 바꿔 캐시를 재사용한다.
+  return JSON.parse(
+    value.replace(/\b(?:NaN|Infinity|-Infinity)\b/g, "null")
+  ) as WhisperJson
+}
+
 function run(bin: string, args: string[]) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: "ignore" })
+    const child = spawn(bin, args, {
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        PATH: [
+          path.join(process.cwd(), "node_modules", "ffmpeg-static"),
+          process.env.PATH ?? "",
+        ]
+          .filter(Boolean)
+          .join(path.delimiter),
+        HF_HOME:
+          process.env.HF_HOME?.trim() ||
+          path.join(process.cwd(), ".tools", "huggingface"),
+      },
+    })
     child.on("error", () => reject(new Error("whisper-unavailable")))
     child.on("exit", (code) =>
       code === 0 ? resolve() : reject(new Error("whisper-failed"))
     )
   })
+}
+
+async function whisperBin() {
+  const configured = process.env.WHISPER_BIN?.trim()
+  if (configured) return configured
+  const mlx = path.join(
+    process.cwd(),
+    ".tools",
+    "whisper-venv",
+    "bin",
+    "mlx_whisper"
+  )
+  try {
+    await access(mlx)
+    return mlx
+  } catch {
+    return "whisper"
+  }
 }
 
 function number(value: unknown) {

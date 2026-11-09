@@ -3,7 +3,10 @@ import test from "node:test"
 
 import {
   angleHasLockedRange,
+  includeLeadingContext,
+  lockAngleRangeToTranscript,
   normalizeAngleOptions,
+  transcriptForAngle,
 } from "./angles.ts"
 
 test("각도 정규화는 주제 구간 start/end를 보존한다", () => {
@@ -33,4 +36,97 @@ test("구간이 너무 짧으면 locked range가 아니다", () => {
     },
   ])
   assert.equal(angleHasLockedRange(angles[0]!), false)
+})
+
+test("사용 구간과 겹치는 모든 전사 문장을 시간순으로 반환한다", () => {
+  const segments = transcriptForAngle(
+    { sourceStart: 10, sourceEnd: 20 },
+    [
+      { id: "after", text: "범위 뒤", start: 20, end: 24 },
+      { id: "middle", text: "두 번째 문장", start: 14, end: 18 },
+      { id: "edge", text: "첫 번째 문장", start: 8, end: 12 },
+      { id: "before", text: "범위 앞", start: 2, end: 8 },
+    ]
+  )
+
+  assert.deepEqual(
+    segments.map((segment) => segment.id),
+    ["edge", "middle"]
+  )
+})
+
+test("사용 구간이 확정되지 않으면 전사를 표시하지 않는다", () => {
+  assert.deepEqual(
+    transcriptForAngle(
+      { sourceStart: 10, sourceEnd: 11 },
+      [{ id: "one", text: "문장", start: 10, end: 11 }]
+    ),
+    []
+  )
+})
+
+test("2번에 표시하는 전사 문장과 실제 영상 구간을 같은 경계로 고정한다", () => {
+  const angle = lockAngleRangeToTranscript(
+    {
+      id: "a1",
+      title: "핵심 발언",
+      summary: "설명",
+      keywords: [],
+      evidence: "",
+      sourceStart: 10,
+      sourceEnd: 20,
+    },
+    [
+      { id: "one", text: "첫 문장", start: 8, end: 12 },
+      { id: "two", text: "둘째 문장", start: 14, end: 22 },
+    ]
+  )
+
+  assert.equal(angle.sourceStart, 8)
+  assert.equal(angle.sourceEnd, 22)
+})
+
+test("대상이 빠진 짧은 서술어로 시작하면 앞 문맥까지 포함한다", () => {
+  const angle = includeLeadingContext(
+    {
+      id: "a1",
+      title: "결론만 잘린 발언",
+      summary: "설명",
+      keywords: [],
+      evidence: "",
+      sourceStart: 12,
+      sourceEnd: 15,
+    },
+    [
+      { id: "subject", text: "결국 대한민국은 위기 속에서", start: 8, end: 12 },
+      { id: "predicate", text: "살았습니다.", start: 12, end: 15 },
+    ]
+  )
+
+  assert.equal(angle.sourceStart, 8)
+})
+
+test("주어와 내용이 완결된 시작 문장은 앞 구간을 추가하지 않는다", () => {
+  const angle = includeLeadingContext(
+    {
+      id: "a1",
+      title: "완결 발언",
+      summary: "설명",
+      keywords: [],
+      evidence: "",
+      sourceStart: 12,
+      sourceEnd: 16,
+    },
+    [
+      { id: "before", text: "앞선 다른 내용입니다.", start: 8, end: 12 },
+      {
+        id: "complete",
+        text: "정부는 관련 예산을 늘렸습니다.",
+        start: 12,
+        end: 16,
+      },
+    ]
+  )
+
+  assert.equal(angle.sourceStart, 12)
 })

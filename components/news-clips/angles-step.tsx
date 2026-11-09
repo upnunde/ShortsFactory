@@ -4,34 +4,42 @@ import { Button, Card } from "@heroui/react"
 import {
   LoadingButtonLabel,
   busyMatches,
-  buttonBusyDisabled,
 } from "@/components/news-clips/loading-button-label"
 import {
   angleHasLockedRange,
+  includeLeadingContext,
+  lockAngleRangeToTranscript,
+  transcriptForAngle,
   type NewsAngleOption,
 } from "@/lib/news-clips/angles"
+import { snapSourceRangeToCompleteUtterance } from "@/lib/news-clips/speech-bounds"
+import type { TranscriptSegment } from "@/lib/news-clips/types"
 
 export function NewsClipAnglesStep({
   angles,
+  transcript,
   selectedAngleId,
   sourceTitle,
   busy,
   note,
   onBack,
-  onSelect,
+  onChoose,
   onCancelSelection,
 }: {
   angles: NewsAngleOption[]
+  transcript: TranscriptSegment[]
   selectedAngleId: string
   sourceTitle?: string
   busy: string
   note: string
   onBack: () => void
-  onSelect: (angle: NewsAngleOption) => void
+  onChoose: (angle: NewsAngleOption) => void
   onCancelSelection: () => void
 }) {
   const selecting = busy.startsWith("select-angle:")
-
+  const completedAngles = angles.map((angle) =>
+    completeAngleForTranscript(angle, transcript)
+  )
   return (
     <>
       <header>
@@ -43,10 +51,13 @@ export function NewsClipAnglesStep({
 
       <Card>
         <Card.Content className="grid gap-3 pt-4 md:grid-cols-2">
-          {angles.map((angle, index) => {
+          {completedAngles.map((angle, index) => {
             const active = selectedAngleId === angle.id
-            const angleBusyKey = `select-angle:${angle.id}`
-            const loading = busyMatches(busy, angleBusyKey)
+            const angleBusy = busyMatches(
+              busy,
+              `select-angle:${angle.id}`
+            )
+            const usedTranscript = transcriptForAngle(angle, transcript)
             return (
               <div
                 key={angle.id}
@@ -61,16 +72,23 @@ export function NewsClipAnglesStep({
                 <p className="mt-2 text-sm leading-6 text-muted">
                   {angle.summary}
                 </p>
-                {angle.evidence ? (
-                  <blockquote className="mt-3 rounded-lg bg-default px-3 py-2 text-sm leading-6">
-                    “{angle.evidence}”
-                  </blockquote>
-                ) : null}
                 {angleHasLockedRange(angle) ? (
-                  <p className="mt-2 text-xs text-muted tabular-nums">
-                    원본 구간 {formatClock(angle.sourceStart)}–
-                    {formatClock(angle.sourceEnd)}
-                  </p>
+                  <section className="mt-4 border-t border-separator pt-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold">
+                        사용 구간 전체 내용
+                      </h3>
+                      <span className="shrink-0 text-xs text-muted tabular-nums">
+                        {formatClock(angle.sourceStart)}–
+                        {formatClock(angle.sourceEnd)}
+                      </span>
+                    </div>
+                    {usedTranscript.length ? (
+                      <p className="mt-3 text-sm leading-7 whitespace-pre-wrap">
+                        {transcriptAsProse(usedTranscript)}
+                      </p>
+                    ) : null}
+                  </section>
                 ) : null}
                 {angle.keywords.length ? (
                   <p className="mt-3 text-xs text-muted">
@@ -80,19 +98,16 @@ export function NewsClipAnglesStep({
                 <div className="mt-4 flex justify-end">
                   <Button
                     size="sm"
-                    isDisabled={buttonBusyDisabled(busy, angleBusyKey)}
-                    onPress={() => onSelect(angle)}
+                    variant={active ? "outline" : "primary"}
+                    isDisabled={Boolean(busy) && !angleBusy}
+                    onPress={() =>
+                      angleBusy ? onCancelSelection() : onChoose(angle)
+                    }
                   >
                     <LoadingButtonLabel
-                      loading={loading}
-                      label="이 내용으로 초안 만들기"
-                      loadingLabel={
-                        busy.endsWith(":preview")
-                          ? "초안 영상 만드는 중"
-                          : busy.endsWith(":script")
-                            ? "대본 준비 중"
-                            : "초안 만드는 중"
-                      }
+                      loading={angleBusy}
+                      label={active ? "다시 시도" : "선택"}
+                      loadingLabel="준비 중 · 취소"
                     />
                   </Button>
                 </div>
@@ -107,19 +122,39 @@ export function NewsClipAnglesStep({
             </div>
           </Card.Content>
         ) : null}
-        <Card.Footer className="justify-between">
+        <Card.Footer>
           <Button variant="outline" isDisabled={selecting} onPress={onBack}>
             이전
           </Button>
-          {selecting || selectedAngleId ? (
-            <Button variant="outline" onPress={onCancelSelection}>
-              선택 취소
-            </Button>
-          ) : null}
         </Card.Footer>
       </Card>
     </>
   )
+}
+
+function completeAngleForTranscript(
+  angle: NewsAngleOption,
+  transcript: TranscriptSegment[]
+) {
+  const range = snapSourceRangeToCompleteUtterance(
+    angle.sourceStart,
+    angle.sourceEnd,
+    transcript
+  )
+  return includeLeadingContext(
+    lockAngleRangeToTranscript(
+      { ...angle, sourceStart: range.start, sourceEnd: range.end },
+      transcript
+    ),
+    transcript
+  )
+}
+
+function transcriptAsProse(transcript: TranscriptSegment[]) {
+  return transcript
+    .map((segment) => segment.text.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ")
 }
 
 function formatClock(seconds: number) {

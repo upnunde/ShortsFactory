@@ -122,6 +122,35 @@ test("완결 발언 보정도 시작 단어를 자르지 않는다", () => {
   assert.equal(snapped.end, 16)
 })
 
+test("레거시 단어 시간이 겹치면 현재 시점과 가장 가까운 단어를 고른다", () => {
+  const overlapping: TranscriptSegment[] = [
+    {
+      id: "old",
+      text: "11월 6일",
+      start: 73,
+      end: 77.84,
+      speaker: "a",
+      words: [{ text: "6일", start: 75.42, end: 77.84 }],
+    },
+    {
+      id: "current",
+      text: "대한민국 법치주의가 사망했습니다.",
+      start: 76,
+      end: 83.28,
+      speaker: "a",
+      words: [
+        { text: "대한민국", start: 76, end: 77.8 },
+        { text: "법치주의가", start: 77.8, end: 80.2 },
+        { text: "사망했습니다.", start: 80.2, end: 83.28 },
+      ],
+    },
+  ]
+
+  const snapped = snapSourceRangeToCompleteUtterance(76, 80, overlapping)
+  assert.equal(snapped.start, 76)
+  assert.equal(snapped.end, 83.28)
+})
+
 test("겹친 keep은 앞 구간 뒤로 잘라 같은 장면이 반복되지 않게 한다", () => {
   const resolved = resolveOverlappingKeeps([
     { start: 10, end: 12 },

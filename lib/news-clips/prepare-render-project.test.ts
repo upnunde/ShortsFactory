@@ -166,6 +166,30 @@ test("잠긴 타임라인은 미리보기를 다시 만들어도 영상 컷 구�
   assert.equal(secondCut?.sourceEnd, 18)
 })
 
+test("잠긴 자막은 어떤 문구로 수정해도 자동 분할·병합 없이 그대로 유지한다", () => {
+  const base = sampleProject()
+  const subtitles = [
+    {
+      id: "fixed-caption",
+      sceneId: "buildup2-quote-cut-1",
+      start: 1.2,
+      end: 2.8,
+      text: "내가 직접 저장한 1줄\n내가 직접 저장한 2줄",
+      emphasis: ["직접"],
+      emphasisColor: "yellow" as const,
+      edited: true,
+    },
+  ]
+  const { project, reason } = prepareRenderProject(
+    { ...base, subtitles, subtitleTimingsLocked: true },
+    defaultNewsClipSettings,
+    { lockTimeline: true }
+  )
+
+  assert.equal(reason, "")
+  assert.deepEqual(project.subtitles, subtitles)
+})
+
 test("prepareRenderProject는 end-cta 구간·크롭을 유지한다", () => {
   const base = sampleProject()
   const withCrop = {
@@ -223,6 +247,46 @@ test("빌드업 서두에 중복된 마무리 멘트를 렌더 전에 제거한�
   assert.equal(reason, "")
   assert.equal(lead?.narration, "직접 들어봐.")
   assert.equal(project.reportScript, `직접 들어봐.\n${outro}`)
+})
+
+test("기존 프로젝트의 축약 날짜도 렌더 직전에 복원한다", () => {
+  const dated = {
+    ...sampleProject(),
+    transcript: [
+      {
+        id: "date-year",
+        text: "26년",
+        start: 10,
+        end: 11,
+        speaker: "a",
+        words: [{ text: "26년", start: 10, end: 11, speaker: "a" }],
+      },
+      {
+        id: "date-month-day",
+        text: "11월 6일",
+        start: 11.1,
+        end: 13,
+        speaker: "a",
+        words: [
+          { text: "11월", start: 11.1, end: 12, speaker: "a" },
+          { text: "6일", start: 12.1, end: 13, speaker: "a" },
+        ],
+      },
+    ],
+  }
+  const { project, reason } = prepareRenderProject(
+    dated,
+    defaultNewsClipSettings,
+    { rebuildSubtitles: true }
+  )
+
+  assert.equal(reason, "")
+  assert.equal(project.transcript[0]?.text, "2026년")
+  assert.ok(
+    project.subtitles.some(
+      (cue) => cue.text.replace(/\n/g, " ") === "2026년 11월 6일"
+    )
+  )
 })
 
 test("prepareRenderProject는 수동 수정한 자막을 기본으로 유지한다", () => {

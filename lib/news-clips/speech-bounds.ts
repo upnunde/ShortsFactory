@@ -154,9 +154,7 @@ function snapStart(
   maxExtend: number,
   maxTrim: number
 ) {
-  const word = words.find(
-    (item) => time >= item.start - 0.04 && time <= item.end + 0.04
-  )
+  const word = wordAtTime(words, time, 0.04)
   if (word) {
     // 말 중간에서 시작하면 그 단어 시작으로 당긴다.
     if (time - word.start <= maxTrim) return word.start
@@ -166,9 +164,7 @@ function snapStart(
     return word.start
   }
 
-  const containing = transcript.find(
-    (segment) => time > segment.start + 0.08 && time < segment.end - 0.08
-  )
+  const containing = segmentAtTime(transcript, time, 0.08)
   if (containing) {
     if (time - containing.start <= maxTrim) return containing.start
     const next = transcript.find(
@@ -195,14 +191,10 @@ function completeUtteranceStart(
   words: TranscriptWord[],
   transcript: TranscriptSegment[]
 ) {
-  const word = words.find(
-    (item) => time >= item.start - 0.04 && time <= item.end + 0.04
-  )
+  const word = wordAtTime(words, time, 0.04)
   if (word) return word.start
 
-  const containing = transcript.find(
-    (segment) => time > segment.start + 0.08 && time < segment.end - 0.08
-  )
+  const containing = segmentAtTime(transcript, time, 0.08)
   if (containing) {
     const nextWord = words.find(
       (item) =>
@@ -222,9 +214,7 @@ function snapEnd(
   maxExtend: number,
   maxTrim: number
 ) {
-  const containing = transcript.find(
-    (segment) => time > segment.start + 0.05 && time < segment.end - 0.05
-  )
+  const containing = segmentAtTime(transcript, time, 0.05)
   if (containing) {
     // 문장/발화 끝이 가까우면 그 끝까지 연장
     if (isUtteranceEnd(containing.text) && containing.end - time <= maxExtend) {
@@ -289,6 +279,26 @@ function collectWords(transcript: TranscriptSegment[]) {
     .flatMap((segment) => segment.words)
     .filter((word) => word.text.trim() && word.end > word.start)
     .sort((left, right) => left.start - right.start)
+}
+
+function wordAtTime(words: TranscriptWord[], time: number, tolerance: number) {
+  return words
+    .filter(
+      (word) => time >= word.start - tolerance && time <= word.end + tolerance
+    )
+    .sort((left, right) => right.start - left.start || left.end - right.end)[0]
+}
+
+function segmentAtTime(
+  transcript: TranscriptSegment[],
+  time: number,
+  inset: number
+) {
+  return transcript
+    .filter(
+      (segment) => time > segment.start + inset && time < segment.end - inset
+    )
+    .sort((left, right) => right.start - left.start || left.end - right.end)[0]
 }
 
 function isUtteranceEnd(text: string) {

@@ -38,17 +38,27 @@ import {
   ensureReportEndCta,
   estimateReportScenesDuration,
   isEndCtaScene,
+  shortBreathReviewTranscript,
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
 import { bodySourceCreditText } from "@/lib/news-clips/source-credit"
 import {
+  automaticSubtitleLineCharacterLimit,
+  canMergeSubtitleCueWithNext,
   fitTitleToLineLayouts,
+  mergeSubtitleCueWithNext,
   resetEditedSubtitleCue,
   splitIntroTitleLines,
+  subtitleLineCharacterLimit,
   titleLineCharacterLimit,
   titleLineFits,
   updateEditedSubtitleCue,
 } from "@/lib/news-clips/text-layout"
+import {
+  clearLegacyAutomaticCaptionBoundaries,
+  mergeTranscriptSegmentWithNext,
+  updateTranscriptSegmentText,
+} from "@/lib/news-clips/transcript"
 import {
   inKoreaUploadWindow,
   nextKoreaUploadSlot,
@@ -59,7 +69,9 @@ import type {
   NewsClipProject,
   NewsClipSettings,
   NewsClipStep,
+  NewsPreviewPart,
   NewsReportScene,
+  TranscriptSegment,
 } from "@/lib/news-clips/types"
 import { NEWS_TTS_VOICES, newsTtsVoiceById } from "@/lib/news-clips/voices"
 
@@ -75,10 +87,6 @@ function splitSubtitleLines(value: string): [string, string] {
   return [lines[0] ?? "", lines.slice(1).join(" ").trim()]
 }
 
-function serializeSubtitleLines(first: string, second: string) {
-  return second ? `${first}\n${second}` : first
-}
-
 function commitSubtitleLines(first: string, second: string) {
   const normalizedFirst = first.replace(/\s+/g, " ").trim()
   const normalizedSecond = second.replace(/\s+/g, " ").trim()
@@ -87,7 +95,7 @@ function commitSubtitleLines(first: string, second: string) {
 
 type ReviewMode = Exclude<NewsClipStep, "issue" | "source" | "angles">
 type EditorTab = "script" | "captions" | "scenes" | "media"
-type CompositionPane = "all" | "intro" | "lead" | "body" | "outro"
+type CompositionPane = NewsPreviewPart
 
 type SceneLayoutDraft = {
   crop: CropPosition
@@ -219,7 +227,7 @@ const EDITOR_TABS: Record<
     { id: "scenes", label: "화면 구성" },
     { id: "media", label: "음향 설정" },
   ],
-  // 3번은 좌측 인트로/본문/마무리 탭이 기준. 우측은 구간별 편집.
+  // 4번은 좌측 인트로/본문/마무리 탭이 기준. 우측은 구간별 편집.
   preview: [],
   final: [],
 }
@@ -259,7 +267,8 @@ export function NewsClipReviewStep({
   onNote: (value: string) => void
   onPreview: (
     force?: boolean,
-    draft?: NewsClipProject
+    draft?: NewsClipProject,
+    part?: NewsPreviewPart
   ) => boolean | Promise<boolean>
   onCancelPreview: () => void
   onReselect: (
@@ -316,6 +325,7 @@ export function NewsClipReviewStep({
   )
   const editingTitleRef = useRef(false)
   const editingReportScriptRef = useRef(false)
+  const scriptReviewDirtyRef = useRef(false)
   const reportScriptTextareaRef = useRef<HTMLTextAreaElement | null>(null)
   const [selectedSubtitleId, setSelectedSubtitleId] = useState("")
   const [voiceBusy, setVoiceBusy] = useState(false)
@@ -420,17 +430,19 @@ export function NewsClipReviewStep({
     outroScriptDraft
   )
   const reportScriptDirty =
-    mode === "preview"
-      ? compositionPane === "lead"
-        ? leadScriptDraft !== projectPartScripts.lead
-        : compositionPane === "outro"
-          ? outroScriptDraft !== projectPartScripts.outro
-          : compositionPane === "body"
-            ? isBuildup2Preview
-              ? false
-              : bodyScriptDraft !== projectPartScripts.body
-            : composedPartScript !== project.reportScript
-      : reportScriptDraft !== project.reportScript
+    mode === "script"
+      ? composedPartScript !== project.reportScript
+      : mode === "preview"
+        ? compositionPane === "lead"
+          ? leadScriptDraft !== projectPartScripts.lead
+          : compositionPane === "outro"
+            ? outroScriptDraft !== projectPartScripts.outro
+            : compositionPane === "body"
+              ? isBuildup2Preview
+                ? false
+                : bodyScriptDraft !== projectPartScripts.body
+              : composedPartScript !== project.reportScript
+        : reportScriptDraft !== project.reportScript
   const paneScriptValue =
     mode === "preview" && compositionPane === "lead"
       ? leadScriptDraft
@@ -440,10 +452,30 @@ export function NewsClipReviewStep({
           ? bodyScriptDraft
           : reportScriptDraft
   const showPaneScriptEditor =
-    mode !== "preview" ||
-    compositionPane === "lead" ||
-    compositionPane === "outro" ||
-    (compositionPane === "body" && !isBuildup2Preview)
+    mode !== "script" &&
+    (mode !== "preview" ||
+      compositionPane === "lead" ||
+      compositionPane === "outro" ||
+      (compositionPane === "body" && !isBuildup2Preview))
+  const selectedCandidate = project.candidates.find(
+    (candidate) => candidate.id === project.selectedCandidateId
+  )
+  const bodyReviewBounds = selectedCandidate
+    ? buildup2HighlightBounds(
+        project.reportScenes,
+        selectedCandidate.sourceStart,
+        selectedCandidate.sourceEnd
+      )
+    : null
+  const bodyReviewStart = bodyReviewBounds?.start
+  const bodyReviewEnd = bodyReviewBounds?.end
+  const bodyReviewSegments = bodyReviewBounds
+    ? project.transcript.filter(
+        (segment) =>
+          segment.end > bodyReviewBounds.start + 0.01 &&
+          segment.start < bodyReviewBounds.end - 0.01
+      )
+    : []
   const previewBlockedReason = previewButtonBlockedReason({
     busy,
     titleValid,
@@ -482,12 +514,44 @@ export function NewsClipReviewStep({
 
   useEffect(() => {
     if (editingReportScriptRef.current) return
+    if (scriptReviewDirtyRef.current) return
     const parts = partScriptTexts(project)
     setReportScriptDraft(project.reportScript)
     setLeadScriptDraft(parts.lead)
     setBodyScriptDraft(parts.body)
     setOutroScriptDraft(parts.outro)
   }, [project])
+
+  useEffect(() => {
+    if (
+      mode !== "script" ||
+      project.productionMode !== "buildup2" ||
+      bodyReviewStart === undefined ||
+      bodyReviewEnd === undefined
+    ) {
+      return
+    }
+    const reviewed = shortBreathReviewTranscript(
+      project.transcript,
+      { start: bodyReviewStart, end: bodyReviewEnd },
+      automaticSubtitleLineCharacterLimit(settings.bodySubtitleText)
+    )
+    if (reviewed === project.transcript) return
+    onProject({
+      transcript: reviewed,
+      subtitles: [],
+      subtitleTimingsLocked: false,
+      renderSignature: "",
+    })
+  }, [
+    bodyReviewEnd,
+    bodyReviewStart,
+    mode,
+    onProject,
+    project.productionMode,
+    project.transcript,
+    settings.bodySubtitleText,
+  ])
 
   useLayoutEffect(() => {
     resizeTextareaToContent(reportScriptTextareaRef.current)
@@ -776,20 +840,32 @@ export function NewsClipReviewStep({
     })
   }
 
-  function finishPreviewPartScript() {
-    if (
-      mode !== "preview" ||
-      project.productionMode !== "buildup2" ||
-      (compositionPane !== "lead" && compositionPane !== "outro")
-    ) {
+  function savePartScript(target: "lead" | "outro") {
+    const savedParts = partScriptTexts(project)
+    const leadText =
+      target === "lead" ? leadScriptDraft.trim() : savedParts.lead
+    const outroText =
+      target === "outro" ? outroScriptDraft.trim() : savedParts.outro
+    scriptReviewDirtyRef.current =
+      target === "lead"
+        ? outroScriptDraft !== savedParts.outro
+        : leadScriptDraft !== savedParts.lead
+
+    if (project.productionMode !== "buildup2") {
       finishReportScript(
-        mode === "preview" ? composedPartScript : reportScriptDraft
+        composePartScripts(
+          project.productionMode,
+          leadText,
+          savedParts.body,
+          outroText
+        )
+      )
+      onNote(
+        target === "lead" ? "서두를 저장했습니다." : "마무리를 저장했습니다."
       )
       return
     }
 
-    const leadText = leadScriptDraft.trim()
-    const outroText = outroScriptDraft.trim()
     const completeReportScript = composePartScripts(
       project.productionMode,
       leadText,
@@ -797,7 +873,7 @@ export function NewsClipReviewStep({
       outroText
     )
     const reportScenes =
-      compositionPane === "lead"
+      target === "lead"
         ? project.reportScenes.map((scene) =>
             scene.id === "buildup2-lead"
               ? { ...scene, narration: leadText }
@@ -841,7 +917,7 @@ export function NewsClipReviewStep({
       freshSceneParts.body
     )
     const subtitles =
-      compositionPane === "lead"
+      target === "lead"
         ? [
             ...freshSubtitleParts.lead,
             ...currentSubtitleParts.body,
@@ -862,9 +938,23 @@ export function NewsClipReviewStep({
       renderSignature: "",
     })
     onNote(
-      compositionPane === "lead"
+      target === "lead"
         ? "서두를 저장했습니다. 다시 만들면 TTS와 자막 싱크가 갱신됩니다."
         : "마무리를 저장했습니다. 다시 만들면 TTS와 자막 싱크가 갱신됩니다."
+    )
+  }
+
+  function finishPreviewPartScript() {
+    if (
+      mode === "preview" &&
+      project.productionMode === "buildup2" &&
+      (compositionPane === "lead" || compositionPane === "outro")
+    ) {
+      savePartScript(compositionPane)
+      return
+    }
+    finishReportScript(
+      mode === "preview" ? composedPartScript : reportScriptDraft
     )
   }
 
@@ -1002,7 +1092,8 @@ export function NewsClipReviewStep({
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        // 수정 반영을 위해 이전 산출물·캐시를 지우고 항상 새로 만든다.
+        // 수정된 영상 파트는 강제 재생성하되, 승인된 미리보기와
+        // TTS·전사 캐시는 보존해 재호출 비용을 막는다.
         body: JSON.stringify({
           project,
           settings,
@@ -1162,7 +1253,7 @@ export function NewsClipReviewStep({
           : compositionPane === "body"
             ? bodyCaptions
             : []
-  // 3번: 구간별 클립 재생. 4번: 합본·최종본.
+  // 4번: 구간별 클립 재생. 5번: 합본·최종본.
   const showPartPreview = mode === "preview"
   const renderedVideoUrl =
     mode === "final"
@@ -1200,7 +1291,7 @@ export function NewsClipReviewStep({
         )
         return null
       }
-      finishTitleEdit(titleDraft)
+      if (mode !== "script") finishTitleEdit(titleDraft)
       draft = {
         ...draft,
         title: titleDraft,
@@ -1213,7 +1304,9 @@ export function NewsClipReviewStep({
     if (reportScriptDirty) {
       const isBuildup2 = draft.productionMode === "buildup2"
       const scriptForSave =
-        mode === "preview" ? composedPartScript : reportScriptDraft
+        mode === "preview" || mode === "script"
+          ? composedPartScript
+          : reportScriptDraft
       const completeReportScript = ensureReportEndCta(
         scriptForSave,
         draft.title,
@@ -1250,7 +1343,7 @@ export function NewsClipReviewStep({
             draft.reportScenes,
             draft.source?.id ?? ""
           )
-      finishReportScript(scriptForSave)
+      if (mode !== "script") finishReportScript(scriptForSave)
       const prepared = prepareRenderProject(
         {
           ...draft,
@@ -1282,7 +1375,11 @@ export function NewsClipReviewStep({
         subtitleTimingsLocked: false,
       }
     }
-    const preparedDraft = prepareRenderProject(draft, settings)
+    const preparedDraft = prepareRenderProject(draft, settings, {
+      // 확정된 자막을 다시 만들 때는 저장된 문구와 연결된 영상 구간을
+      // 렌더 직전 정규화 과정에서도 다시 구성하지 않는다.
+      lockTimeline: draft.subtitleTimingsLocked,
+    })
     if (preparedDraft.reason) {
       onNote(
         preparedDraft.reason === "report-scenes-required"
@@ -1295,9 +1392,29 @@ export function NewsClipReviewStep({
   }
 
   async function createPreviewAndContinue() {
-    const draft = draftProjectForPreview()
-    if (!draft) return
-    // 3번 추정 자막을 들고 가지 않고, 렌더 실측 기준으로 다시 만든다.
+    const prepared = draftProjectForPreview()
+    if (!prepared) return
+    const cleanedTranscript = bodyReviewBounds
+      ? clearLegacyAutomaticCaptionBoundaries(
+          prepared.transcript,
+          bodyReviewBounds
+        )
+      : prepared.transcript
+    const removedLegacyAutoBoundary = cleanedTranscript !== prepared.transcript
+    const preparedDraft = removedLegacyAutoBoundary
+      ? { ...prepared, transcript: cleanedTranscript }
+      : prepared
+    const changed = titleDirty || reportScriptDirty || removedLegacyAutoBoundary
+    const draft = changed
+      ? {
+          ...preparedDraft,
+          editorialRevision: project.editorialRevision + 1,
+          updatedAt: new Date().toISOString(),
+        }
+      : preparedDraft
+    if (changed) onProject(draft)
+    // 자동 구간은 실제 단어 시간과 문장 의미를 기준으로 짧게 구성한다.
+    // 사용자가 저장·합치기·나누기로 확정한 경계만 transcript에 남아 우선된다.
     const created = await onPreview(true, {
       ...draft,
       subtitles: [],
@@ -1885,9 +2002,11 @@ export function NewsClipReviewStep({
                           ? "본문 대본"
                           : mode === "preview" && compositionPane === "outro"
                             ? "마무리 대본"
-                            : project.productionMode === "buildup2"
-                              ? "제목·빌드업 서두"
-                              : "제목·시사 논평 대본"}
+                            : mode === "script"
+                              ? "전체 내용 검수"
+                              : project.productionMode === "buildup2"
+                                ? "제목·빌드업 서두"
+                                : "제목·시사 논평 대본"}
                   </Card.Title>
                   <Card.Description className={cardDescriptionClass}>
                     {mode === "preview" && compositionPane === "intro"
@@ -1898,9 +2017,11 @@ export function NewsClipReviewStep({
                           ? "본문 나레이션만 수정합니다. 마무리 멘트는 마무리 탭에서 다룹니다."
                           : mode === "preview" && compositionPane === "outro"
                             ? "마무리(댓글 유도) 멘트만 수정합니다."
-                            : project.productionMode === "buildup2"
-                              ? "서두·마무리만 TTS. 본편은 원본 영상·음성이고 자막은 전사를 씁니다."
-                              : "논평은 TTS로 읽고, 직접 발언은 원본 음성을 씁니다."}
+                            : mode === "script"
+                              ? "인트로, 서두, 본문, 마무리를 순서대로 확인합니다."
+                              : project.productionMode === "buildup2"
+                                ? "서두·마무리만 TTS. 본편은 원본 영상·음성이고 자막은 전사를 씁니다."
+                                : "논평은 TTS로 읽고, 직접 발언은 원본 음성을 씁니다."}
                   </Card.Description>
                 </div>
                 {mode !== "preview" ? (
@@ -2022,6 +2143,172 @@ export function NewsClipReviewStep({
                       </label>
                     </div>
                   </div>
+                ) : null}
+                {mode === "script" ? (
+                  <>
+                    <section className="flex flex-col gap-3 border-t border-separator pt-5">
+                      <div className={sectionHeaderClass}>
+                        <label
+                          htmlFor="news-clip-lead-script"
+                          className={sectionTitleClass}
+                        >
+                          서두
+                        </label>
+                        <span className="ml-auto flex items-center justify-end gap-2">
+                          {leadScriptDraft !== projectPartScripts.lead ? (
+                            <span className="text-xs text-warning">
+                              저장 전
+                            </span>
+                          ) : null}
+                          <Button
+                            size="sm"
+                            isDisabled={
+                              busy !== "" ||
+                              !leadScriptDraft.trim() ||
+                              leadScriptDraft === projectPartScripts.lead
+                            }
+                            onPress={() => savePartScript("lead")}
+                          >
+                            저장
+                          </Button>
+                        </span>
+                      </div>
+                      <textarea
+                        id="news-clip-lead-script"
+                        aria-label="서두 대본"
+                        rows={1}
+                        value={leadScriptDraft}
+                        onChange={(event) => {
+                          resizeTextareaToContent(event.currentTarget)
+                          const next = event.currentTarget.value
+                          scriptReviewDirtyRef.current =
+                            composePartScripts(
+                              project.productionMode,
+                              next,
+                              bodyScriptDraft,
+                              outroScriptDraft
+                            ) !== project.reportScript
+                          setLeadScriptDraft(next)
+                        }}
+                        className={`${field} [field-sizing:content] min-h-24 resize-none overflow-hidden`}
+                      />
+                    </section>
+
+                    <section className="flex flex-col gap-3 border-t border-separator pt-5">
+                      <div className={sectionHeaderClass}>
+                        <h3 className={sectionTitleClass}>본문</h3>
+                        {bodyReviewBounds ? (
+                          <span className="text-xs text-muted tabular-nums">
+                            {time(bodyReviewBounds.start)} →{" "}
+                            {time(bodyReviewBounds.end)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-col divide-y divide-separator">
+                        {bodyReviewSegments.length ? (
+                          bodyReviewSegments.map((segment, index) => (
+                            <ReviewTranscriptSegment
+                              key={`${segment.id}:${segment.start}:${segment.text}`}
+                              segment={segment}
+                              disabled={busy !== ""}
+                              canMergeNext={
+                                index < bodyReviewSegments.length - 1
+                              }
+                              onSave={(text) => {
+                                onProject((current) => ({
+                                  transcript: current.transcript.map((item) =>
+                                    item.id === segment.id
+                                      ? {
+                                          ...updateTranscriptSegmentText(
+                                            item,
+                                            text
+                                          ),
+                                          captionBoundaryAfter: true,
+                                          captionBoundarySource: "manual",
+                                        }
+                                      : item
+                                  ),
+                                  subtitles: [],
+                                  subtitleTimingsLocked: false,
+                                }))
+                                onNote("본문 원문을 저장했습니다.")
+                              }}
+                              onMergeNext={() => {
+                                const nextSegment =
+                                  bodyReviewSegments[index + 1]
+                                if (!nextSegment) return
+                                onProject((current) => ({
+                                  transcript: mergeTranscriptSegmentWithNext(
+                                    current.transcript,
+                                    segment.id,
+                                    nextSegment.id
+                                  ),
+                                  subtitles: [],
+                                  subtitleTimingsLocked: false,
+                                  renderSignature: "",
+                                }))
+                                onNote(
+                                  "다음 원문과 시간 구간을 함께 합쳤습니다."
+                                )
+                              }}
+                            />
+                          ))
+                        ) : (
+                          <p className="py-3 text-sm text-muted">
+                            표시할 본문 구간이 없습니다.
+                          </p>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className="flex flex-col gap-3 border-t border-separator pt-5">
+                      <div className={sectionHeaderClass}>
+                        <label
+                          htmlFor="news-clip-outro-script"
+                          className={sectionTitleClass}
+                        >
+                          마무리
+                        </label>
+                        <span className="ml-auto flex items-center justify-end gap-2">
+                          {outroScriptDraft !== projectPartScripts.outro ? (
+                            <span className="text-xs text-warning">
+                              저장 전
+                            </span>
+                          ) : null}
+                          <Button
+                            size="sm"
+                            isDisabled={
+                              busy !== "" ||
+                              !outroScriptDraft.trim() ||
+                              outroScriptDraft === projectPartScripts.outro
+                            }
+                            onPress={() => savePartScript("outro")}
+                          >
+                            저장
+                          </Button>
+                        </span>
+                      </div>
+                      <textarea
+                        id="news-clip-outro-script"
+                        aria-label="마무리 멘트"
+                        rows={1}
+                        value={outroScriptDraft}
+                        onChange={(event) => {
+                          resizeTextareaToContent(event.currentTarget)
+                          const next = event.currentTarget.value
+                          scriptReviewDirtyRef.current =
+                            composePartScripts(
+                              project.productionMode,
+                              leadScriptDraft,
+                              bodyScriptDraft,
+                              next
+                            ) !== project.reportScript
+                          setOutroScriptDraft(next)
+                        }}
+                        className={`${field} [field-sizing:content] min-h-20 resize-none overflow-hidden`}
+                      />
+                    </section>
+                  </>
                 ) : null}
                 {showPaneScriptEditor ? (
                   <div
@@ -2618,6 +2905,36 @@ export function NewsClipReviewStep({
                                 <Button
                                   size="sm"
                                   variant="outline"
+                                  isDisabled={
+                                    !canMergeSubtitleCueWithNext(
+                                      project.subtitles,
+                                      caption.id
+                                    )
+                                  }
+                                  onPress={() => {
+                                    onProject((current) => {
+                                      const subtitles =
+                                        mergeSubtitleCueWithNext(
+                                          current.subtitles,
+                                          caption.id,
+                                          settings.bodySubtitleText
+                                        )
+                                      return syncNarrationFromSubtitleEdit(
+                                        current,
+                                        subtitles,
+                                        caption.id
+                                      )
+                                    })
+                                    onNote(
+                                      `자막 ${index + 1}과 다음 자막을 합쳤습니다.`
+                                    )
+                                  }}
+                                >
+                                  다음과 합치기
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
                                   isDisabled={!caption.edited}
                                   onPress={() => {
                                     onProject((current) => {
@@ -2640,93 +2957,45 @@ export function NewsClipReviewStep({
                                 </Button>
                               </div>
                             </div>
-                            <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-                              <SubtitleLineFields
-                                value={caption.text}
-                                characterLimit={titleLineCharacterLimit(
-                                  settings.bodySubtitleText
-                                )}
-                                onFocus={() =>
-                                  setSelectedSubtitleId(caption.id)
-                                }
-                                onChange={(text) => {
-                                  onProject((current) => {
-                                    const subtitles = current.subtitles.map(
-                                      (item) =>
-                                        item.id === caption.id
-                                          ? {
-                                              ...item,
-                                              originalText:
-                                                item.originalText ?? item.text,
-                                              originalEmphasis:
-                                                item.originalEmphasis ?? [
-                                                  ...item.emphasis,
-                                                ],
-                                              text,
-                                              edited: true,
-                                            }
-                                          : item
-                                    )
-                                    return syncNarrationFromSubtitleEdit(
-                                      current,
-                                      subtitles,
-                                      caption.id
-                                    )
-                                  })
-                                }}
-                                onCommit={(text) => {
-                                  onProject((current) => {
-                                    const subtitles = updateEditedSubtitleCue(
-                                      current.subtitles,
-                                      caption.id,
-                                      text,
-                                      settings.bodySubtitleText
-                                    )
-                                    return syncNarrationFromSubtitleEdit(
-                                      current,
-                                      subtitles,
-                                      caption.id
-                                    )
-                                  })
-                                }}
-                              />
-                              <label className="flex min-w-0 flex-col gap-2">
-                                <span className="text-sm">강조 단어</span>
-                                <input
-                                  value={caption.emphasis.join(", ")}
-                                  onFocus={() =>
-                                    setSelectedSubtitleId(caption.id)
-                                  }
-                                  onChange={(event) => {
-                                    const emphasis = event.currentTarget.value
-                                      .split(",")
-                                      .map((word) => word.trim())
-                                      .filter(Boolean)
-                                    onProject((current) => ({
-                                      subtitles: current.subtitles.map(
-                                        (item) =>
-                                          item.id === caption.id
-                                            ? {
-                                                ...item,
-                                                originalText:
-                                                  item.originalText ??
-                                                  item.text,
-                                                originalEmphasis:
-                                                  item.originalEmphasis ?? [
-                                                    ...item.emphasis,
-                                                  ],
-                                                emphasis,
-                                                edited: true,
-                                              }
-                                            : item
-                                      ),
-                                      subtitleTimingsLocked: true,
-                                    }))
-                                  }}
-                                  className={field}
-                                />
-                              </label>
-                            </div>
+                            <SubtitleLineFields
+                              value={caption.text}
+                              emphasis={caption.emphasis}
+                              characterLimit={subtitleLineCharacterLimit(
+                                settings.bodySubtitleText
+                              )}
+                              onFocus={() => setSelectedSubtitleId(caption.id)}
+                              onCommit={(text, emphasis) => {
+                                onProject((current) => {
+                                  const withText = updateEditedSubtitleCue(
+                                    current.subtitles,
+                                    caption.id,
+                                    text,
+                                    settings.bodySubtitleText
+                                  )
+                                  const subtitles = withText.map((item) =>
+                                    item.id === caption.id
+                                      ? {
+                                          ...item,
+                                          originalEmphasis:
+                                            item.originalEmphasis ?? [
+                                              ...item.emphasis,
+                                            ],
+                                          emphasis,
+                                          edited: true,
+                                        }
+                                      : item
+                                  )
+                                  return syncNarrationFromSubtitleEdit(
+                                    current,
+                                    subtitles,
+                                    caption.id
+                                  )
+                                })
+                                onNote(
+                                  `자막 ${index + 1}을 저장했습니다. 다시 만들면 영상에 반영됩니다.`
+                                )
+                              }}
+                            />
                           </div>
                         ))
                       ) : (
@@ -2851,9 +3120,7 @@ export function NewsClipReviewStep({
                 : buttonBusyDisabled(busy, "preview") ||
                   !project.title ||
                   !project.reportScript ||
-                  !titleValid ||
-                  titleDirty ||
-                  reportScriptDirty
+                  !titleValid
             }
             onPress={() => {
               if (busyMatches(busy, "preview")) {
@@ -2865,7 +3132,7 @@ export function NewsClipReviewStep({
           >
             {busyMatches(busy, "preview")
               ? previewCancelLabel(previewProgress)
-              : "다음"}
+              : "미리보기 만들기"}
           </Button>
         ) : null}
         {mode === "direction" ? (
@@ -2901,17 +3168,23 @@ export function NewsClipReviewStep({
                 }
                 const draft = draftProjectForPreview()
                 if (!draft) return
-                void onPreview(true, {
-                  ...draft,
-                  subtitleTimingsLocked: Boolean(
-                    draft.subtitleTimingsLocked && draft.subtitles.length
-                  ),
-                })
+                void onPreview(
+                  true,
+                  {
+                    ...draft,
+                    subtitleTimingsLocked: Boolean(
+                      draft.subtitleTimingsLocked && draft.subtitles.length
+                    ),
+                  },
+                  compositionPane
+                )
               }}
             >
               {busyMatches(busy, "preview")
                 ? previewCancelLabel(previewProgress)
-                : "다시 만들기"}
+                : compositionPane === "all"
+                  ? "다시 만들기"
+                  : `${partPreviewLabel} 다시 만들기`}
             </Button>
             <Button
               isDisabled={
@@ -3011,7 +3284,7 @@ export function NewsClipReviewStep({
 
 const REVIEW_STEP_COPY = {
   script: {
-    title: "대본 검수",
+    title: "내용 검수·확정",
   },
   direction: {
     title: "화면 연출",
@@ -3027,50 +3300,125 @@ const REVIEW_STEP_COPY = {
   { title: string }
 >
 
+function ReviewTranscriptSegment({
+  segment,
+  disabled,
+  canMergeNext,
+  onSave,
+  onMergeNext,
+}: {
+  segment: TranscriptSegment
+  disabled: boolean
+  canMergeNext: boolean
+  onSave: (text: string) => void
+  onMergeNext: () => void
+}) {
+  const [draft, setDraft] = useState(segment.text)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const normalized = draft.replace(/\s+/g, " ").trim()
+  const changed = Boolean(normalized) && normalized !== segment.text
+
+  useLayoutEffect(() => {
+    resizeTextareaToContent(textareaRef.current)
+  }, [draft])
+
+  return (
+    <div className="grid gap-3 py-4 first:pt-0 last:pb-0 sm:grid-cols-[92px_minmax(0,1fr)]">
+      <span className="pt-2.5 text-xs text-muted tabular-nums">
+        {time(segment.start)}–{time(segment.end)}
+      </span>
+      <div className="flex min-w-0 flex-col gap-2">
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={draft}
+          disabled={disabled}
+          aria-label={`${time(segment.start)} 본문 원문`}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          className={`${field} min-h-11 resize-none overflow-hidden leading-6`}
+        />
+        <div className="flex justify-end gap-2">
+          {canMergeNext ? (
+            <Button
+              size="sm"
+              variant="outline"
+              isDisabled={disabled || changed}
+              onPress={onMergeNext}
+            >
+              다음 구간과 합치기
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            variant="outline"
+            isDisabled={disabled || !changed}
+            onPress={() => onSave(normalized)}
+          >
+            저장
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SubtitleLineFields({
   value,
+  emphasis,
   characterLimit,
   onFocus,
-  onChange,
   onCommit,
 }: {
   value: string
+  emphasis: string[]
   characterLimit: number
   onFocus: () => void
-  onChange: (value: string) => void
-  onCommit: (value: string) => void
+  onCommit: (value: string, emphasis: string[]) => void
 }) {
   const [draft, setDraft] = useState<[string, string]>(() =>
     splitSubtitleLines(value)
   )
+  const [emphasisDraft, setEmphasisDraft] = useState(() => emphasis.join(", "))
   const editingRef = useRef(false)
   const safeLimit = Math.max(1, characterLimit)
   const firstLineLength = [...draft[0]].length
   const secondLineLength = [...draft[1]].length
   const firstLineOver = firstLineLength > safeLimit
   const secondLineOver = secondLineLength > safeLimit
+  const committedText = commitSubtitleLines(draft[0], draft[1])
+  const savedText = commitSubtitleLines(...splitSubtitleLines(value))
+  const committedEmphasis = emphasisDraft
+    .split(",")
+    .map((word) => word.trim())
+    .filter(Boolean)
+  const savedEmphasis = emphasis.map((word) => word.trim()).filter(Boolean)
+  const dirty =
+    committedText !== savedText ||
+    committedEmphasis.join("\n") !== savedEmphasis.join("\n")
 
   useEffect(() => {
-    if (!editingRef.current) setDraft(splitSubtitleLines(value))
-  }, [value])
+    if (editingRef.current) return
+    setDraft(splitSubtitleLines(value))
+    setEmphasisDraft(emphasis.join(", "))
+  }, [emphasis, value])
 
   function updateLine(index: 0 | 1, nextValue: string) {
     const next: [string, string] = [draft[0], draft[1]]
     next[index] = nextValue
     setDraft(next)
-    onChange(serializeSubtitleLines(next[0], next[1]))
   }
 
   function commit() {
     editingRef.current = false
-    const nextValue = commitSubtitleLines(draft[0], draft[1])
+    const nextValue = committedText
     setDraft(splitSubtitleLines(nextValue || value))
-    onCommit(nextValue)
+    setEmphasisDraft(committedEmphasis.join(", "))
+    onCommit(nextValue, committedEmphasis)
   }
 
   return (
     <div
-      className="grid min-w-0 gap-3"
+      className="grid min-w-0 items-start gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]"
       onFocusCapture={() => {
         editingRef.current = true
         onFocus()
@@ -3078,53 +3426,73 @@ function SubtitleLineFields({
       onBlurCapture={(event) => {
         const nextTarget = event.relatedTarget as Node | null
         if (event.currentTarget.contains(nextTarget)) return
-        commit()
+        editingRef.current = false
       }}
     >
-      <label className="flex min-w-0 flex-col gap-2">
-        <span className="text-sm">
-          1줄 · 최대 {safeLimit}자
-          {firstLineOver ? (
-            <span className="ml-2 text-danger">폭 초과</span>
-          ) : null}
-        </span>
-        <div className="relative">
-          <input
-            aria-label="자막 1줄"
-            value={draft[0]}
-            maxLength={safeLimit}
-            onChange={(event) => updateLine(0, event.currentTarget.value)}
-            className={`${field} pr-14 ${firstLineOver ? "border-danger" : ""}`}
-          />
-          <span
-            className={`pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums ${firstLineOver ? "text-danger" : "text-muted"}`}
-          >
-            {firstLineLength}/{safeLimit}
+      <div className="grid min-w-0 gap-3">
+        <label className="flex min-w-0 flex-col gap-2">
+          <span className="text-sm">
+            1줄 · 최대 {safeLimit}자
+            {firstLineOver ? (
+              <span className="ml-2 text-danger">폭 초과</span>
+            ) : null}
           </span>
-        </div>
-      </label>
-      <label className="flex min-w-0 flex-col gap-2">
-        <span className="text-sm">
-          2줄 · 선택 · 최대 {safeLimit}자
-          {secondLineOver ? (
-            <span className="ml-2 text-danger">폭 초과</span>
-          ) : null}
-        </span>
-        <div className="relative">
-          <input
-            aria-label="자막 2줄"
-            value={draft[1]}
-            maxLength={safeLimit}
-            onChange={(event) => updateLine(1, event.currentTarget.value)}
-            className={`${field} pr-14 ${secondLineOver ? "border-danger" : ""}`}
-          />
-          <span
-            className={`pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums ${secondLineOver ? "text-danger" : "text-muted"}`}
-          >
-            {secondLineLength}/{safeLimit}
+          <div className="relative">
+            <input
+              aria-label="자막 1줄"
+              value={draft[0]}
+              maxLength={safeLimit}
+              onChange={(event) => updateLine(0, event.currentTarget.value)}
+              className={`${field} pr-14 ${firstLineOver ? "border-danger" : ""}`}
+            />
+            <span
+              className={`pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums ${firstLineOver ? "text-danger" : "text-muted"}`}
+            >
+              {firstLineLength}/{safeLimit}
+            </span>
+          </div>
+        </label>
+        <label className="flex min-w-0 flex-col gap-2">
+          <span className="text-sm">
+            2줄 · 선택 · 최대 {safeLimit}자
+            {secondLineOver ? (
+              <span className="ml-2 text-danger">폭 초과</span>
+            ) : null}
           </span>
-        </div>
+          <div className="relative">
+            <input
+              aria-label="자막 2줄"
+              value={draft[1]}
+              maxLength={safeLimit}
+              onChange={(event) => updateLine(1, event.currentTarget.value)}
+              className={`${field} pr-14 ${secondLineOver ? "border-danger" : ""}`}
+            />
+            <span
+              className={`pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-xs tabular-nums ${secondLineOver ? "text-danger" : "text-muted"}`}
+            >
+              {secondLineLength}/{safeLimit}
+            </span>
+          </div>
+        </label>
+      </div>
+      <label className="flex min-w-0 flex-col gap-2">
+        <span className="text-sm">강조 단어</span>
+        <input
+          value={emphasisDraft}
+          onChange={(event) => setEmphasisDraft(event.currentTarget.value)}
+          className={field}
+        />
       </label>
+      <div className="flex min-h-8 items-center justify-end gap-2 sm:col-span-2">
+        {dirty ? <span className="text-xs text-warning">저장 전</span> : null}
+        <Button
+          size="sm"
+          isDisabled={!dirty || firstLineOver || secondLineOver}
+          onPress={commit}
+        >
+          저장
+        </Button>
+      </div>
     </div>
   )
 }

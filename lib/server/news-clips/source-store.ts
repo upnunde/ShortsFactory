@@ -14,6 +14,7 @@ import type {
 const root = path.join(process.cwd(), "outputs", "news-clips")
 const videoExtensions = new Set([".mp4", ".mov", ".mkv", ".webm", ".m4v"])
 const subtitleExtensions = new Set([".srt", ".vtt", ".txt"])
+const transcriptExtensions = [".json", ".srt", ".vtt", ".txt"] as const
 
 export async function createUploadedSource(input: {
   file: File
@@ -287,7 +288,7 @@ export async function readSource(id: string) {
 export async function readStoredTranscript(id: string) {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null
   const folder = path.join(root, id)
-  for (const extension of subtitleExtensions) {
+  for (const extension of transcriptExtensions) {
     try {
       return await readFile(path.join(folder, `transcript${extension}`), "utf8")
     } catch {
@@ -312,7 +313,21 @@ export async function writeStoredTranscript(id: string, transcript: string) {
   if (!/^[0-9a-f-]{36}$/i.test(id) || !transcript.trim()) return
   const folder = path.join(root, id)
   await mkdir(folder, { recursive: true })
-  await writeFile(path.join(folder, "transcript.srt"), transcript)
+  await writeFile(
+    path.join(folder, transcriptIsTimestampJson(transcript) ? "transcript.json" : "transcript.srt"),
+    transcript
+  )
+}
+
+function transcriptIsTimestampJson(value: string) {
+  const text = value.trim()
+  if (!text.startsWith("{") && !text.startsWith("[")) return false
+  try {
+    const parsed = JSON.parse(text) as { segments?: unknown }
+    return Array.isArray(parsed?.segments)
+  } catch {
+    return false
+  }
 }
 
 export async function readAnalysisCache(id: string) {

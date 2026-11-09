@@ -1,13 +1,6 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import {
-  access,
-  copyFile,
-  mkdir,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises"
+import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
@@ -36,6 +29,7 @@ import {
   NEWS_OUTRO_GAP_SECONDS,
   quoteTranscriptAlignment,
   applySubtitleTimingForRender,
+  mergeEditedSubtitleText,
   reportCaptionPhrases,
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
@@ -54,19 +48,28 @@ import {
   newsVideoEncodeArgs,
 } from "@/lib/server/news-clips/render-codec"
 import { validateNewsClipOutput } from "@/lib/server/news-clips/output-validation"
-import { parseTranscript } from "@/lib/news-clips/transcript"
+import {
+  normalizeKoreanRecognitionText,
+  parseTranscript,
+  replaceTranscriptRange,
+  transcriptRangeIsReviewed,
+  transcriptRangeLooksHallucinated,
+  updateTranscriptSegmentText,
+} from "@/lib/news-clips/transcript"
 import { koreanSpeechUnits } from "@/lib/news-clips/korean-speech"
 import {
+  automaticSubtitleLineCharacterLimit,
+  reflowSubtitleTextPreservingContent,
   layoutTimedSubtitleCues,
   resolveTextBox,
   splitIntroTitleLines,
-  titleLineCharacterLimit,
   titleLineFits,
   titleLineRenderMetrics,
 } from "@/lib/news-clips/text-layout"
 import type { TypecastSpeechTiming } from "@/lib/news-clips/typecast-response"
 import {
   downloadApprovedSource,
+  readAnalysisCache,
   readSource,
   readStoredTranscript,
 } from "@/lib/server/news-clips/source-store"
@@ -77,9 +80,14 @@ import {
   synthesizeNewsSpeech,
   type ResolvedNewsTtsProvider,
 } from "@/lib/server/news-clips/tts-provider"
+import {
+  transcribeRangeWithLocalWhisper,
+  transcribeWithLocalWhisper,
+} from "@/lib/server/news-clips/whisper"
 import type {
   NewsClipProject,
   NewsClipSettings,
+  NewsPreviewPart,
   NewsReportScene,
   NewsSource,
   SubtitleCue,
@@ -319,6 +327,7 @@ export async function renderNewsClip(
     onProgress?: (percent: number, label: string) => void | Promise<void>
     signal?: AbortSignal
     finalPlaybackRate?: number
+    previewPart?: NewsPreviewPart
   } = {}
 ) {
   const progress = async (percent: number, label: string) => {
@@ -328,6 +337,11 @@ export async function renderNewsClip(
   }
   await progress(2, "프로젝트 확인 중")
   const force = options.force === true
+  const previewPart =
+    mode === "preview" ? (options.previewPart ?? "all") : "all"
+  const forceAll = force && previewPart === "all"
+  const forcePart = (part: Exclude<typeof previewPart, "all">) =>
+    forceAll || (force && previewPart === part)
   const finalPlaybackRate =
     mode === "final" ? normalizeFinalPlaybackRate(options.finalPlaybackRate) : 1
   if (
@@ -381,6 +395,18 @@ export async function renderNewsClip(
       })
     )
   )
+  const refreshedTranscriptSources = await refreshUnreliableQuoteTranscripts({
+    project,
+    sourceFiles,
+    sourceTranscripts,
+  })
+  const refreshedPrimaryTranscript = sourceTranscripts.get(source.id)
+  if (refreshedPrimaryTranscript) {
+    project = {
+      ...project,
+      transcript: refreshedPrimaryTranscript,
+    }
+  }
 
   const folder = path.join(
     process.cwd(),
@@ -389,10 +415,9 @@ export async function renderNewsClip(
     "output",
     project.id
   )
-  // 강제 재생성 시 이전 미리보기/최종 산출물·캐시·중간 파일을 모두 지운다.
-  if (force) {
-    await rm(folder, { recursive: true, force: true })
-  }
+  // 강제 재생성도 각 출력 파일만 덮어쓴다. 폴더를 지우면
+  // 검수한 미리보기와 Typecast 음성 캐시까지 사라져 최종본에서
+  // 불필요한 재호출·재비용이 발생한다.
   await mkdir(folder, { recursive: true })
   const prefix = mode === "preview" ? "preview-" : ""
   const dimensions = newsRenderDimensions(mode)
@@ -516,13 +541,24 @@ export async function renderNewsClip(
     phrases: string
   }) {
     if (!options.report || !options.planned.length) return []
-    if (project.subtitleTimingsLocked && options.edited.length) {
-      // 파트 로컬 좌표로만 옮긴 뒤 합칠 때 같은 오프셋을 되돌려
-      // 승인된 전역 start/end를 오차 없이 보존한다.
+    const transcriptWasRefreshed = options.planned.some((scene) =>
+      refreshedTranscriptSources.has(scene.sourceId || primarySourceId)
+    )
+    if (
+      project.subtitleTimingsLocked &&
+      options.edited.length &&
+      !transcriptWasRefreshed
+    ) {
+      // 확정한 문구·개수·시간은 보존하되, 폰트·폭 설정이 바뀌면
+      // FFmpeg 실제 폭에 맞게 줄바꿈만 다시 적용한다.
       return options.edited.map((cue) => ({
         ...cue,
         start: cue.start - options.offsetSeconds,
         end: cue.end - options.offsetSeconds,
+        text: reflowSubtitleTextPreservingContent(
+          cue.text,
+          settings.bodySubtitleText
+        ),
       }))
     }
     const localEdited = options.edited.map((cue) => ({
@@ -530,23 +566,28 @@ export async function renderNewsClip(
       start: Math.max(0, cue.start - options.offsetSeconds),
       end: Math.max(0.04, cue.end - options.offsetSeconds),
     }))
-    return snapSubtitleCueTimes(
+    const measured = snapSubtitleCueTimes(
       layoutTimedSubtitleCues(
         applySubtitleTimingForRender(
           localEdited,
           options.planned,
           options.report.scenes,
           {
-            lockTimings: project.subtitleTimingsLocked,
+            lockTimings:
+              project.subtitleTimingsLocked && !transcriptWasRefreshed,
             captionPhrases: reportCaptionPhrases(options.phrases),
             transcript: project.transcript,
             maxCaptionCharacters:
-              titleLineCharacterLimit(settings.bodySubtitleText) * 2,
+              automaticSubtitleLineCharacterLimit(settings.bodySubtitleText) *
+              2,
           }
         ),
         settings.bodySubtitleText
       )
     )
+    return transcriptWasRefreshed
+      ? mergeEditedSubtitleText(measured, localEdited)
+      : measured
   }
 
   const leadSubtitles = partSubtitles({
@@ -570,7 +611,7 @@ export async function renderNewsClip(
     offsetSeconds: leadDurationSeconds + bodyDurationSeconds,
     phrases: endCtaScript,
   })
-  const combinedSubtitles = [
+  const combinedSubtitles = snapSubtitleCueTimes([
     ...leadSubtitles,
     ...bodySubtitles.map((cue) => ({
       ...cue,
@@ -584,7 +625,7 @@ export async function renderNewsClip(
       ),
       end: roundDuration(cue.end + leadDurationSeconds + bodyDurationSeconds),
     })),
-  ]
+  ])
   const exportSubtitles = combinedSubtitles.map((cue) => ({
     ...cue,
     start: roundDuration(cue.start + titleCardDurationSeconds),
@@ -607,6 +648,10 @@ export async function renderNewsClip(
   )
   await progress(56, "화면 구성 완료")
   const renderCache = await readRenderCache(cachePath)
+  const saveRenderStage = async (patch: RenderCache) => {
+    Object.assign(renderCache, patch)
+    await writeRenderCache(cachePath, renderCache)
+  }
   const introVideoSignature = digest({
     renderVersion: NEWS_RENDER_VERSION,
     part: "intro",
@@ -642,7 +687,6 @@ export async function renderNewsClip(
       renderVersion: NEWS_RENDER_VERSION,
       part,
       sources: [...sourceFiles],
-      reportScript: bodyScript || effectiveProject.reportScript,
       reportScenes: report.scenes,
       reportAudio: report.signature,
       sourcePlaybackRate: NEWS_SOURCE_PLAYBACK_RATE,
@@ -782,7 +826,7 @@ export async function renderNewsClip(
   await progress(60, "자막 준비 완료")
 
   if (
-    force ||
+    forcePart("intro") ||
     renderCache.introVideoSignature !== introVideoSignature ||
     !(await exists(introVideo))
   ) {
@@ -800,10 +844,11 @@ export async function renderNewsClip(
       titleCardDurationSeconds
     )
   }
+  await saveRenderStage({ introVideoSignature })
   await progress(69, "인트로 영상 완료")
   if (
     leadReport &&
-    (force ||
+    (forcePart("lead") ||
       renderCache.leadVideoSignature !== leadVideoSignature ||
       !(await exists(leadVideo)))
   ) {
@@ -822,10 +867,11 @@ export async function renderNewsClip(
       leadDurationSeconds
     )
   }
+  await saveRenderStage({ leadVideoSignature })
   await progress(78, "도입부 영상 완료")
   if (
     bodyReport &&
-    (force ||
+    (forcePart("body") ||
       renderCache.bodyVideoSignature !== bodyVideoSignature ||
       !(await exists(bodyVideo)))
   ) {
@@ -844,10 +890,11 @@ export async function renderNewsClip(
       bodyDurationSeconds
     )
   }
+  await saveRenderStage({ bodyVideoSignature })
   await progress(87, "본문 영상 완료")
   if (
     outroReport &&
-    (force ||
+    (forcePart("outro") ||
       renderCache.outroVideoSignature !== outroVideoSignature ||
       !(await exists(outroVideo)))
   ) {
@@ -866,9 +913,10 @@ export async function renderNewsClip(
       outroDurationSeconds
     )
   }
+  await saveRenderStage({ outroVideoSignature })
   await progress(92, "마무리 영상 완료")
   if (
-    force ||
+    forceAll ||
     renderCache.joinedSignature !== joinedSignature ||
     !(await exists(joinedVideo))
   ) {
@@ -880,9 +928,10 @@ export async function renderNewsClip(
     ]
     await concatNewsClips(parts, joinedVideo, concatList, run)
   }
+  await saveRenderStage({ joinedSignature })
   await progress(96, "영상 합치기 완료")
   if (
-    force ||
+    forceAll ||
     renderCache.outputSignature !== outputSignature ||
     !(await exists(finalVideo))
   ) {
@@ -906,6 +955,7 @@ export async function renderNewsClip(
     dimensions,
     renderedOutputDurationSeconds
   )
+  await saveRenderStage({ outputSignature })
   if (mode === "final") {
     await run(ffmpegBin(), [
       "-y",
@@ -919,21 +969,6 @@ export async function renderNewsClip(
     ])
     await copyFile(titleFrame, thumbnail)
   }
-  await writeFile(
-    cachePath,
-    `${JSON.stringify(
-      {
-        introVideoSignature,
-        leadVideoSignature,
-        bodyVideoSignature,
-        outroVideoSignature,
-        joinedSignature,
-        outputSignature,
-      },
-      null,
-      2
-    )}\n`
-  )
   await progress(100, "완료")
 
   const signature = createHash("sha256")
@@ -968,6 +1003,7 @@ export async function renderNewsClip(
       outputDurationSeconds,
       subtitles: effectiveProject.subtitles,
       reportScenes: effectiveProject.reportScenes,
+      transcript: effectiveProject.transcript,
     }
   }
   const outputVersion = force
@@ -989,7 +1025,209 @@ export async function renderNewsClip(
     finalPlaybackRate,
     subtitles: effectiveProject.subtitles,
     reportScenes: effectiveProject.reportScenes,
+    transcript: effectiveProject.transcript,
   }
+}
+
+/**
+ * 예전 YouTube 롤링 자막은 서로 겹친 문장 구간만 있고 실제 단어 신뢰도가 없다.
+ * 직접 발언으로 쓰는 범위만 원본 음성에서 다시 전사해 자막 시작·끝을 실제 발화에
+ * 맞춘다. 이미 로컬 Whisper 단어 시간이 있는 범위는 다시 처리하지 않는다.
+ */
+async function refreshUnreliableQuoteTranscripts({
+  project,
+  sourceFiles,
+  sourceTranscripts,
+}: {
+  project: NewsClipProject
+  sourceFiles: Map<string, string>
+  sourceTranscripts: Map<string, TranscriptSegment[]>
+}) {
+  const primarySourceId = project.source!.id
+  const rangesBySource = new Map<
+    string,
+    Array<{ start: number; end: number }>
+  >()
+  for (const scene of project.reportScenes) {
+    if (
+      scene.visual !== "quote" ||
+      !Number.isFinite(scene.sourceStart) ||
+      !Number.isFinite(scene.sourceEnd) ||
+      scene.sourceEnd <= scene.sourceStart
+    ) {
+      continue
+    }
+    const sourceId = scene.sourceId || primarySourceId
+    const ranges = rangesBySource.get(sourceId) ?? []
+    ranges.push({ start: scene.sourceStart, end: scene.sourceEnd })
+    rangesBySource.set(sourceId, ranges)
+  }
+
+  const refreshed = new Set<string>()
+  for (const [sourceId, rawRanges] of rangesBySource) {
+    const sourceFile = sourceFiles.get(sourceId)
+    if (!sourceFile) continue
+    let transcript = sourceTranscripts.get(sourceId) ?? []
+    for (const range of mergeTimeRanges(rawRanges)) {
+      // 검수 화면에 올라온 자동 구간과 사용자 수정본은 단일 진실 원본이다.
+      // 반복 문구처럼 보여도 분석 캐시나 Whisper 결과로 절대 덮어쓰지 않는다.
+      if (transcriptRangeIsReviewed(transcript, range)) continue
+      if (
+        transcriptRangeHasReliableWords(transcript, range) &&
+        !transcriptRangeLooksHallucinated(transcript, range)
+      ) {
+        continue
+      }
+
+      let replacement: TranscriptSegment[] | null = null
+      try {
+        // 분석 단계에서 확정한 전사는 선택 구간과 함께 검수된 결과다.
+        // 미리보기 재생성 중 생긴 환각보다 이 스냅샷을 가장 먼저 복구한다.
+        const cached = await readAnalysisCache(sourceId)
+        const cachedTranscript =
+          cached &&
+          typeof cached === "object" &&
+          Array.isArray((cached as { transcript?: unknown }).transcript)
+            ? (cached as { transcript: unknown[] }).transcript
+            : []
+        if (cachedTranscript.length) {
+          const analyzed = normalizeWhisperTranscript(
+            JSON.stringify({ segments: cachedTranscript }),
+            sourceId,
+            range,
+            "analysis"
+          )
+          if (usableWhisperReplacement(analyzed, range)) {
+            replacement = analyzed
+          }
+        }
+      } catch {
+        // 분석 스냅샷이 없으면 전체 원본 전사로 복구한다.
+      }
+      if (!replacement) {
+        try {
+          // 전체 원본 전사는 앞뒤 음성 문맥을 유지하므로 긴 구간 단독 전사보다
+          // 반복 환각이 훨씬 적다. 이미 분석 때 만든 캐시를 우선 재사용한다.
+          const full = normalizeWhisperTranscript(
+            await transcribeWithLocalWhisper(sourceFile, sourceId),
+            sourceId,
+            range,
+            "full"
+          )
+          if (usableWhisperReplacement(full, range)) replacement = full
+        } catch {
+          // 전체 전사 캐시가 없거나 읽지 못하면 아래 구간 전사를 시도한다.
+        }
+      }
+      if (!replacement) {
+        try {
+          const ranged = normalizeWhisperTranscript(
+            await transcribeRangeWithLocalWhisper(sourceFile, sourceId, range),
+            sourceId,
+            range,
+            "range"
+          )
+          if (usableWhisperReplacement(ranged, range)) replacement = ranged
+        } catch {
+          // 로컬 Whisper를 사용할 수 없는 환경에서는 기존 전사를 유지한다.
+        }
+      }
+      if (replacement?.length) {
+        const reviewedBoundaries = transcript.some(
+          (segment) =>
+            segment.captionBoundaryAfter === true &&
+            segment.captionBoundarySource === "manual" &&
+            segment.end > range.start &&
+            segment.start < range.end
+        )
+        if (reviewedBoundaries) {
+          replacement = replacement.map((segment) =>
+            segment.end > range.start && segment.start < range.end
+              ? {
+                  ...segment,
+                  captionBoundaryAfter: true,
+                  captionBoundarySource: "manual",
+                }
+              : segment
+          )
+        }
+        transcript = replaceTranscriptRange(transcript, replacement, range)
+        refreshed.add(sourceId)
+      }
+    }
+    sourceTranscripts.set(sourceId, transcript)
+  }
+  return refreshed
+}
+
+function usableWhisperReplacement(
+  transcript: TranscriptSegment[],
+  range: { start: number; end: number }
+) {
+  return (
+    transcriptRangeHasReliableWords(transcript, range) &&
+    !transcriptRangeLooksHallucinated(transcript, range)
+  )
+}
+
+function normalizeWhisperTranscript(
+  raw: string,
+  sourceId: string,
+  range: { start: number; end: number },
+  scope: "analysis" | "full" | "range"
+) {
+  return parseTranscript(raw).map((segment, index) => {
+    const normalized = normalizeKoreanRecognitionText(segment.text)
+    const corrected = updateTranscriptSegmentText(segment, normalized)
+    return {
+      ...corrected,
+      id: `local-${digest({ sourceId, range, scope, index }).slice(0, 16)}`,
+    }
+  })
+}
+
+function transcriptRangeHasReliableWords(
+  transcript: TranscriptSegment[],
+  range: { start: number; end: number }
+) {
+  const segments = transcript.filter(
+    (segment) => segment.end > range.start && segment.start < range.end
+  )
+  const words = segments.flatMap((segment) =>
+    segment.words.filter(
+      (word) => word.end > range.start && word.start < range.end
+    )
+  )
+  // 검수 화면에서 실제 단어 시간으로 만든 짧은 호흡 구간은 confidence가
+  // 없는 SRT 원본이어도 다시 전사해 경계를 잃지 않는다.
+  const reviewedTimeline =
+    segments.length > 0 &&
+    segments.every((segment) => segment.captionBoundarySource !== undefined)
+  if (reviewedTimeline && words.length >= 3) return true
+  return (
+    words.length >= 3 &&
+    words.filter((word) => Number.isFinite(word.confidence)).length /
+      words.length >=
+      0.7
+  )
+}
+
+function mergeTimeRanges(ranges: Array<{ start: number; end: number }>) {
+  const merged: Array<{ start: number; end: number }> = []
+  for (const range of ranges
+    .map((item) => ({
+      start: Math.min(item.start, item.end),
+      end: Math.max(item.start, item.end),
+    }))
+    .sort((left, right) => left.start - right.start)) {
+    const previous = merged.at(-1)
+    if (previous && range.start <= previous.end + 0.25) {
+      previous.end = Math.max(previous.end, range.end)
+    } else {
+      merged.push({ ...range })
+    }
+  }
+  return merged
 }
 
 function validateProject(project: NewsClipProject, settings: NewsClipSettings) {
@@ -1258,16 +1496,16 @@ async function synthesizeReport(
         duration: tightened.duration,
       })
       durations.push(tightened.duration)
-      const rawQuoteSeconds = Math.max(0.1, scene.sourceEnd - scene.sourceStart)
-      const alignmentScale = tightened.duration / rawQuoteSeconds
       alignments.push(
         quoteTranscriptAlignment(
           scene,
           transcripts.get(scene.sourceId || primarySourceId) ?? []
         ).map((word) => ({
           ...word,
-          start: roundDuration(word.start * alignmentScale),
-          end: roundDuration(word.end * alignmentScale),
+          // 인코더 패딩 때문에 추출 영상 길이가 수십 ms 달라도 단어 시간을
+          // 전체 길이에 비례 확대하지 않는다. 실제 원본 단어 시각을 유지한다.
+          start: roundDuration(Math.min(tightened.duration, word.start)),
+          end: roundDuration(Math.min(tightened.duration, word.end)),
         }))
       )
       tightVideoPaths.push(tightened.videoPath)
@@ -2126,6 +2364,26 @@ function pad(value: number) {
 }
 
 function run(bin: string, args: string[]) {
+  return runWithRetry(bin, args, 2)
+}
+
+async function runWithRetry(bin: string, args: string[], attempts: number) {
+  let lastError: unknown = new Error("ffmpeg-failed")
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await runOnce(bin, args)
+      return
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+  }
+  throw lastError
+}
+
+function runOnce(bin: string, args: string[]) {
   return new Promise<void>((resolve, reject) => {
     const child = spawn(bin, args, {
       stdio: ["ignore", "ignore", "pipe"],
@@ -2236,6 +2494,10 @@ async function readRenderCache(value: string): Promise<RenderCache> {
   } catch {
     return {}
   }
+}
+
+async function writeRenderCache(value: string, cache: RenderCache) {
+  await writeFile(value, `${JSON.stringify(cache, null, 2)}\n`)
 }
 
 async function exists(value: string) {

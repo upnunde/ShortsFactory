@@ -182,7 +182,7 @@ export function layoutTimedSubtitleCues(
     if (
       explicitLines.length > 0 &&
       explicitLines.length <= 2 &&
-      explicitLines.every((line) => visualUnits(line) <= lineLimit)
+      explicitLines.every((line) => subtitleUnits(line) <= lineLimit)
     ) {
       const text = explicitLines.join("\n")
       return [
@@ -292,6 +292,78 @@ export function resetEditedSubtitleCue(cues: SubtitleCue[], cueId: string) {
   )
 }
 
+export function canMergeSubtitleCueWithNext(
+  cues: SubtitleCue[],
+  cueId: string
+) {
+  const index = cues.findIndex((cue) => cue.id === cueId)
+  const current = cues[index]
+  const next = cues[index + 1]
+  return Boolean(
+    current?.sceneId && next?.sceneId && current.sceneId === next.sceneId
+  )
+}
+
+/** 인접한 같은 장면 자막을 시간 범위와 사용자 문구를 보존한 채 합친다. */
+export function mergeSubtitleCueWithNext(
+  cues: SubtitleCue[],
+  cueId: string,
+  layout: NewsTextLayout
+) {
+  const index = cues.findIndex((cue) => cue.id === cueId)
+  const current = cues[index]
+  const next = cues[index + 1]
+  if (
+    !current?.sceneId ||
+    !next?.sceneId ||
+    current.sceneId !== next.sceneId
+  ) {
+    return cues
+  }
+
+  const currentText = normalizeText(current.text)
+  const nextText = normalizeText(next.text)
+  const joinedText = normalizeJoinedCalendarDate(
+    joinSubtitleText(currentText, nextText)
+  )
+  const text = reflowSubtitleTextPreservingContent(
+    joinedText,
+    layout
+  )
+  const originalText = normalizeJoinedCalendarDate(
+    joinSubtitleText(
+      normalizeText(current.originalText ?? current.text),
+      normalizeText(next.originalText ?? next.text)
+    )
+  )
+  const merged: SubtitleCue = {
+    ...current,
+    start: Math.min(current.start, next.start),
+    end: Math.max(current.end, next.end),
+    text,
+    emphasis: [...new Set([...current.emphasis, ...next.emphasis])].filter(
+      (word) => text.includes(word)
+    ),
+    originalText,
+    originalEmphasis: [
+      ...new Set([
+        ...(current.originalEmphasis ?? current.emphasis),
+        ...(next.originalEmphasis ?? next.emphasis),
+      ]),
+    ],
+    edited: true,
+  }
+  return [...cues.slice(0, index), merged, ...cues.slice(index + 2)]
+}
+
+function normalizeJoinedCalendarDate(value: string) {
+  return value.replace(
+    /(^|\s)(\d{2})년\s+(\d{1,2})월\s+(\d{1,2})일(?=\s|$|[,.;:!?])/gu,
+    (_, prefix: string, year: string, month: string, day: string) =>
+      `${prefix}20${year}년 ${month}월 ${day}일`
+  )
+}
+
 function resetEditedSubtitleCueValue(cue: SubtitleCue): SubtitleCue {
   const { originalText, originalEmphasis, ...rest } = cue
   return {
@@ -320,6 +392,26 @@ export function formatEditedSubtitleText(text: string, layout: NewsTextLayout) {
   const normalized = normalizeText(text)
   if (!normalized) return ""
   return wrapSubtitleChunkToTwoLines(normalized, layout)
+}
+
+/**
+ * 사용자가 확정한 문구는 하나도 버리지 않고, 현재 FFmpeg 폰트·폭에
+ * 맞는 줄바꿈만 다시 계산한다. 2줄에 담을 수 없는 매우 긴 문구는
+ * 자동 잘림보다 원문 보존을 우선한다.
+ */
+export function reflowSubtitleTextPreservingContent(
+  text: string,
+  layout: NewsTextLayout
+) {
+  const normalized = normalizeText(text)
+  if (!normalized) return ""
+  const formatted = wrapSubtitleChunkToTwoLines(
+    normalized,
+    layout,
+    automaticSubtitleLineLimit(layout)
+  )
+  const comparable = (value: string) => value.replace(/\s+/g, "")
+  return comparable(formatted) === comparable(normalized) ? formatted : text.trim()
 }
 
 function mergeSubtitleSentenceCues(cues: SubtitleCue[]) {
@@ -398,11 +490,11 @@ export function splitIntoSubtitleChunks(
     ?.map((value) => value.trim()) ?? [normalized]
   const chunks = sentences.flatMap((sentence) => {
     if (!sentence) return []
-    return visualUnits(sentence) <= chunkLimit
+    return subtitleUnits(sentence) <= chunkLimit
       ? [sentence]
-      : splitLongSentence(sentence, chunkLimit)
+      : splitLongSentence(sentence, chunkLimit, subtitleUnits)
   })
-  return balanceChunkBoundaries(chunks, chunkLimit)
+  return balanceChunkBoundaries(chunks, chunkLimit, subtitleUnits)
 }
 
 function wrapSubtitleChunkToTwoLines(
@@ -411,10 +503,10 @@ function wrapSubtitleChunkToTwoLines(
   lineLimit = unitsPerLine(layout)
 ) {
   const normalized = normalizeText(text)
-  if (visualUnits(normalized) <= lineLimit) return normalized
+  if (subtitleUnits(normalized) <= lineLimit) return normalized
   const words = normalized.split(" ").filter(Boolean)
   if (words.length < 2) {
-    return wrapLongTokenToTwoLines(normalized, lineLimit)
+    return wrapLongTokenToTwoLines(normalized, lineLimit, subtitleUnits)
   }
 
   let bestIndex = 1
@@ -422,8 +514,8 @@ function wrapSubtitleChunkToTwoLines(
   for (let index = 1; index < words.length; index += 1) {
     const first = words.slice(0, index).join(" ")
     const second = words.slice(index).join(" ")
-    const firstUnits = visualUnits(first)
-    const secondUnits = visualUnits(second)
+    const firstUnits = subtitleUnits(first)
+    const secondUnits = subtitleUnits(second)
     const overflow =
       Math.max(0, firstUnits - lineLimit) + Math.max(0, secondUnits - lineLimit)
     const score =
@@ -438,10 +530,41 @@ function wrapSubtitleChunkToTwoLines(
   const first = words.slice(0, bestIndex).join(" ")
   const second = words.slice(bestIndex).join(" ")
   // 글자를 버리지 않는다. 한 칸(최대 2줄)에 안 들어가면 호출 전에 청크를 나눈다.
-  if (visualUnits(first) <= lineLimit && visualUnits(second) <= lineLimit) {
+  if (subtitleUnits(first) <= lineLimit && subtitleUnits(second) <= lineLimit) {
     return `${first}\n${second}`
   }
-  return wrapLongTokenToTwoLines(normalized, lineLimit)
+  // 수정 여유용 80% 기준으로 단어가 잘리는 경우에만 실제 화면 한계까지
+  // 늘린다. 실제 폭에 들어가는 문장을 `체포되\n셔서` 처럼 어절 중간에서
+  // 잘라 보이는 것보다 자연스러운 어절 경계를 우선한다.
+  const physicalLimit = unitsPerLine(layout)
+  if (physicalLimit > lineLimit) {
+    let physicalIndex = 0
+    let physicalScore = Number.POSITIVE_INFINITY
+    for (let index = 1; index < words.length; index += 1) {
+      const physicalFirst = words.slice(0, index).join(" ")
+      const physicalSecond = words.slice(index).join(" ")
+      const firstUnits = subtitleUnits(physicalFirst)
+      const secondUnits = subtitleUnits(physicalSecond)
+      if (firstUnits > physicalLimit || secondUnits > physicalLimit) continue
+      const score =
+        Math.abs(firstUnits - secondUnits) +
+        subtitleLineBreakPenalty(
+          physicalFirst,
+          physicalSecond,
+          physicalLimit
+        )
+      if (score < physicalScore) {
+        physicalIndex = index
+        physicalScore = score
+      }
+    }
+    if (physicalIndex > 0) {
+      return `${words.slice(0, physicalIndex).join(" ")}\n${words
+        .slice(physicalIndex)
+        .join(" ")}`
+    }
+  }
+  return wrapLongTokenToTwoLines(normalized, lineLimit, subtitleUnits)
 }
 
 function subtitleLineBreakPenalty(
@@ -483,26 +606,34 @@ function startsWithSubtitleParticle(value: string) {
 }
 
 /** 공백 없는 한글도 최대 2줄로 나눈다. 2줄을 넘치면 앞 두 줄만 두고, 나머지는 청크 분할 단계에서 처리한다. */
-function wrapLongTokenToTwoLines(value: string, lineLimit: number) {
+function wrapLongTokenToTwoLines(
+  value: string,
+  lineLimit: number,
+  measure: (value: string) => number = visualUnits
+) {
   const characters = [...value]
   if (!characters.length) return ""
-  if (visualUnits(value) <= lineLimit) return value
+  if (measure(value) <= lineLimit) return value
 
-  const pieces = splitLongToken(value, lineLimit)
+  const pieces = splitLongToken(value, lineLimit, measure)
   if (pieces.length <= 1) return pieces[0] ?? value
   if (pieces.length === 2) return `${pieces[0]}\n${pieces[1]}`
   // 호출 전 splitIntoSubtitleChunks가 2줄 분량으로 나눠야 한다. 방어적으로 앞 두 줄만 붙인다.
   return `${pieces[0]}\n${pieces[1]}`
 }
 
-function splitLongSentence(sentence: string, limit: number) {
+function splitLongSentence(
+  sentence: string,
+  limit: number,
+  measure: (value: string) => number = visualUnits
+) {
   const clauses = naturalClauses(sentence)
   if (clauses.length >= 2) {
     const packed: string[] = []
     let current = ""
     for (const clause of clauses) {
       const candidate = current ? `${current} ${clause}` : clause
-      if (!current || visualUnits(candidate) <= limit) {
+      if (!current || measure(candidate) <= limit) {
         current = candidate
         continue
       }
@@ -511,11 +642,12 @@ function splitLongSentence(sentence: string, limit: number) {
     }
     if (current) packed.push(current)
     return balanceChunkBoundaries(
-      packed.flatMap((chunk) => splitByWords(chunk, limit)),
-      limit
+      packed.flatMap((chunk) => splitByWords(chunk, limit, measure)),
+      limit,
+      measure
     )
   }
-  return splitByWords(sentence, limit)
+  return splitByWords(sentence, limit, measure)
 }
 
 function naturalClauses(sentence: string) {
@@ -532,13 +664,17 @@ function naturalClauses(sentence: string) {
   )
 }
 
-function splitByWords(sentence: string, limit: number) {
+function splitByWords(
+  sentence: string,
+  limit: number,
+  measure: (value: string) => number = visualUnits
+) {
   const words = sentence.split(" ").filter(Boolean)
   const chunks: string[] = []
   let current = ""
   for (const word of words) {
     const candidate = current ? `${current} ${word}` : word
-    if (!current || visualUnits(candidate) <= limit) {
+    if (!current || measure(candidate) <= limit) {
       current = candidate
       continue
     }
@@ -548,42 +684,57 @@ function splitByWords(sentence: string, limit: number) {
   if (current) chunks.push(current)
   return balanceChunkBoundaries(
     chunks.flatMap((chunk) =>
-      visualUnits(chunk) <= limit ? [chunk] : splitLongToken(chunk, limit)
+      measure(chunk) <= limit ? [chunk] : splitLongToken(chunk, limit, measure)
     ),
-    limit
+    limit,
+    measure
   )
 }
 
-function balanceChunkBoundaries(chunks: string[], limit: number) {
+function balanceChunkBoundaries(
+  chunks: string[],
+  limit: number,
+  measure: (value: string) => number = visualUnits
+) {
   const balanced = chunks.map(normalizeText).filter(Boolean)
   if (balanced.length < 2) return balanced
 
   let index = 0
   while (index < balanced.length) {
-    if (!isOrphanChunk(balanced[index], limit)) {
+    if (!isOrphanChunk(balanced[index], limit, measure)) {
       index += 1
       continue
     }
 
     const previous = balanced[index - 1]
     const next = balanced[index + 1]
-    if (previous && visualUnits(`${previous} ${balanced[index]}`) <= limit) {
+    if (previous && measure(`${previous} ${balanced[index]}`) <= limit) {
       balanced[index - 1] = `${previous} ${balanced[index]}`
       balanced.splice(index, 1)
       index = Math.max(0, index - 1)
       continue
     }
-    if (next && visualUnits(`${balanced[index]} ${next}`) <= limit) {
+    if (next && measure(`${balanced[index]} ${next}`) <= limit) {
       balanced[index] = `${balanced[index]} ${next}`
       balanced.splice(index + 1, 1)
       continue
     }
     if (previous) {
-      const [left, right] = balanceChunkPair(previous, balanced[index], limit)
+      const [left, right] = balanceChunkPair(
+        previous,
+        balanced[index],
+        limit,
+        measure
+      )
       balanced[index - 1] = left
       balanced[index] = right
     } else if (next) {
-      const [left, right] = balanceChunkPair(balanced[index], next, limit)
+      const [left, right] = balanceChunkPair(
+        balanced[index],
+        next,
+        limit,
+        measure
+      )
       balanced[index] = left
       balanced[index + 1] = right
     }
@@ -592,23 +743,32 @@ function balanceChunkBoundaries(chunks: string[], limit: number) {
   return balanced
 }
 
-function isOrphanChunk(value: string, limit: number) {
-  const units = visualUnits(value)
+function isOrphanChunk(
+  value: string,
+  limit: number,
+  measure: (value: string) => number
+) {
+  const units = measure(value)
   const words = value.split(" ").filter(Boolean)
   return units < limit * 0.3 || (words.length === 1 && units < limit * 0.55)
 }
 
-function balanceChunkPair(left: string, right: string, limit: number) {
+function balanceChunkPair(
+  left: string,
+  right: string,
+  limit: number,
+  measure: (value: string) => number
+) {
   const words = `${left} ${right}`.split(" ").filter(Boolean)
   if (words.length < 2) return [left, right]
 
   let best: [string, string] = [left, right]
-  let bestScore = pairScore(left, right, limit)
+  let bestScore = pairScore(left, right, limit, measure)
   for (let index = 1; index < words.length; index += 1) {
     const first = words.slice(0, index).join(" ")
     const second = words.slice(index).join(" ")
-    if (visualUnits(first) > limit || visualUnits(second) > limit) continue
-    const score = pairScore(first, second, limit)
+    if (measure(first) > limit || measure(second) > limit) continue
+    const score = pairScore(first, second, limit, measure)
     if (score < bestScore) {
       best = [first, second]
       bestScore = score
@@ -617,9 +777,14 @@ function balanceChunkPair(left: string, right: string, limit: number) {
   return best
 }
 
-function pairScore(left: string, right: string, limit: number) {
-  const leftUnits = visualUnits(left)
-  const rightUnits = visualUnits(right)
+function pairScore(
+  left: string,
+  right: string,
+  limit: number,
+  measure: (value: string) => number
+) {
+  const leftUnits = measure(left)
+  const rightUnits = measure(right)
   const shortPenalty =
     Math.min(leftUnits, rightUnits) < limit * 0.3 ? limit * 4 : 0
   const naturalBreakBonus = /[.!?。！？]$/.test(left)
@@ -664,11 +829,15 @@ function fitSingleLineFromEnd(value: string, limit: number) {
   )
 }
 
-function splitLongToken(value: string, limit: number) {
+function splitLongToken(
+  value: string,
+  limit: number,
+  measure: (value: string) => number = visualUnits
+) {
   const chunks: string[] = []
   let current = ""
   for (const character of [...value]) {
-    if (current && visualUnits(current + character) > limit) {
+    if (current && measure(current + character) > limit) {
       chunks.push(current)
       current = ""
     }
@@ -695,12 +864,26 @@ function automaticSubtitleLineLimit(layout: NewsTextLayout) {
   )
 }
 
+/** 자동 생성 때 수정 여백을 남겨 사용하는 안전 글자 단위. */
+export function automaticSubtitleLineCharacterLimit(layout: NewsTextLayout) {
+  return automaticSubtitleLineLimit(layout)
+}
+
+/** 검수 화면에서 수동 편집할 때 사용할 수 있는 FFmpeg 실제 한 줄 폭. */
+export function subtitleLineCharacterLimit(layout: NewsTextLayout) {
+  return unitsPerLine(layout)
+}
+
 function visualUnits(value: string) {
   return [...value].reduce((sum, character) => {
     if (/\s/.test(character)) return sum + 0.35
     if (/[\u0000-\u024f]/.test(character)) return sum + 0.58
     return sum + 1
   }, 0)
+}
+
+function subtitleUnits(value: string) {
+  return Math.max(visualUnits(value), [...value].length)
 }
 
 function normalizeText(value: string) {

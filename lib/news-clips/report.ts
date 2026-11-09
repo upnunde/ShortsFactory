@@ -3,6 +3,7 @@ import {
   scaleQuoteTimelineSeconds,
 } from "./playback.ts"
 import { snapSourceRangeToSpeech } from "./speech-bounds.ts"
+import { clearLegacyAutomaticCaptionBoundaries } from "./transcript.ts"
 import type {
   NewsReportScene,
   SubtitleCue,
@@ -11,6 +12,19 @@ import type {
 
 const EMPHASIS =
   /(?:\d[\d,.]*\s*(?:%|원|명|건|배|조|억|만)?|정부|국회|대통령|피해|세금|일자리|안보|외교|사법)/g
+
+type SpeechAlignmentUnit = {
+  text: string
+  start: number
+  end: number
+  /** 원본 전사의 한 문장/발화 구간이 여기서 끝난다. */
+  boundaryAfter?: boolean
+}
+
+type TimedSpeechToken = SpeechAlignmentUnit & {
+  /** 날짜처럼 그 자체로 완결된 짧은 의미 단위 뒤를 우선 경계로 삼는다. */
+  preferredBreakAfter?: boolean
+}
 
 export const NEWS_END_CTA_TEXT = "이건 어떻게 생각해?\n댓글로 남겨줘."
 export const NEWS_INTRO_GAP_SECONDS = 0.5
@@ -290,17 +304,24 @@ export function quoteTranscriptAlignment(
         continue
       }
       if (!/[.!?。！？]$/.test(previous.text)) {
-        // 문장 미완 겹침은 텍스트만 이어 붙이고, 단어 섞임을 막기 위해 words를 비운다.
+        // 문장 미완 겹침도 단어 타임코드를 버리지 않는다.
         previous.text = `${previous.text} ${text}`.replace(/\s+/g, " ").trim()
         previous.end = Math.max(previous.end, end)
-        previous.words = []
+        previous.words = mergeTranscriptWords(previous.words, segment.words)
+        continue
+      }
+      if (segment.words.length) {
+        // 롤링 ASR의 segment end는 다음 문장 첫 단어 뒤까지 겹칠 수 있다.
+        // 문장 start를 앞 segment end로 밀면 첫 단어가 필터에서 사라지므로,
+        // 단어 시간이 있는 문장은 원래 범위를 유지하고 아래 단어 단계에서 정리한다.
+        keptSegments.push({ ...segment, start, end, text })
         continue
       }
       const clampedStart = previous.end
       if (end - clampedStart < 0.12) {
         previous.text = `${previous.text} ${text}`.replace(/\s+/g, " ").trim()
         previous.end = Math.max(previous.end, end)
-        previous.words = []
+        previous.words = mergeTranscriptWords(previous.words, segment.words)
         continue
       }
       keptSegments.push({ ...segment, start: clampedStart, end, text })
@@ -310,36 +331,76 @@ export function quoteTranscriptAlignment(
   }
 
   // 2) 고른 문장 안에서만 단어 타임스탬프를 펼친다(문장 간 단어 섞임 방지).
-  const resolved: Array<{ text: string; start: number; end: number }> = []
-  for (const segment of keptSegments) {
-    const words = (segment.words ?? [])
-      .filter(
-        (word) =>
-          word.text.trim() &&
-          Number.isFinite(word.start) &&
-          Number.isFinite(word.end) &&
-          word.end >= word.start &&
-          word.end > segment.start - 0.05 &&
-          word.start < segment.end + 0.05
-      )
-      .sort((left, right) => left.start - right.start)
+  const resolved: SpeechAlignmentUnit[] = []
+  for (const [segmentIndex, segment] of keptSegments.entries()) {
+    const nextSegment = keptSegments[segmentIndex + 1]
+    const previousSegment = keptSegments[segmentIndex - 1]
+    const preserveSegmentBoundary = isSemanticTranscriptBoundary(
+      segment,
+      nextSegment
+    )
+    const words = (segment.words ?? []).filter(
+      (word) =>
+        word.text.trim() &&
+        Number.isFinite(word.start) &&
+        Number.isFinite(word.end) &&
+        word.end >= word.start &&
+        word.end > segment.start - 0.05 &&
+        word.start < segment.end + 0.05
+    )
+    // 겹친 롤링 전사에서는 타임코드 정렬이 문장 단어 순서를 뒤섞는다.
+    // STT가 반환한 문장 내부 단어 순서를 그대로 신뢰한다.
     if (words.length) {
-      for (const word of words) {
+      for (const [wordIndex, word] of words.entries()) {
         const text = word.text.replace(/\s+/g, " ").trim()
         if (!text) continue
-        const start = Math.max(segment.start, word.start)
-        const end = Math.max(start + 0.06, Math.min(segment.end, word.end))
-        const previous = resolved.at(-1)
-        if (previous && start < previous.end - 0.02) {
-          previous.end = Math.max(previous.end, end)
-          if (!previous.text.includes(text)) {
-            previous.text = `${previous.text} ${text}`
-              .replace(/\s+/g, " ")
-              .trim()
-          }
-          continue
+        const boundaryAfter =
+          wordIndex === words.length - 1 && preserveSegmentBoundary
+        let start = Math.max(segment.start, word.start)
+        let end = Math.max(start + 0.06, Math.min(segment.end, word.end))
+        // Whisper가 문장 사이의 긴 호흡을 다음 문장 첫 단어 길이로
+        // 포함하는 경우가 있다. 비정상적으로 긴 첫 단어만 시작을 당겨
+        // 자막이 무음 구간에서 먼저 뜨는 현상을 막는다.
+        if (
+          wordIndex === 0 &&
+          previousSegment &&
+          /[.!?。！？]["'”’)]*$/.test(cleanPhrase(previousSegment.text))
+        ) {
+          const syllables = Math.max(1, (text.match(/[가-힣]/gu) ?? []).length)
+          const naturalDuration = Math.min(
+            0.9,
+            Math.max(0.6, syllables * 0.15 + 0.1)
+          )
+          if (end - start > 1.2) start = Math.max(start, end - naturalDuration)
         }
-        resolved.push({ text, start, end })
+        const previous = resolved.at(-1)
+        if (previous && start < previous.end) {
+          const sameWord =
+            comparableSpeechWord(previous.text) === comparableSpeechWord(text)
+          if (sameWord) {
+            previous.end = Math.max(previous.end, end)
+            if (boundaryAfter) previous.boundaryAfter = true
+            continue
+          }
+          // 서로 다른 단어를 하나로 합치면 이후 비례 분할로 싱크가 무너진다.
+          // 겹친 폭의 중간점만 경계로 잡아 각 단어의 독립 시간을 유지한다.
+          const unionEnd = Math.max(previous.end, end)
+          const previousWeight = Math.max(1, comparableLength(previous.text))
+          const currentWeight = Math.max(1, comparableLength(text))
+          const boundary = Math.max(
+            previous.start + 0.04,
+            Math.min(
+              unionEnd - 0.04,
+              previous.start +
+                ((unionEnd - previous.start) * previousWeight) /
+                  (previousWeight + currentWeight)
+            )
+          )
+          previous.end = boundary
+          start = boundary
+          end = Math.max(start + 0.04, unionEnd)
+        }
+        resolved.push({ text, start, end, boundaryAfter })
       }
       continue
     }
@@ -347,6 +408,7 @@ export function quoteTranscriptAlignment(
       text: segment.text,
       start: segment.start,
       end: segment.end,
+      boundaryAfter: preserveSegmentBoundary,
     })
   }
 
@@ -355,11 +417,220 @@ export function quoteTranscriptAlignment(
     start: round(Math.max(0, segment.start - scene.sourceStart)),
     end: round(
       Math.max(
-        segment.start - scene.sourceStart + 0.12,
+        segment.start - scene.sourceStart + 0.04,
         segment.end - scene.sourceStart
       )
     ),
+    boundaryAfter: segment.boundaryAfter,
   }))
+}
+
+/**
+ * 검수용 본문은 실제 단어 시작점과 짧은 호흡을 기준으로 먼저 잘게 고정한다.
+ * 사용자는 이 안전한 구간을 합치기만 하므로 뒤 자막의 시작점은 움직이지 않는다.
+ */
+export function shortBreathReviewTranscript(
+  transcript: TranscriptSegment[],
+  range: { start: number; end: number },
+  maxCharacters = 18
+) {
+  const sourceStart = Math.min(range.start, range.end)
+  const sourceEnd = Math.max(range.start, range.end)
+  if (sourceEnd - sourceStart < 0.2) return transcript
+  const cleanedTranscript = clearLegacyAutomaticCaptionBoundaries(transcript, {
+    start: sourceStart,
+    end: sourceEnd,
+  })
+  const overlapping = cleanedTranscript.filter(
+    (segment) => segment.end > sourceStart && segment.start < sourceEnd
+  )
+  if (!overlapping.length) return cleanedTranscript
+  if (
+    overlapping.every((segment) => segment.captionBoundarySource !== undefined)
+  ) {
+    return repairReviewTranscriptWordOwnership(
+      cleanedTranscript,
+      sourceStart,
+      sourceEnd
+    )
+  }
+  // 이미 사용자가 확정한 구간은 자동 재분할하지 않는다.
+  if (
+    overlapping.some((segment) => segment.captionBoundarySource === "manual")
+  ) {
+    return cleanedTranscript
+  }
+
+  const scene: NewsReportScene = {
+    id: "review-quote",
+    narration: "",
+    visual: "quote",
+    sourceStart,
+    sourceEnd,
+  }
+  const alignment = quoteTranscriptAlignment(scene, cleanedTranscript)
+  const duration = sourceEnd - sourceStart
+  const cues = subtitleCuesFromSpeechAlignment(
+    { ...scene, start: 0, end: duration, alignment },
+    { maxCharacters: Math.max(10, Math.floor(maxCharacters)) }
+  )
+  if (!cues.length) return cleanedTranscript
+
+  const tokens = timedSubtitleTokens(alignment)
+  const generated: TranscriptSegment[] = cues.map((cue, index) => {
+    const next = cues[index + 1]
+    const wordWindowEnd = next?.start ?? cue.end + 0.001
+    const cueWords = tokens
+      .filter(
+        (word) =>
+          word.start >= cue.start - 0.001 && word.start < wordWindowEnd - 0.001
+      )
+      .map((word) => ({
+        text: cleanPhrase(word.text),
+        start: round(sourceStart + word.start),
+        end: round(sourceStart + word.end),
+      }))
+      .filter((word) => word.text)
+    const start = round(sourceStart + cue.start)
+    const end = round(sourceStart + (next?.start ?? cue.end))
+    return {
+      id: `review-caption-${Math.round(start * 1000)}-${index + 1}`,
+      text: cue.text.replace(/\s*\n\s*/g, " ").trim(),
+      start,
+      end: Math.max(start + 0.04, end),
+      speaker: "speaker-1",
+      words: cueWords,
+      captionBoundaryAfter: true,
+      captionBoundarySource: "automatic",
+    }
+  })
+
+  return [
+    ...cleanedTranscript.filter((segment) => segment.end <= sourceStart),
+    ...generated,
+    ...cleanedTranscript.filter((segment) => segment.start >= sourceEnd),
+  ].sort((left, right) => left.start - right.start || left.end - right.end)
+}
+
+/** 각 단어는 시작점이 속한 자막 하나에만 둔다. */
+function repairReviewTranscriptWordOwnership(
+  transcript: TranscriptSegment[],
+  sourceStart: number,
+  sourceEnd: number
+) {
+  const overlapping = transcript
+    .filter((segment) => segment.end > sourceStart && segment.start < sourceEnd)
+    .slice()
+    .sort((left, right) => left.start - right.start || left.end - right.end)
+  const repairedById = new Map<string, TranscriptSegment>()
+  let changed = false
+
+  for (const [index, segment] of overlapping.entries()) {
+    const nextStart = overlapping[index + 1]?.start ?? sourceEnd + 0.001
+    const seen = new Set<string>()
+    const words = segment.words.filter((word) => {
+      if (
+        word.start < segment.start - 0.001 ||
+        word.start >= nextStart - 0.001
+      ) {
+        return false
+      }
+      const key = `${comparableSpeechWord(word.text)}:${round(word.start)}:${round(word.end)}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    const originalWords = segment.originalWords?.filter(
+      (word) =>
+        word.start >= segment.start - 0.001 && word.start < nextStart - 0.001
+    )
+    const automaticText = words.reduce(
+      (text, word) => joinSpokenTokens(text, cleanPhrase(word.text)),
+      ""
+    )
+    const text =
+      segment.captionBoundarySource === "manual" || !automaticText
+        ? segment.text
+        : automaticText
+    const wordsChanged =
+      words.length !== segment.words.length ||
+      words.some(
+        (word, wordIndex) =>
+          word.text !== segment.words[wordIndex]?.text ||
+          word.start !== segment.words[wordIndex]?.start ||
+          word.end !== segment.words[wordIndex]?.end
+      )
+    const originalWordsChanged =
+      Boolean(segment.originalWords) &&
+      originalWords?.length !== segment.originalWords?.length
+    if (!wordsChanged && !originalWordsChanged && text === segment.text) {
+      repairedById.set(segment.id, segment)
+      continue
+    }
+    changed = true
+    repairedById.set(segment.id, {
+      ...segment,
+      text,
+      words,
+      ...(segment.originalWords ? { originalWords } : {}),
+    })
+  }
+
+  if (!changed) return transcript
+  return transcript.map((segment) => repairedById.get(segment.id) ?? segment)
+}
+
+function comparableSpeechWord(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .toLowerCase()
+}
+
+/**
+ * Whisper segment는 모델의 처리 단위일 뿐 문장 경계가 아니다.
+ * 문장부호나 실제 호흡 간격이 있을 때만 화면 전환을 고정해,
+ * `체포를 / 하면서`처럼 의미가 이어지는 표현이 모델 내부 구간 때문에
+ * 갈라지지 않게 한다. 단어 start/end는 변경하지 않는다.
+ */
+function isSemanticTranscriptBoundary(
+  segment: TranscriptSegment,
+  next?: TranscriptSegment
+) {
+  // 3번 검수에서 확정한 구간은 문장 재분석보다 우선한다. 합치기는 중간
+  // segment 자체를 없애므로 다음 자막의 시작점은 그대로 유지된다.
+  if (segment.captionBoundaryAfter === true) return true
+  const text = cleanPhrase(segment.text)
+  if (!next) return true
+  if (/[.!?。！？]["'”’)]*$/.test(text)) return true
+  const gap = next.start - segment.end
+  if (gap >= 0.38) return true
+  if (startsWithClauseConnector(next.text)) return true
+  return false
+}
+
+function mergeTranscriptWords(
+  left: TranscriptSegment["words"],
+  right: TranscriptSegment["words"]
+) {
+  if (!left.length) return right.map((word) => ({ ...word }))
+  if (!right.length) return left.map((word) => ({ ...word }))
+  const comparable = (value: string) =>
+    value
+      .normalize("NFKC")
+      .replace(/[\s\p{P}\p{S}]+/gu, "")
+      .toLowerCase()
+  let overlap = Math.min(left.length, right.length)
+  while (overlap > 0) {
+    const suffix = left.slice(-overlap).map((word) => comparable(word.text))
+    const prefix = right.slice(0, overlap).map((word) => comparable(word.text))
+    if (suffix.every((word, index) => word && word === prefix[index])) break
+    overlap -= 1
+  }
+  return [
+    ...left.map((word) => ({ ...word })),
+    ...right.slice(overlap).map((word) => ({ ...word })),
+  ]
 }
 
 export function buildReportScenes(
@@ -411,7 +682,8 @@ export function reportSubtitles(
   scenes: NewsReportScene[],
   durations?: number[],
   captionPhrases?: string[],
-  transcript: TranscriptSegment[] = []
+  transcript: TranscriptSegment[] = [],
+  options: { maxCaptionCharacters?: number } = {}
 ) {
   const sceneWeights = scenes.map((scene, index) =>
     Math.max(
@@ -440,12 +712,15 @@ export function reportSubtitles(
           end: scaleQuoteTimelineSeconds(item.end),
         })
       )
-      const quoteCues = subtitleCuesFromSpeechAlignment({
-        ...scene,
-        start: sceneStart,
-        end: sceneStart + duration,
-        alignment,
-      })
+      const quoteCues = subtitleCuesFromSpeechAlignment(
+        {
+          ...scene,
+          start: sceneStart,
+          end: sceneStart + duration,
+          alignment,
+        },
+        { maxCharacters: options.maxCaptionCharacters }
+      )
       if (quoteCues.length) return quoteCues
     }
 
@@ -586,7 +861,8 @@ export function applySubtitleTimingForRender(
     plannedScenes,
     durations,
     options.captionPhrases,
-    options.transcript ?? []
+    options.transcript ?? [],
+    { maxCaptionCharacters: options.maxCaptionCharacters }
   )
   const timed = retimeSubtitleCuesToScenes(fresh, plannedScenes, timedScenes, {
     maxCaptionCharacters: options.maxCaptionCharacters,
@@ -721,79 +997,31 @@ export function subtitleCuesFromSpeechAlignment(
   scene: NewsReportScene & {
     start: number
     end: number
-    alignment?: Array<{ text: string; start: number; end: number }>
+    alignment?: SpeechAlignmentUnit[]
   },
   options: { maxCharacters?: number } = {}
 ) {
-  const segments = timedSubtitleTokens(scene.alignment ?? [])
-    .filter(
+  const segments = combineCalendarDateTokens(
+    timedSubtitleTokens(scene.alignment ?? []).filter(
       (segment) =>
         segment.text.trim() &&
         Number.isFinite(segment.start) &&
         Number.isFinite(segment.end) &&
         segment.end >= segment.start
     )
-    .sort((left, right) => left.start - right.start)
+  ).sort((left, right) => left.start - right.start)
   if (!segments.length) return [] as SubtitleCue[]
 
   const sceneDuration = Math.max(0.2, scene.end - scene.start)
   const maxChars = Math.max(10, Math.floor(options.maxCharacters ?? 30))
-  const groups: Array<{ text: string; start: number; end: number }> = []
-  let cursor = 0
-  while (cursor < segments.length) {
-    let text = ""
-    let bestEnd = cursor
-    let bestText = cleanPhrase(segments[cursor]!.text)
-    let bestScore = Number.NEGATIVE_INFINITY
-
-    for (let index = cursor; index < segments.length; index += 1) {
-      const segmentText = cleanPhrase(segments[index]!.text)
-      const joined = joinSpokenTokens(text, segmentText)
-      const length = comparableLength(joined)
-      if (index > cursor && length > maxChars) break
-
-      text = joined
-      const next = segments[index + 1]
-      const score = spokenCaptionBoundaryScore({
-        text,
-        nextText: next?.text ?? "",
-        gap: next ? next.start - segments[index]!.end : 0,
-        duration: segments[index]!.end - segments[cursor]!.start,
-        length,
-        maxChars,
-        isLast: index === segments.length - 1,
-      })
-      if (score > bestScore) {
-        bestScore = score
-        bestEnd = index
-        bestText = text
-      }
-      if (/[.!?。！？]["'”’)]*$/.test(text)) break
-      const gapAfter = next ? next.start - segments[index]!.end : 0
-      const strongPhraseBoundary =
-        comparableLength(text) >= maxChars * 0.32 &&
-        (/[,;:，；：–—]$/.test(text) ||
-          gapAfter >= 0.38 ||
-          startsWithClauseConnector(next?.text ?? ""))
-      if (strongPhraseBoundary) {
-        bestEnd = index
-        bestText = text
-        break
-      }
-    }
-
-    const first = segments[cursor]!
-    const last = segments[bestEnd]!
-    groups.push({
-      text: bestText,
-      start: Math.max(0, first.start),
-      end: Math.max(
-        Math.max(0, first.start) + 0.12,
-        Math.min(sceneDuration, last.end)
-      ),
-    })
-    cursor = bestEnd + 1
-  }
+  const groups = partitionSpeechTokens(segments, maxChars).map((group) => ({
+    text: group.text,
+    start: Math.max(0, group.start),
+    end: Math.max(
+      Math.max(0, group.start) + 0.12,
+      Math.min(sceneDuration, group.end)
+    ),
+  }))
 
   const idPrefix = scene.visual === "quote" ? "quote-caption" : "speech-caption"
   return groups.map((chunk, index) => ({
@@ -812,14 +1040,14 @@ export function subtitleCuesFromSpeechAlignment(
   })) satisfies SubtitleCue[]
 }
 
-function timedSubtitleTokens(
-  segments: Array<{ text: string; start: number; end: number }>
-) {
+function timedSubtitleTokens(segments: SpeechAlignmentUnit[]) {
   return segments.flatMap((segment) => {
     const text = cleanPhrase(segment.text)
     if (!text) return []
     const tokens = text.split(/\s+/).filter(Boolean)
-    if (tokens.length <= 1) return [{ ...segment, text }]
+    if (tokens.length <= 1) {
+      return [{ ...segment, text } satisfies TimedSpeechToken]
+    }
     const weights = tokens.map((token) => Math.max(1, comparableLength(token)))
     const total = weights.reduce((sum, value) => sum + value, 0)
     const duration = Math.max(0.12, segment.end - segment.start)
@@ -831,9 +1059,140 @@ function timedSubtitleTokens(
         index === tokens.length - 1
           ? segment.end
           : segment.start + (duration * elapsed) / total
-      return { text: token, start, end }
+      return {
+        text: token,
+        start,
+        end,
+        boundaryAfter:
+          index === tokens.length - 1 && segment.boundaryAfter === true,
+      } satisfies TimedSpeechToken
     })
   })
+}
+
+/** 연·월·일은 Whisper 구간이 갈려도 하나의 날짜 자막 단위로 유지한다. */
+function combineCalendarDateTokens(tokens: TimedSpeechToken[]) {
+  const combined: typeof tokens = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const year = tokens[index]
+    const month = tokens[index + 1]
+    const day = tokens[index + 2]
+    if (
+      year &&
+      month &&
+      day &&
+      /^\d{4}년$/u.test(cleanPhrase(year.text)) &&
+      /^\d{1,2}월$/u.test(cleanPhrase(month.text)) &&
+      /^\d{1,2}일$/u.test(cleanPhrase(day.text))
+    ) {
+      combined.push({
+        text: `${cleanPhrase(year.text)} ${cleanPhrase(month.text)} ${cleanPhrase(day.text)}`,
+        start: year.start,
+        end: day.end,
+        boundaryAfter: day.boundaryAfter,
+        preferredBreakAfter: true,
+      })
+      index += 2
+      continue
+    }
+    if (year) combined.push(year)
+  }
+  return combined
+}
+
+/**
+ * 전체 발화를 한 번에 최적화한다. 각 자막은 반드시 연속된 단어 범위이며,
+ * 시작·끝 시간은 그 범위의 첫 단어와 마지막 단어에서만 가져온다.
+ */
+function partitionSpeechTokens(tokens: TimedSpeechToken[], maxChars: number) {
+  const best = Array<{
+    score: number
+    end: number
+    text: string
+  } | null>(tokens.length + 1).fill(null)
+  best[tokens.length] = { score: 0, end: tokens.length, text: "" }
+
+  for (let start = tokens.length - 1; start >= 0; start -= 1) {
+    let text = ""
+    let selected: (typeof best)[number] = null
+    for (let end = start; end < tokens.length; end += 1) {
+      const token = tokens[end]!
+      text = joinSpokenTokens(text, cleanPhrase(token.text))
+      const length = captionVisualUnits(text)
+      if (end > start && length > maxChars) break
+
+      const next = tokens[end + 1]
+      const continuation = best[end + 1]
+      if (!continuation) continue
+      const hardBoundary =
+        token.boundaryAfter === true ||
+        /[,;:，；：–—.!?。！？]["'”’)]*$/.test(text)
+      const remainingLength = captionVisualUnits(
+        spokenTextUntilBoundary(tokens, end + 1)
+      )
+      let score =
+        spokenCaptionBoundaryScore({
+          text,
+          nextText: next?.text ?? "",
+          gap: next ? next.start - token.end : 0,
+          duration: token.end - tokens[start]!.start,
+          length,
+          maxChars,
+          remainingLength,
+          isLast: end === tokens.length - 1,
+        }) + continuation.score
+
+      // 자막 수를 필요 이상 늘리지 않되, 날짜·문장 끝은 독립 의미 단위로 둔다.
+      score -= 22
+      if (token.preferredBreakAfter) score += 82
+      if (hardBoundary) score += 32
+      if (/[,;:，；：–—]$/u.test(text)) score += 70
+      if (/^(?:오로지|바로|딱|절대|결코)$/u.test(cleanPhrase(token.text))) {
+        score -= 100
+      }
+      if (next && splitsFixedExpression(token.text, next.text)) score -= 180
+
+      if (!selected || score > selected.score) {
+        selected = { score, end, text }
+      }
+      if (hardBoundary) break
+    }
+
+    // 한 어절이 설정 폭보다 길어도 단어를 잘라 시간을 조작하지 않는다.
+    best[start] = selected ?? {
+      score: (best[start + 1]?.score ?? 0) - 200,
+      end: start,
+      text: cleanPhrase(tokens[start]!.text),
+    }
+  }
+
+  const groups: Array<{ text: string; start: number; end: number }> = []
+  let cursor = 0
+  while (cursor < tokens.length) {
+    const selected = best[cursor]!
+    const end = Math.max(cursor, selected.end)
+    groups.push({
+      text: selected.text,
+      start: tokens[cursor]!.start,
+      end: tokens[end]!.end,
+    })
+    cursor = end + 1
+  }
+  return groups
+}
+
+function splitsFixedExpression(left: string, right: string) {
+  const current = cleanPhrase(left)
+  const next = cleanPhrase(right)
+  return (
+    startsWithBoundParticle(next) ||
+    splitsNumberAndUnit(current, next) ||
+    (endsWithCaseParticle(current) && startsWithDependentPredicate(next)) ||
+    (/(?:있어야|해야|되어야|돼야)$/u.test(current) &&
+      /^(?:할|될|하는|되는)(?:\s|$)/u.test(next)) ||
+    (/(?:오로지|바로|딱|절대|결코)$/u.test(current) &&
+      /^[가-힣0-9]/u.test(next))
+  )
 }
 
 function spokenCaptionBoundaryScore(input: {
@@ -843,6 +1202,7 @@ function spokenCaptionBoundaryScore(input: {
   duration: number
   length: number
   maxChars: number
+  remainingLength: number
   isLast: boolean
 }) {
   const minimum = input.maxChars * 0.42
@@ -855,28 +1215,65 @@ function spokenCaptionBoundaryScore(input: {
   if (input.gap >= 0.38) score += 38
   else if (input.gap >= 0.22) score += 20
   if (startsWithClauseConnector(input.nextText)) score += 22
+  if (isBareClauseConnector(input.text)) score -= 180
   if (looksLikeSpokenPredicateEnd(input.text)) score += 14
-  if (/(?:은|는|이|가|을|를)[,.;:!?。！？]?$/u.test(input.text)) score += 12
-  if (
-    /(?:하는|되는|있는|없는|했던|라는|주는|받는|가는|오는|된|한)[,.;:!?。！？]?$/u.test(
-      input.text
-    )
-  ) {
-    score += 10
-  }
+  // 주격·목적격 조사는 한국어 호흡 경계가 될 수 있다. 단,
+  // 뒤에 연결 서술어가 오면 아래 패널티가 이 점수보다 우선한다.
+  if (/(?:이|가|을|를)[,.;:!?。！？]?$/u.test(input.text)) score += 12
   if (input.duration >= 3.8) score += 8
   if (startsWithBoundParticle(input.nextText)) score -= 120
+  if (
+    endsWithCaseParticle(input.text) &&
+    startsWithDependentPredicate(input.nextText)
+  ) {
+    score -= 120
+  }
+  if (
+    startsWithClauseConnector(input.text) &&
+    endsWithCaseParticle(input.text)
+  ) {
+    score -= 100
+  }
   if (endsWithDanglingModifier(input.text)) score -= 45
+  if (endsWithAdverbBeforeArgument(input.text, input.nextText)) score -= 100
   if (splitsNumberAndUnit(input.text, input.nextText)) score -= 140
+  // 문장 끝에 0.2~0.4초짜리 한 어절 자막이 혼자 남지 않게 한다.
+  // 앞 자막을 조금 일찍 끝내면 마지막 문구를 자연스럽게 묶을 수 있다.
+  if (input.remainingLength > 0 && input.remainingLength < minimum * 0.9) {
+    score -= 50 + (minimum * 0.9 - input.remainingLength) * 5
+  }
   return score
+}
+
+function spokenTextUntilBoundary(
+  segments: Array<{ text: string; boundaryAfter?: boolean }>,
+  startIndex: number
+) {
+  let text = ""
+  for (let index = startIndex; index < segments.length; index += 1) {
+    text = joinSpokenTokens(text, cleanPhrase(segments[index]!.text))
+    if (segments[index]!.boundaryAfter || /[.!?。！？]["'”’)]*$/.test(text)) {
+      break
+    }
+  }
+  return text
 }
 
 function joinSpokenTokens(left: string, right: string) {
   if (!left) return right
   if (!right) return left
-  return startsWithBoundParticle(right) || /^[,.;:!?%…)}\]”’]/.test(right)
+  const standaloneI =
+    cleanPhrase(right) === "이" && !endsWithFinalConsonant(left)
+  return (!standaloneI && startsWithBoundParticle(right)) ||
+    /^[,.;:!?%…)}\]”’]/.test(right)
     ? `${left}${right}`
     : `${left} ${right}`
+}
+
+function endsWithFinalConsonant(value: string) {
+  const last = [...cleanPhrase(value).replace(/[^가-힣]/gu, "")].at(-1)
+  if (!last) return false
+  return (last.charCodeAt(0) - 0xac00) % 28 !== 0
 }
 
 function startsWithBoundParticle(value: string) {
@@ -886,7 +1283,25 @@ function startsWithBoundParticle(value: string) {
 }
 
 function startsWithClauseConnector(value: string) {
-  return /^(?:그런데|하지만|그러나|그래서|그리고|다만|반면|결국|따라서|한편|즉|또)\b/u.test(
+  return /^(?:그런데|하지만|그러나|그래서|그리고|다만|반면|결국|따라서|한편|즉|또)(?:\s|$|[,.;:!?])/u.test(
+    cleanPhrase(value)
+  )
+}
+
+function isBareClauseConnector(value: string) {
+  return /^(?:그런데|하지만|그러나|그래서|그리고|다만|반면|결국|따라서|한편|즉|또)[,.;:!?]?$/u.test(
+    cleanPhrase(value)
+  )
+}
+
+function endsWithCaseParticle(value: string) {
+  return /(?:은|는|이|가|을|를|의|에|에서|에게|로|으로)$/u.test(
+    cleanPhrase(value)
+  )
+}
+
+function startsWithDependentPredicate(value: string) {
+  return /^(?:아니라|하면서|있어야|해야|되어야|돼야|할|될|위한|대한|따른|[가-힣]+(?:고|고자|하며|하면서|해서|하여|려고|려는|려던|는|던|도록|다가|지만|는데))(?:\s|$)/u.test(
     cleanPhrase(value)
   )
 }
@@ -898,8 +1313,19 @@ function looksLikeSpokenPredicateEnd(value: string) {
 }
 
 function endsWithDanglingModifier(value: string) {
-  return /(?:의|에|에서|에게|께|로|으로|와|과|위한|대한|따른)$/u.test(
-    cleanPhrase(value)
+  const text = cleanPhrase(value)
+  return (
+    /(?:의|에|에서|에게|께|로|으로|와|과|위한|대한|따른)$/u.test(text) ||
+    /(?:^|\s)(?:그|이|저|어떤|무슨|이런|그런|저런|한|두|세|네|모든|각)$/u.test(
+      text
+    )
+  )
+}
+
+function endsWithAdverbBeforeArgument(left: string, right: string) {
+  return (
+    /(?:하게|히)$/u.test(cleanPhrase(left)) &&
+    /^[가-힣]+(?:을|를|이|가|은|는)(?:\s|$)/u.test(cleanPhrase(right))
   )
 }
 
@@ -962,6 +1388,16 @@ function groupSequentialItemsByScene<T>(
 
 function comparableLength(value: string) {
   return value.replace(/[\s\p{P}\p{S}]+/gu, "").length
+}
+
+/** FFmpeg 미리보기와 같은 기준으로 자막 폭을 계산한다. */
+function captionVisualUnits(value: string) {
+  const visual = [...value].reduce((sum, character) => {
+    if (/\s/.test(character)) return sum + 0.35
+    if (/[\u0000-\u024f]/.test(character)) return sum + 0.58
+    return sum + 1
+  }, 0)
+  return Math.max(visual, [...value].length)
 }
 
 function ngramRecall(left: string, right: string, size: number) {

@@ -11,7 +11,11 @@ import {
   reportSubtitles,
   splitEndCtaFromScript,
 } from "./report.ts"
-import { normalizeSubtitleCues } from "./text-layout.ts"
+import {
+  automaticSubtitleLineCharacterLimit,
+  normalizeSubtitleCues,
+} from "./text-layout.ts"
+import { normalizeTranscriptCalendarDates } from "./transcript.ts"
 import type {
   NewsClipProject,
   NewsClipSettings,
@@ -34,18 +38,19 @@ export function prepareRenderProject(
   options: { rebuildSubtitles?: boolean; lockTimeline?: boolean } = {}
 ): { project: NewsClipProject; reason: string } {
   const primarySourceId = project.source?.id ?? ""
+  const transcript = normalizeTranscriptCalendarDates(project.transcript)
   let reportScenes = options.lockTimeline
     ? project.reportScenes.map((scene) => ({ ...scene }))
     : normalizeQuoteScenes(
         collapseBuildup2HighlightCuts(project.reportScenes),
-        primarySourceId ? { [primarySourceId]: project.transcript } : {},
+        primarySourceId ? { [primarySourceId]: transcript } : {},
         primarySourceId,
         settings.titleVoiceRate
       )
   if (
     !options.lockTimeline &&
     project.productionMode === "buildup2" &&
-    project.transcript.length
+    transcript.length
   ) {
     reportScenes = reportScenes.map((scene) => {
       if (scene.id !== "buildup2-quote" || scene.visual !== "quote") {
@@ -54,7 +59,7 @@ export function prepareRenderProject(
       const completed = snapSourceRangeToCompleteUtterance(
         scene.sourceStart,
         scene.sourceEnd,
-        project.transcript
+        transcript
       )
       return {
         ...scene,
@@ -102,14 +107,26 @@ export function prepareRenderProject(
       reportScenes,
       undefined,
       reportCaptionPhrases(subtitleBody),
-      project.transcript
+      transcript,
+      {
+        maxCaptionCharacters:
+          automaticSubtitleLineCharacterLimit(settings.bodySubtitleText) * 2,
+      }
     ),
     settings.bodySubtitleText
   )
   const subtitles =
-    options.rebuildSubtitles || project.subtitles.length === 0
-      ? generatedSubtitles
-      : normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText)
+    options.lockTimeline && project.subtitles.length > 0
+      ? project.subtitles.map((cue) => ({
+          ...cue,
+          emphasis: [...cue.emphasis],
+          ...(cue.originalEmphasis
+            ? { originalEmphasis: [...cue.originalEmphasis] }
+            : {}),
+        }))
+      : options.rebuildSubtitles || project.subtitles.length === 0
+        ? generatedSubtitles
+        : normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText)
   const outputBodyDuration = estimateReportScenesDuration(
     reportScenes,
     settings.titleVoiceRate
@@ -129,6 +146,7 @@ export function prepareRenderProject(
     reason: "",
     project: {
       ...project,
+      transcript,
       reportScript: normalizedReportScript,
       reportScenes,
       subtitles,

@@ -1,8 +1,11 @@
 import { claudeText } from "@/lib/server/anthropic"
 import {
+  includeLeadingContext,
+  lockAngleRangeToTranscript,
   normalizeAngleOptions,
   type NewsAngleOption,
 } from "@/lib/news-clips/angles"
+import { snapSourceRangeToCompleteUtterance } from "@/lib/news-clips/speech-bounds"
 import { parseTranscript } from "@/lib/news-clips/transcript"
 import type { NewsClipProductionMode } from "@/lib/news-clips/types"
 
@@ -22,8 +25,9 @@ export async function extractNewsAngles(
     directSource?: boolean
   }
 ): Promise<NewsAngleOption[]> {
-  const transcript = parseTranscript(transcriptText)
-    .slice(0, 160)
+  const fullTranscript = parseTranscript(transcriptText)
+  const promptTranscript = fullTranscript.slice(0, 160)
+  const transcript = promptTranscript
     .map((segment) => ({
       start: segment.start,
       end: segment.end,
@@ -43,6 +47,7 @@ export async function extractNewsAngles(
       "각 각도마다 그 주제를 가장 잘 보여주는 연속 발언 구간 sourceStart·sourceEnd(초)를 반드시 넣는다.",
       "sourceStart/sourceEnd는 transcript의 start/end 타임코드를 따른다.",
       "고정된 목표 시간은 없다. 자연스럽게 시작하고 현재 문장과 생각이 완전히 끝나는 지점까지 포함한다.",
+      "첫 발언만 들어도 누가·무엇이·어떻게 됐는지 이해되어야 한다. '살았습니다', '문제였습니다'처럼 주어나 대상이 빠진 결론부터 시작하지 않는다.",
       "구간에 해당 각도의 핵심 발언이 실제로 들어 있어야 한다. 다른 각도 구간과 과도하게 겹치지 않게 한다.",
       options.directSource
         ? "사용자가 지정한 원본 영상이다. 영상 내용 자체를 기준으로 각도를 뽑는다."
@@ -61,19 +66,36 @@ export async function extractNewsAngles(
     }),
     1400
   )
-  return normalizeAngleOptions(JSON.parse(stripFence(response))).map(
-    (angle) => ({
-      ...angle,
+  return normalizeAngleOptions(JSON.parse(stripFence(response))).map((angle) => {
+    const completed = snapSourceRangeToCompleteUtterance(
+      angle.sourceStart,
+      angle.sourceEnd,
+      fullTranscript
+    )
+    const locked = includeLeadingContext(
+      lockAngleRangeToTranscript(
+        {
+          ...angle,
+          sourceStart: completed.start,
+          sourceEnd: completed.end,
+        },
+        fullTranscript
+      ),
+      fullTranscript
+    )
+    return {
+      ...locked,
       evidence: transcript
         .filter(
           (segment) =>
-            segment.end > angle.sourceStart && segment.start < angle.sourceEnd
+            segment.end > locked.sourceStart &&
+            segment.start < locked.sourceEnd
         )
         .map((segment) => segment.text.trim())
         .filter(Boolean)
         .join(" ")
         .replace(/\s+/g, " ")
         .slice(0, 260),
-    })
-  )
+    }
+  })
 }

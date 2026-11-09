@@ -45,10 +45,12 @@ import { issueTokens } from "@/lib/news-clips/discovery"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import { normalizeFinalPlaybackRate } from "@/lib/news-clips/final-playback"
 import {
+  automaticSubtitleLineCharacterLimit,
   fitTitleToLineLayouts,
   normalizeSubtitleCues,
   splitIntroTitleLines,
 } from "@/lib/news-clips/text-layout"
+import { serializeTranscript } from "@/lib/news-clips/transcript"
 import {
   buildBuildup2Scenes,
   buildup2HighlightBounds,
@@ -70,6 +72,7 @@ import {
   reportCaptionPhrases,
   reportHasEndCta,
   reportSubtitles,
+  shortBreathReviewTranscript,
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
 import {
@@ -84,6 +87,7 @@ import {
   type NewsClipProject,
   type NewsClipSettings,
   type NewsClipStep,
+  type NewsPreviewPart,
   type NewsReportScene,
   type NewsSource,
   type NewsSourceSearchState,
@@ -608,18 +612,25 @@ export function NewsClipsApp({
       candidate.sourceStart,
       candidate.sourceEnd
     )
+    const reviewTranscript = isBuildup2
+      ? shortBreathReviewTranscript(
+          transcript,
+          highlightBounds,
+          automaticSubtitleLineCharacterLimit(settings.bodySubtitleText)
+        )
+      : transcript
     const bodyScenes = isBuildup2
       ? buildBuildup2Scenes(
           bodyScript || completeReportScript,
           highlightBounds.start,
           highlightBounds.end,
-          transcript,
+          reviewTranscript,
           resolvedSource.id,
           reportScenes
         )
       : buildReportScenes(
           bodyScript || completeReportScript,
-          transcript,
+          reviewTranscript,
           candidate.sourceStart,
           candidate.sourceEnd,
           reportScenes,
@@ -634,7 +645,7 @@ export function NewsClipsApp({
       {
         ...base,
         source: resolvedSource,
-        transcript,
+        transcript: reviewTranscript,
         candidates,
         detectedSilences,
         selectedCandidateId: candidate.id,
@@ -664,7 +675,7 @@ export function NewsClipsApp({
     return {
       ...base,
       source: resolvedSource,
-      transcript,
+      transcript: reviewTranscript,
       candidates,
       detectedSilences,
       selectedCandidateId: candidate.id,
@@ -690,7 +701,7 @@ export function NewsClipsApp({
               normalizedReportScenes,
               undefined,
               reportCaptionPhrases(bodyScript || completeReportScript),
-              transcript
+              reviewTranscript
             ),
             settings.bodySubtitleText
           )
@@ -856,13 +867,14 @@ export function NewsClipsApp({
 
   async function generatePreview(
     draft: NewsClipProject,
-    _force?: boolean,
+    force?: boolean,
     options: {
       busyKey?: string
       note?: string
       clearBusy?: boolean
       silent?: boolean
       signal?: AbortSignal
+      part?: NewsPreviewPart
     } = {}
   ) {
     previewAbortRef.current?.abort()
@@ -872,6 +884,7 @@ export function NewsClipsApp({
     options.signal?.addEventListener("abort", abortFromCaller, { once: true })
     if (options.signal?.aborted) controller.abort()
     const busyKey = options.busyKey ?? "preview"
+    const previewPart = options.part ?? "all"
     const clearBusy = options.clearBusy !== false
     const silent = options.silent === true
     const jobId = crypto.randomUUID()
@@ -908,7 +921,8 @@ export function NewsClipsApp({
         body: JSON.stringify({
           project: draft,
           settings,
-          force: true,
+          force: force === true,
+          previewPart,
           jobId,
         }),
         signal: controller.signal,
@@ -925,6 +939,7 @@ export function NewsClipsApp({
         outputDurationSeconds?: number
         subtitles?: NewsClipProject["subtitles"]
         reportScenes?: NewsClipProject["reportScenes"]
+        transcript?: NewsClipProject["transcript"]
       }
       if (!response.ok || !body.previewUrl) {
         setNote(body.message || "저해상도 초안을 만들지 못했습니다.")
@@ -962,6 +977,9 @@ export function NewsClipsApp({
             body.outputDurationSeconds ?? current.outputDurationSeconds,
           // 미리보기와 함께 렌더 서버가 실측한 최신 자막 구간으로 교체한다.
           subtitles: Array.isArray(body.subtitles) ? body.subtitles : [],
+          transcript: Array.isArray(body.transcript)
+            ? body.transcript
+            : current.transcript,
           subtitleTimingsLocked: true,
           // 다시 만들 때는 승인한 영상 선택·컷 구간을 그대로 유지한다.
           // 첫 초안이나 대본/연출을 명시적으로 바꾼 경우에만 서버 구성을 받는다.
@@ -1450,6 +1468,7 @@ export function NewsClipsApp({
           angleKeywords: angle.keywords,
           angleSourceStart: angle.sourceStart,
           angleSourceEnd: angle.sourceEnd,
+          transcript: serializeTranscript(project.transcript),
         }),
         signal,
       })
@@ -1504,18 +1523,8 @@ export function NewsClipsApp({
         subtitleTimingsLocked: false,
       }
       setProject(nextProject)
-      setBusy(`select-angle:${angle.id}:preview`)
-      const created = await generatePreview(nextProject, true, {
-        busyKey: `select-angle:${angle.id}:preview`,
-        clearBusy: false,
-        silent: true,
-        signal,
-      })
       if (signal.aborted) return
-      advanceStep("preview")
-      if (!created) {
-        setNote("초안 영상을 만들지 못했습니다.")
-      }
+      advanceStep("script")
     } catch (error) {
       if (signal.aborted) return
       setNote(
@@ -1980,12 +1989,13 @@ export function NewsClipsApp({
           ) : step === "angles" ? (
             <AnglesStep
               angles={project.angleOptions}
+              transcript={project.transcript}
               selectedAngleId={project.selectedAngleId}
               sourceTitle={project.source?.title}
               busy={busy}
               note={note}
               onBack={() => openStep("issue")}
-              onSelect={(angle) => void runSelectedAngle(angle)}
+              onChoose={(angle) => void runSelectedAngle(angle)}
               onCancelSelection={cancelSelectedAngle}
             />
           ) : step === "issue" || step === "source" ? (
@@ -2070,8 +2080,16 @@ export function NewsClipsApp({
               onSettings={(patch) => void updateTtsSettings(patch)}
               onBusy={setBusy}
               onNote={setNote}
-              onPreview={(force, draft) =>
-                generatePreview(draft ?? project, force)
+              onPreview={(force, draft, part) =>
+                generatePreview(draft ?? project, force, {
+                  part,
+                  busyKey:
+                    part && part !== "all" ? `preview:${part}` : "preview",
+                  note:
+                    part && part !== "all"
+                      ? "선택한 구간의 미리보기를 만드는 중입니다."
+                      : undefined,
+                })
               }
               onCancelPreview={cancelPreview}
               onReselect={(target) => reselectCandidate(target)}
@@ -2909,8 +2927,8 @@ function stepIndex(step: NewsClipStep) {
 
 function previousReviewStep(step: NewsClipStep): NewsClipStep {
   if (step === "final") return "preview"
-  if (step === "preview" || step === "script" || step === "direction")
-    return "angles"
+  if (step === "preview") return "script"
+  if (step === "script" || step === "direction") return "angles"
   if (step === "angles") return "issue"
   return "issue"
 }
@@ -2923,12 +2941,11 @@ function nextReviewStep(step: NewsClipStep): NewsClipStep {
 }
 
 const VISIBLE_NEWS_CLIP_STEPS = NEWS_CLIP_STEPS.filter(
-  (item) =>
-    item.id !== "script" && item.id !== "direction" && item.id !== "source"
+  (item) => item.id !== "direction" && item.id !== "source"
 )
 
 function visibleWorkflowStep(step: NewsClipStep): NewsClipStep {
-  if (step === "script" || step === "direction") return "preview"
+  if (step === "direction") return "preview"
   // 원본 선택은 이슈 단계 안의 내부 과정으로만 두고 사이드바에는 노출하지 않는다.
   if (step === "source") return "issue"
   return step
