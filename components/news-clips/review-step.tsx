@@ -26,6 +26,7 @@ import {
   prepareRenderProject,
   rebuildSubtitlesAfterSceneEdit,
 } from "@/lib/news-clips/prepare-render-project"
+import { sceneTimingChanged } from "@/lib/news-clips/scene-edit"
 import {
   partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
@@ -165,57 +166,13 @@ function composePartScripts(
 }
 
 function syncNarrationFromSubtitleEdit(
-  project: NewsClipProject,
+  _project: NewsClipProject,
   subtitles: NewsClipProject["subtitles"],
-  cueId: string
+  _cueId: string
 ) {
-  const editedCue = subtitles.find((cue) => cue.id === cueId)
-  if (!editedCue?.sceneId) {
-    return { subtitles, subtitleTimingsLocked: true }
-  }
-  const parts = splitScenesByClipPart(
-    project.reportScenes,
-    project.productionMode
-  )
-  const isLead = parts.lead.some((scene) => scene.id === editedCue.sceneId)
-  const isOutro = parts.outro.some((scene) => scene.id === editedCue.sceneId)
-  if (!isLead && !isOutro) {
-    return { subtitles, subtitleTimingsLocked: true }
-  }
-  const targetScenes = isLead ? parts.lead : parts.outro
-  const targetIds = new Set(targetScenes.map((scene) => scene.id))
-  const textByScene = new Map<string, string>()
-  for (const scene of targetScenes) {
-    const text = subtitles
-      .filter((cue) => cue.sceneId === scene.id)
-      .sort((left, right) => left.start - right.start)
-      .map((cue) => cue.text.replace(/\s*\n\s*/g, " ").trim())
-      .filter(Boolean)
-      .join(" ")
-    if (text) textByScene.set(scene.id, text)
-  }
-  const reportScenes = project.reportScenes.map((scene) =>
-    targetIds.has(scene.id) && textByScene.has(scene.id)
-      ? { ...scene, narration: textByScene.get(scene.id)! }
-      : scene
-  )
-  const currentParts = partScriptTexts(project)
-  const partText = targetScenes
-    .map((scene) => textByScene.get(scene.id) ?? scene.narration.trim())
-    .filter(Boolean)
-    .join(" ")
-  const reportScript = composePartScripts(
-    project.productionMode,
-    isLead ? partText : currentParts.lead,
-    currentParts.body,
-    isOutro ? partText : currentParts.outro
-  )
-  return {
-    subtitles,
-    subtitleTimingsLocked: true,
-    reportScenes,
-    reportScript,
-  }
+  // 4번은 확정된 음성·영상 타임라인 위의 자막 오버레이 편집 단계다.
+  // 서두/마무리 자막을 고쳐도 TTS 대본이나 장면 길이를 다시 만들지 않는다.
+  return { subtitles, subtitleTimingsLocked: true }
 }
 
 const EDITOR_TABS: Record<
@@ -712,6 +669,7 @@ export function NewsClipReviewStep({
       introStillZoom: draft.introStillZoom,
       introStillX: draft.introStillX,
       introStillY: draft.introStillY,
+      subtitleTimingsLocked: project.subtitleTimingsLocked,
       renderSignature: "",
     })
     setIntroLayoutDraft(null)
@@ -734,6 +692,10 @@ export function NewsClipReviewStep({
     if (!hasSceneDrafts && !hasIntroDraft) return base
 
     const intro = introLayoutDraft ?? snapshotIntroLayout(base)
+    const timelineChanged = base.reportScenes.some((scene) => {
+      const draft = sceneLayoutDrafts[scene.id]
+      return draft ? sceneTimingChanged(scene, draft) : false
+    })
     const reportScenes = base.reportScenes.map((scene) => {
       const draft = sceneLayoutDrafts[scene.id]
       if (!draft) return scene
@@ -751,6 +713,11 @@ export function NewsClipReviewStep({
       introStillZoom: intro.introStillZoom,
       introStillX: intro.introStillX,
       introStillY: intro.introStillY,
+      subtitleTimingsLocked: timelineChanged
+        ? false
+        : base.subtitleTimingsLocked,
+      editorialRevision: base.editorialRevision + 1,
+      updatedAt: new Date().toISOString(),
       renderSignature: "",
     }
     onProject({
@@ -759,6 +726,7 @@ export function NewsClipReviewStep({
       introStillZoom: next.introStillZoom,
       introStillX: next.introStillX,
       introStillY: next.introStillY,
+      subtitleTimingsLocked: next.subtitleTimingsLocked,
       renderSignature: "",
     })
     setSceneLayoutDrafts({})
@@ -979,9 +947,21 @@ export function NewsClipReviewStep({
     sceneId: string,
     patch: Partial<NewsClipProject["reportScenes"][number]>
   ) {
+    const currentScene = project.reportScenes.find(
+      (scene) => scene.id === sceneId
+    )
     const reportScenes = project.reportScenes.map((scene) =>
       scene.id === sceneId ? { ...scene, ...patch } : scene
     )
+    if (currentScene && !sceneTimingChanged(currentScene, patch)) {
+      onProject({
+        reportScenes,
+        subtitles: project.subtitles,
+        subtitleTimingsLocked: project.subtitleTimingsLocked,
+        renderSignature: "",
+      })
+      return
+    }
     const prepared = rebuildSubtitlesAfterSceneEdit(
       project,
       reportScenes,
@@ -2872,7 +2852,7 @@ export function NewsClipReviewStep({
                       {mode === "preview"
                         ? compositionPane === "lead" ||
                           compositionPane === "outro"
-                          ? "자막 문구를 수정하면 위 대본에도 반영됩니다. 수정 후 미리보기를 다시 만드세요."
+                          ? "확정된 시간은 유지하고 자막 문구·강조만 바뀝니다. 수정 후 미리보기를 다시 만드세요."
                           : "초안 영상에서 확정된 시작·끝 시간입니다. 문구·강조만 고치고, 수정 후 미리보기를 다시 만드세요."
                         : "미리보기로 음성 기준 타이밍을 맞춘 뒤, 문구·강조만 고칩니다. 수정 후 미리보기/최종본을 다시 만드세요."}
                     </Card.Description>

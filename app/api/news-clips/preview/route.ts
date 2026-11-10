@@ -7,6 +7,8 @@ import type {
 } from "@/lib/news-clips/types"
 import { renderNewsClip } from "@/lib/server/news-clips/render"
 import {
+  clearNewsRenderCancellation,
+  readNewsRenderCancellation,
   validRenderJobId,
   writeNewsRenderProgress,
 } from "@/lib/server/news-clips/render-progress"
@@ -29,8 +31,8 @@ export async function POST(request: Request) {
       { status: 400 }
     )
   }
+  const jobId = validRenderJobId(body.jobId) ? body.jobId : ""
   try {
-    const jobId = validRenderJobId(body.jobId) ? body.jobId : ""
     if (jobId) await writeNewsRenderProgress(jobId, 1, "준비 중")
     const result = await renderNewsClip(
       body.project,
@@ -39,7 +41,11 @@ export async function POST(request: Request) {
       {
         force: body.force === true,
         previewPart: body.previewPart,
-        signal: request.signal,
+        // 네트워크 연결이나 화면 재마운트는 서버 렌더 취소 사유가 아니다.
+        // 사용자가 취소 버튼을 눌러 남긴 작업 표식만 확인한다.
+        isCancelled: jobId
+          ? async () => Boolean(await readNewsRenderCancellation(jobId))
+          : undefined,
         onProgress: jobId
           ? (percent, label) => writeNewsRenderProgress(jobId, percent, label)
           : undefined,
@@ -54,7 +60,7 @@ export async function POST(request: Request) {
     )
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
-    if (code === "render-cancelled" || request.signal.aborted) {
+    if (code === "render-cancelled") {
       return NextResponse.json(
         { message: "미리보기 만들기를 취소했습니다." },
         { status: 499 }
@@ -98,5 +104,7 @@ export async function POST(request: Request) {
                                       ? "초안의 영상·음성 동기화 검사를 통과하지 못했습니다. 초안을 다시 만들어 주세요."
                                       : "저해상도 초안을 만들지 못했습니다.")
     return NextResponse.json({ message }, { status: 422 })
+  } finally {
+    if (jobId) await clearNewsRenderCancellation(jobId)
   }
 }

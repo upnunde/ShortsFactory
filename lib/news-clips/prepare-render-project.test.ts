@@ -190,6 +190,63 @@ test("잠긴 자막은 어떤 문구로 수정해도 자동 분할·병합 없�
   assert.deepEqual(project.subtitles, subtitles)
 })
 
+test("crop-only save preserves locked caption identity, text, and timing", () => {
+  const base = sampleProject()
+  const subtitles = [
+    {
+      id: "crop-locked-caption",
+      sceneId: "buildup2-quote-cut-1",
+      start: 1.2,
+      end: 2.8,
+      text: "saved first line\nsaved second line",
+      emphasis: ["saved"],
+      emphasisColor: "yellow" as const,
+      edited: true,
+    },
+  ]
+  const reportScenes = base.reportScenes.map((scene) =>
+    scene.id === "buildup2-quote-cut-1"
+      ? {
+          ...scene,
+          crop: { x: 27, y: 64, zoom: 1.53, faceTracking: false },
+        }
+      : scene
+  )
+  const { project, reason } = prepareRenderProject(
+    {
+      ...base,
+      reportScenes,
+      subtitles,
+      subtitleTimingsLocked: true,
+    },
+    defaultNewsClipSettings,
+    { lockTimeline: true }
+  )
+  const croppedScene = project.reportScenes.find(
+    (scene) => scene.id === "buildup2-quote-cut-1"
+  )
+
+  assert.equal(reason, "")
+  assert.equal(project.subtitleTimingsLocked, true)
+  assert.deepEqual(croppedScene?.crop, {
+    x: 27,
+    y: 64,
+    zoom: 1.53,
+    faceTracking: false,
+  })
+  assert.equal(croppedScene?.sourceStart, 10)
+  assert.equal(croppedScene?.sourceEnd, 14)
+  assert.deepEqual(
+    project.subtitles.map(({ id, text, start, end }) => ({
+      id,
+      text,
+      start,
+      end,
+    })),
+    subtitles.map(({ id, text, start, end }) => ({ id, text, start, end }))
+  )
+})
+
 test("prepareRenderProject는 end-cta 구간·크롭을 유지한다", () => {
   const base = sampleProject()
   const withCrop = {

@@ -12,6 +12,19 @@ export type NewsRenderProgress = {
   updatedAt: number
 }
 
+export type NewsRenderCancellation = {
+  reason: string
+  requestedAt: number
+}
+
+function progressPath(jobId: string) {
+  return path.join(progressFolder, `${jobId}.json`)
+}
+
+function cancellationPath(jobId: string) {
+  return path.join(progressFolder, `${jobId}.cancel.json`)
+}
+
 export function validRenderJobId(value: unknown): value is string {
   return typeof value === "string" && /^[a-z0-9-]{8,80}$/i.test(value)
 }
@@ -28,17 +41,14 @@ export async function writeNewsRenderProgress(
     updatedAt: Date.now(),
   }
   await mkdir(progressFolder, { recursive: true })
-  await writeFile(
-    path.join(progressFolder, `${jobId}.json`),
-    JSON.stringify(progress)
-  )
+  await writeFile(progressPath(jobId), JSON.stringify(progress))
 }
 
 export async function readNewsRenderProgress(jobId: string) {
   if (!validRenderJobId(jobId)) return null
   try {
     return JSON.parse(
-      await readFile(path.join(progressFolder, `${jobId}.json`), "utf8")
+      await readFile(progressPath(jobId), "utf8")
     ) as NewsRenderProgress
   } catch {
     return null
@@ -47,5 +57,34 @@ export async function readNewsRenderProgress(jobId: string) {
 
 export async function removeNewsRenderProgress(jobId: string) {
   if (!validRenderJobId(jobId)) return
-  await rm(path.join(progressFolder, `${jobId}.json`), { force: true })
+  await rm(progressPath(jobId), { force: true })
+}
+
+export async function requestNewsRenderCancellation(
+  jobId: string,
+  reason = "user"
+) {
+  if (!validRenderJobId(jobId)) return
+  const cancellation: NewsRenderCancellation = {
+    reason,
+    requestedAt: Date.now(),
+  }
+  await mkdir(progressFolder, { recursive: true })
+  await writeFile(cancellationPath(jobId), JSON.stringify(cancellation))
+}
+
+export async function readNewsRenderCancellation(jobId: string) {
+  if (!validRenderJobId(jobId)) return null
+  try {
+    return JSON.parse(
+      await readFile(cancellationPath(jobId), "utf8")
+    ) as NewsRenderCancellation
+  } catch {
+    return null
+  }
+}
+
+export async function clearNewsRenderCancellation(jobId: string) {
+  if (!validRenderJobId(jobId)) return
+  await rm(cancellationPath(jobId), { force: true })
 }

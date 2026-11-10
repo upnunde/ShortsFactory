@@ -1,6 +1,14 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import {
+  access,
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises"
 import path from "node:path"
 
 import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
@@ -59,7 +67,6 @@ import {
 import { koreanSpeechUnits } from "@/lib/news-clips/korean-speech"
 import {
   automaticSubtitleLineCharacterLimit,
-  reflowSubtitleTextPreservingContent,
   layoutTimedSubtitleCues,
   resolveTextBox,
   splitIntroTitleLines,
@@ -318,6 +325,13 @@ export async function renderNewsFramePreview({
   return readFile(output)
 }
 
+const renderQueueGlobal = globalThis as typeof globalThis & {
+  __newsClipRenderQueues?: Map<string, Promise<void>>
+}
+const newsClipRenderQueues =
+  renderQueueGlobal.__newsClipRenderQueues ?? new Map<string, Promise<void>>()
+renderQueueGlobal.__newsClipRenderQueues = newsClipRenderQueues
+
 export async function renderNewsClip(
   project: NewsClipProject,
   settings: NewsClipSettings,
@@ -326,14 +340,61 @@ export async function renderNewsClip(
     force?: boolean
     onProgress?: (percent: number, label: string) => void | Promise<void>
     signal?: AbortSignal
+    isCancelled?: () => boolean | Promise<boolean>
+    finalPlaybackRate?: number
+    previewPart?: NewsPreviewPart
+  } = {}
+) {
+  const projectId = project.id
+  const previous = newsClipRenderQueues.get(projectId)
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const tail = (previous ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(() => gate)
+  newsClipRenderQueues.set(projectId, tail)
+
+  if (previous) await options.onProgress?.(1, "이전 렌더 정리 중")
+  await previous?.catch(() => undefined)
+  try {
+    return await renderNewsClipExclusive(project, settings, mode, options)
+  } finally {
+    release()
+    if (newsClipRenderQueues.get(projectId) === tail) {
+      newsClipRenderQueues.delete(projectId)
+    }
+  }
+}
+
+async function renderNewsClipExclusive(
+  project: NewsClipProject,
+  settings: NewsClipSettings,
+  mode: "preview" | "final" = "final",
+  options: {
+    force?: boolean
+    onProgress?: (percent: number, label: string) => void | Promise<void>
+    signal?: AbortSignal
+    isCancelled?: () => boolean | Promise<boolean>
     finalPlaybackRate?: number
     previewPart?: NewsPreviewPart
   } = {}
 ) {
   const progress = async (percent: number, label: string) => {
-    if (options.signal?.aborted) throw new Error("render-cancelled")
+    if (
+      options.signal?.aborted ||
+      (options.isCancelled && (await options.isCancelled()))
+    ) {
+      throw new Error("render-cancelled")
+    }
     await options.onProgress?.(percent, label)
-    if (options.signal?.aborted) throw new Error("render-cancelled")
+    if (
+      options.signal?.aborted ||
+      (options.isCancelled && (await options.isCancelled()))
+    ) {
+      throw new Error("render-cancelled")
+    }
   }
   await progress(2, "프로젝트 확인 중")
   const force = options.force === true
@@ -549,16 +610,12 @@ export async function renderNewsClip(
       options.edited.length &&
       !transcriptWasRefreshed
     ) {
-      // 확정한 문구·개수·시간은 보존하되, 폰트·폭 설정이 바뀌면
-      // FFmpeg 실제 폭에 맞게 줄바꿈만 다시 적용한다.
+      // 4번에서 확정한 문구·줄바꿈·개수·시간을 그대로 렌더한다.
+      // 폭 검증은 입력 UI에서 끝났으므로 서버가 다시 줄바꿈하지 않는다.
       return options.edited.map((cue) => ({
         ...cue,
         start: cue.start - options.offsetSeconds,
         end: cue.end - options.offsetSeconds,
-        text: reflowSubtitleTextPreservingContent(
-          cue.text,
-          settings.bodySubtitleText
-        ),
       }))
     }
     const localEdited = options.edited.map((cue) => ({
@@ -2383,25 +2440,38 @@ async function runWithRetry(bin: string, args: string[], attempts: number) {
   throw lastError
 }
 
-function runOnce(bin: string, args: string[]) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(bin, args, {
-      stdio: ["ignore", "ignore", "pipe"],
+async function runOnce(bin: string, args: string[]) {
+  const output = args.at(-1) ?? ""
+  const extension = output !== "-" ? path.extname(output) : ""
+  const atomicOutput = extension
+    ? `${output.slice(0, -extension.length)}.render-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${extension}`
+    : output
+  const atomicArgs = extension ? [...args.slice(0, -1), atomicOutput] : args
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(bin, atomicArgs, {
+        stdio: ["ignore", "ignore", "pipe"],
+      })
+      let stderr = ""
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr = `${stderr}${chunk.toString()}`.slice(-12_000)
+      })
+      child.on("error", () => reject(new Error("ffmpeg-failed")))
+      child.on("exit", (code) => {
+        if (code === 0) {
+          resolve()
+          return
+        }
+        console.error("FFmpeg failed", { output, stderr: stderr.slice(-4_000) })
+        reject(new Error("ffmpeg-failed"))
+      })
     })
-    let stderr = ""
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString()}`.slice(-12_000)
-    })
-    child.on("error", () => reject(new Error("ffmpeg-failed")))
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve()
-        return
-      }
-      console.error("FFmpeg failed", stderr.slice(-4_000))
-      reject(new Error("ffmpeg-failed"))
-    })
-  })
+    if (extension) await rename(atomicOutput, output)
+  } catch (error) {
+    if (extension)
+      await rm(atomicOutput, { force: true }).catch(() => undefined)
+    throw error
+  }
 }
 
 function mediaDuration(input: string) {

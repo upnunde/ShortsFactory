@@ -61,6 +61,7 @@ import {
   splitScenesByClipPart,
 } from "@/lib/news-clips/clip-parts"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
+import { restoreLockedEditorialSnapshot } from "@/lib/news-clips/restore-locked-project"
 import {
   NEWS_INTRO_GAP_SECONDS,
   NEWS_TOTAL_GAP_SECONDS,
@@ -141,11 +142,11 @@ export function NewsClipsApp({
   const autoAbortRef = useRef<AbortController | null>(null)
   const angleAbortRef = useRef<AbortController | null>(null)
   const previewAbortRef = useRef<AbortController | null>(null)
+  const previewJobIdRef = useRef<string | null>(null)
 
   useEffect(
     () => () => {
       angleAbortRef.current?.abort()
-      previewAbortRef.current?.abort()
     },
     []
   )
@@ -510,9 +511,10 @@ export function NewsClipsApp({
       titleVolume: next.titleVolume,
       sourceVolume: next.sourceVolume,
       quoteVolume: next.quoteVolume,
-      subtitles: subtitleLayoutChanged
-        ? normalizeSubtitleCues(current.subtitles, next.bodySubtitleText)
-        : current.subtitles,
+      subtitles:
+        subtitleLayoutChanged && !current.subtitleTimingsLocked
+          ? normalizeSubtitleCues(current.subtitles, next.bodySubtitleText)
+          : current.subtitles,
       updatedAt: new Date().toISOString(),
       editorialRevision: current.editorialRevision + 1,
       finalRevision: 0,
@@ -521,7 +523,7 @@ export function NewsClipsApp({
       thumbnailUrl: "",
       youtubeVideoId: "",
       youtubeUploadUrl: "",
-      subtitleTimingsLocked: false,
+      subtitleTimingsLocked: current.subtitleTimingsLocked,
     }))
   }
 
@@ -877,6 +879,10 @@ export function NewsClipsApp({
       part?: NewsPreviewPart
     } = {}
   ) {
+    const previousJobId = previewJobIdRef.current
+    if (previousJobId) {
+      void requestPreviewCancellation(previousJobId, "superseded")
+    }
     previewAbortRef.current?.abort()
     const controller = new AbortController()
     previewAbortRef.current = controller
@@ -888,6 +894,7 @@ export function NewsClipsApp({
     const clearBusy = options.clearBusy !== false
     const silent = options.silent === true
     const jobId = crypto.randomUUID()
+    previewJobIdRef.current = jobId
     let polling = true
     setPreviewProgress(1)
     setBusy(busyKey)
@@ -975,8 +982,12 @@ export function NewsClipsApp({
             body.titleCardDurationSeconds ?? current.titleCardDurationSeconds,
           outputDurationSeconds:
             body.outputDurationSeconds ?? current.outputDurationSeconds,
-          // 미리보기와 함께 렌더 서버가 실측한 최신 자막 구간으로 교체한다.
-          subtitles: Array.isArray(body.subtitles) ? body.subtitles : [],
+          // 4번에서 확정한 문구·줄바꿈·시간은 렌더 응답으로 다시 쓰지 않는다.
+          subtitles: draft.subtitleTimingsLocked
+            ? current.subtitles
+            : Array.isArray(body.subtitles)
+              ? body.subtitles
+              : [],
           transcript: Array.isArray(body.transcript)
             ? body.transcript
             : current.transcript,
@@ -1008,6 +1019,7 @@ export function NewsClipsApp({
       ).catch(() => undefined)
       if (previewAbortRef.current === controller) {
         previewAbortRef.current = null
+        previewJobIdRef.current = null
         setPreviewProgress(null)
         if (clearBusy) setBusy("")
       }
@@ -1017,8 +1029,11 @@ export function NewsClipsApp({
   function cancelPreview() {
     const controller = previewAbortRef.current
     if (!controller) return
+    const jobId = previewJobIdRef.current
+    if (jobId) void requestPreviewCancellation(jobId, "user")
     controller.abort()
     previewAbortRef.current = null
+    previewJobIdRef.current = null
     setPreviewProgress(null)
     setBusy("")
     setNote("미리보기 만들기를 취소했습니다.")
@@ -2258,10 +2273,11 @@ function balanceProjectSubtitles(
   project: NewsClipProject,
   settings: NewsClipSettings
 ) {
-  const subtitles = normalizeSubtitleCues(
-    project.subtitles,
-    settings.bodySubtitleText
-  )
+  // 3번에서 확정되고 4번에서 수정한 자막은 문구·개수·시간이 계약이다.
+  // 화면 재진입이나 설정 로드가 자동 병합/분할해서는 안 된다.
+  const subtitles = project.subtitleTimingsLocked
+    ? project.subtitles
+    : normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText)
   const settingsKey = newsRenderSettingsKey(settings)
   const settingsChanged = project.renderSettingsKey !== settingsKey
   if (
@@ -2622,6 +2638,19 @@ function refreshMediaUrl(url: string) {
   return `${url}${separator}client=${Date.now().toString(36)}`
 }
 
+function requestPreviewCancellation(jobId: string, reason: string) {
+  return fetch(
+    `/api/news-clips/render-progress?jobId=${encodeURIComponent(jobId)}`,
+    {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason }),
+    }
+  ).catch(() => undefined)
+}
+
 function hasSavableProgress(project: NewsClipProject) {
   return Boolean(
     project.selectedIssue ||
@@ -2681,8 +2710,11 @@ function normalizeSavedNewsProject(
   const isBuildup2 =
     saved.productionMode === "buildup2" ||
     (saved.productionMode as string) === "buildup"
+  const lockedSnapshot = restoreLockedEditorialSnapshot(saved)
+  const lockSavedTimeline = lockedSnapshot !== null
   const savedReportScenes = Array.isArray(saved.reportScenes)
-    ? saved.reportScenes.map((scene): NewsReportScene => {
+    ? (lockedSnapshot?.reportScenes ??
+      saved.reportScenes.map((scene): NewsReportScene => {
         const isHighlight =
           scene.id === "buildup2-quote" ||
           scene.id === "buildup-highlight" ||
@@ -2703,13 +2735,15 @@ function normalizeSavedNewsProject(
               ? scene.sourceId
               : saved.source?.id || undefined,
         }
-      })
+      }))
     : []
   const selectedCandidate = saved.candidates?.find(
     (candidate) => candidate.id === saved.selectedCandidateId
   )
   let reportScenes =
-    reportScript !== savedReportScript && selectedCandidate
+    !lockSavedTimeline &&
+    reportScript !== savedReportScript &&
+    selectedCandidate
       ? isBuildup2
         ? buildBuildup2Scenes(
             splitEndCtaFromScript(reportScript).body || reportScript,
@@ -2729,6 +2763,7 @@ function normalizeSavedNewsProject(
           )
       : savedReportScenes
   if (
+    !lockSavedTimeline &&
     reportScenes.length &&
     reportHasEndCta(reportScript) &&
     !reportScenes.some((scene) => isEndCtaScene(scene))
@@ -2748,7 +2783,7 @@ function normalizeSavedNewsProject(
       )
     }
   }
-  if (isBuildup2 && reportScenes.length) {
+  if (!lockSavedTimeline && isBuildup2 && reportScenes.length) {
     reportScenes = collapseBuildup2HighlightCuts(
       migrateLegacyBuildupScenes(reportScenes)
     )
@@ -2782,11 +2817,15 @@ function normalizeSavedNewsProject(
     transcript: Array.isArray(saved.transcript) ? saved.transcript : [],
   }
   const prepared = reportScenes.length
-    ? prepareRenderProject(draftForPrepare, {
-        titleVoiceRate: defaultNewsClipSettings.titleVoiceRate,
-        bodySubtitleText: defaultNewsClipSettings.bodySubtitleText,
-        titleCardSeconds: defaultNewsClipSettings.titleCardSeconds,
-      })
+    ? prepareRenderProject(
+        draftForPrepare,
+        {
+          titleVoiceRate: defaultNewsClipSettings.titleVoiceRate,
+          bodySubtitleText: defaultNewsClipSettings.bodySubtitleText,
+          titleCardSeconds: defaultNewsClipSettings.titleCardSeconds,
+        },
+        { lockTimeline: lockSavedTimeline }
+      )
     : { project: draftForPrepare, reason: "report-scenes-required" }
   if (!prepared.reason) {
     reportScenes = prepared.project.reportScenes
@@ -2802,19 +2841,22 @@ function normalizeSavedNewsProject(
         )
       : saved.subtitles
     : prepared.project.subtitles
-  const subtitles = isBuildup2
-    ? rebuiltSubtitles
-    : reportScript !== savedReportScript && legacyEndCtaCues.length
-      ? migrateLegacyEndCtaCues(saved.subtitles, reportScenes)
-      : reportScript !== savedReportScript && reportScenes.length
-        ? rebuiltSubtitles
-        : reportScenes.some((scene) => isEndCtaScene(scene)) &&
-            Array.isArray(saved.subtitles) &&
-            !saved.subtitles.some(
-              (cue) => cue.sceneId === "end-cta" || cue.id.startsWith("end-cta")
-            )
+  const subtitles = lockedSnapshot
+    ? lockedSnapshot.subtitles
+    : isBuildup2
+      ? rebuiltSubtitles
+      : reportScript !== savedReportScript && legacyEndCtaCues.length
+        ? migrateLegacyEndCtaCues(saved.subtitles, reportScenes)
+        : reportScript !== savedReportScript && reportScenes.length
           ? rebuiltSubtitles
-          : saved.subtitles
+          : reportScenes.some((scene) => isEndCtaScene(scene)) &&
+              Array.isArray(saved.subtitles) &&
+              !saved.subtitles.some(
+                (cue) =>
+                  cue.sceneId === "end-cta" || cue.id.startsWith("end-cta")
+              )
+            ? rebuiltSubtitles
+            : saved.subtitles
 
   return {
     ...fallback,
