@@ -3206,8 +3206,10 @@ export function NewsClipReviewStep({
             >
               <LoadingButtonLabel
                 loading={busyMatches(busy, "render")}
-                label="최종본 만들기"
-                loadingLabel="최종본 만드는 중"
+                label={project.outputUrl ? "다시 만들기" : "최종본 만들기"}
+                loadingLabel={
+                  project.outputUrl ? "다시 만드는 중" : "최종본 만드는 중"
+                }
               />
             </Button>
           </>
