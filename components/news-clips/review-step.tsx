@@ -443,10 +443,7 @@ export function NewsClipReviewStep({
   const previewIsCurrent =
     Boolean(project.previewUrl) &&
     project.previewRevision === project.editorialRevision
-  const finalOutputIsCurrent =
-    Boolean(project.outputUrl) &&
-    project.finalRevision === project.editorialRevision &&
-    normalizeFinalPlaybackRate(project.finalPlaybackRate) === finalPlaybackRate
+  const finalOutputReady = Boolean(project.outputUrl)
   const previewSubtitles = project.subtitles
   const selectedSubtitle =
     previewSubtitles.find((caption) => caption.id === selectedSubtitleId) ??
@@ -1116,12 +1113,14 @@ export function NewsClipReviewStep({
         youtubeUploadUrl: "",
       }
       let finalizedProject = { ...project, ...patch }
+      let youtubeThumbnailApplied: boolean | null = null
       if (settings.youtubeAutoUpload) {
         const uploaded = await uploadYoutube(
           finalizedProject,
           scheduleForUpload(scheduledAt)
         )
         if (uploaded) {
+          youtubeThumbnailApplied = uploaded.thumbnailApplied
           const uploadPatch = {
             youtubeVideoId: uploaded.videoId,
             youtubeUploadUrl: uploaded.url,
@@ -1137,7 +1136,9 @@ export function NewsClipReviewStep({
       onNote(
         saved
           ? finalizedProject.youtubeUploadUrl
-            ? "최종본을 만들고 YouTube에 예약 업로드했습니다."
+            ? youtubeThumbnailApplied === false
+              ? "최종본은 업로드했지만 첫 화면 썸네일은 적용하지 못했습니다."
+              : "첫 화면을 썸네일로 적용해 YouTube에 예약 업로드했습니다."
             : body.message || "최종본을 만들었습니다."
           : "영상은 완성했지만 저장하지 못했습니다."
       )
@@ -1165,12 +1166,17 @@ export function NewsClipReviewStep({
         message?: string
         videoId?: string
         url?: string
+        thumbnailApplied?: boolean
       }
       if (!response.ok || !body.videoId || !body.url) {
         onNote(body.message || "YouTube에 업로드하지 못했습니다.")
         return null
       }
-      return { videoId: body.videoId, url: body.url }
+      return {
+        videoId: body.videoId,
+        url: body.url,
+        thumbnailApplied: body.thumbnailApplied === true,
+      }
     } catch {
       onNote("YouTube에 업로드하지 못했습니다.")
       return null
@@ -1189,7 +1195,11 @@ export function NewsClipReviewStep({
     const uploadedProject = { ...project, ...patch }
     onProject(patch)
     await Promise.resolve(onFinalized(uploadedProject)).catch(() => false)
-    onNote("YouTube에 예약 업로드했습니다.")
+    onNote(
+      uploaded.thumbnailApplied
+        ? "첫 화면을 썸네일로 적용해 YouTube에 예약 업로드했습니다."
+        : "YouTube 업로드는 완료했지만 첫 화면 썸네일은 적용하지 못했습니다."
+    )
   }
 
   const heading = REVIEW_STEP_COPY[mode]
@@ -3056,8 +3066,7 @@ export function NewsClipReviewStep({
                           isDisabled={
                             youtubeBusy
                               ? false
-                              : !finalOutputIsCurrent ||
-                                !!project.youtubeUploadUrl
+                              : !finalOutputReady || !!project.youtubeUploadUrl
                           }
                           onPress={() => void uploadFinalToYoutube()}
                         >

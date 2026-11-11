@@ -4,6 +4,7 @@ import type { NewsClipProject } from "@/lib/news-clips/types"
 import { uploadNewsClipToYoutube } from "@/lib/server/news-clips/youtube-upload"
 
 export const runtime = "nodejs"
+export const maxDuration = 180
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {

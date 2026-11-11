@@ -3,15 +3,13 @@ import { readFile } from "node:fs/promises"
 import path from "node:path"
 
 import type { NewsClipProject } from "@/lib/news-clips/types"
-import {
-  koreaPublishAt,
-  scheduleForUpload,
-} from "@/lib/youtube-metadata"
+import { koreaPublishAt, scheduleForUpload } from "@/lib/youtube-metadata"
 import {
   readChannelAccountStatus,
   youtubeAccessToken,
 } from "@/lib/server/accounts"
 import { readNewsChannel } from "@/lib/server/news-clips/channels"
+import { applyYoutubeThumbnail } from "@/lib/server/news-clips/youtube-thumbnail"
 
 export async function uploadNewsClipToYoutube(
   project: NewsClipProject,
@@ -37,7 +35,18 @@ export async function uploadNewsClipToYoutube(
     project.id,
     "final.mp4"
   )
-  const video = await readFile(videoPath).catch(() => null)
+  const thumbnailPath = path.join(
+    process.cwd(),
+    "public",
+    "news-clips",
+    "output",
+    project.id,
+    "thumbnail.png"
+  )
+  const [video, thumbnail] = await Promise.all([
+    readFile(videoPath).catch(() => null),
+    readFile(thumbnailPath).catch(() => null),
+  ])
   if (!video) throw new Error("video-not-found")
 
   const token = await youtubeAccessToken(project.profileId)
@@ -74,9 +83,13 @@ export async function uploadNewsClipToYoutube(
       ? String(uploaded.id)
       : ""
   if (!videoId) throw new Error("youtube-upload-failed")
+  const thumbnailApplied = thumbnail
+    ? await applyYoutubeThumbnail({ videoId, token, thumbnail })
+    : false
   return {
     videoId,
     url: `https://studio.youtube.com/video/${videoId}/edit`,
+    thumbnailApplied,
   }
 }
 
