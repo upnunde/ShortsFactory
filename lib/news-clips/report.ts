@@ -88,6 +88,69 @@ export function reportSceneVisualMode(
   return scene.visualMode ?? scene.visual
 }
 
+/** 보도형 TTS 장면은 유지하고, 이어진 자료화면의 시각 설정만 앞 장면에서 받는다. */
+export function resolveReportVisualContinuations<T extends NewsReportScene>(
+  scenes: T[]
+): T[] {
+  let anchor: T | undefined
+  return scenes.map((scene, index) => {
+    if (index === 0 || scene.continuePreviousVisual !== true || !anchor) {
+      anchor = scene
+      return scene
+    }
+    return {
+      ...scene,
+      visual: anchor.visual,
+      visualMode: anchor.visualMode,
+      sourceId: anchor.sourceId,
+      sourceStart: anchor.sourceStart,
+      sourceEnd: anchor.sourceEnd,
+      crop: anchor.crop ? { ...anchor.crop } : undefined,
+      fit: anchor.fit,
+      motion: anchor.motion,
+    }
+  })
+}
+
+/** 합쳐진 자료화면 그룹에서 실제 화면 설정을 소유한 첫 장면을 찾는다. */
+export function reportVisualContinuationAnchor<T extends NewsReportScene>(
+  scenes: T[],
+  sceneId: string
+): T | undefined {
+  let index = scenes.findIndex((scene) => scene.id === sceneId)
+  if (index < 0) return undefined
+  while (index > 0 && scenes[index]?.continuePreviousVisual === true) {
+    index -= 1
+  }
+  return scenes[index]
+}
+
+/**
+ * 보도형의 음성·자막 장면은 그대로 두고, 이어 쓰기로 지정한 자료화면만
+ * 하나의 FFmpeg 재생 구간으로 묶는다. 첫 장면의 시작 시각과 화면 설정을
+ * 유지하고 마지막 장면 끝까지 길이만 늘리므로 중간에서 영상·모션이
+ * 재시작되지 않는다.
+ */
+export function groupReportVisualContinuationSegments<
+  T extends NewsReportScene & { end: number; duration: number },
+>(scenes: T[]): T[] {
+  const resolved = resolveReportVisualContinuations(scenes)
+  return resolved.reduce<T[]>((groups, scene, index) => {
+    const previous = groups.at(-1)
+    if (index > 0 && scene.continuePreviousVisual === true && previous) {
+      groups[groups.length - 1] = {
+        ...previous,
+        end: scene.end,
+        duration:
+          Math.round((previous.duration + scene.duration) * 1000) / 1000,
+      }
+      return groups
+    }
+    groups.push(scene)
+    return groups
+  }, [])
+}
+
 /** 저장 가능한 전체 대본은 장면 narration에서만 파생한다. */
 export function reportScriptFromScenes(scenes: NewsReportScene[]) {
   return scenes
@@ -195,6 +258,8 @@ export function appendEndCtaScenes(
       sourceStart: round(sourceStart),
       sourceEnd: round(sourceEnd),
       ...(existingCta?.crop ? { crop: existingCta.crop } : {}),
+      ...(existingCta?.fit ? { fit: existingCta.fit } : {}),
+      ...(existingCta?.motion ? { motion: existingCta.motion } : {}),
     },
   ]
 }
@@ -792,6 +857,11 @@ export function buildReportScenes(
       sourceStart: round(snapped.start),
       sourceEnd: round(Math.max(snapped.start + 0.5, snapped.end)),
       ...(saved?.crop ? { crop: saved.crop } : {}),
+      ...(saved?.fit ? { fit: saved.fit } : {}),
+      ...(saved?.motion ? { motion: saved.motion } : {}),
+      ...(saved?.continuePreviousVisual === true
+        ? { continuePreviousVisual: true }
+        : {}),
     } satisfies NewsReportScene
   })
 }
@@ -880,6 +950,88 @@ export function reportSubtitles(
       } satisfies SubtitleCue
     })
   })
+}
+
+/**
+ * 여러 장면을 한 번에 합성한 TTS 단어열에서 각 장면의 시작 단어를 찾는다.
+ * 글자 수 비례만 사용하면 `30%`가 `삼십 / 퍼센트`로 발음되는 순간 이후
+ * 장면 경계가 한 어절씩 밀리므로, 다음 문장의 실제 첫 어절들을 우선 매칭한다.
+ */
+export function continuousSpeechWordBoundaries(
+  narrations: string[],
+  words: Array<{ text: string }>
+) {
+  if (!narrations.length) return [0]
+  if (!words.length) {
+    return Array.from({ length: narrations.length + 1 }, () => 0)
+  }
+
+  const sceneWeights = narrations.map(spokenUnitCount)
+  const totalSceneWeight = sceneWeights.reduce((sum, value) => sum + value, 0)
+  const boundaries = [0]
+  let elapsedSceneWeight = 0
+
+  for (let sceneIndex = 1; sceneIndex < narrations.length; sceneIndex += 1) {
+    elapsedSceneWeight += sceneWeights[sceneIndex - 1]!
+    const fallback = Math.round(
+      (words.length * elapsedSceneWeight) / Math.max(1, totalSceneWeight)
+    )
+    const previous = boundaries.at(-1) ?? 0
+    const remainingScenes = narrations.length - sceneIndex
+    const minimum = Math.min(
+      words.length,
+      previous + (words.length >= narrations.length ? 1 : 0)
+    )
+    const maximum = Math.max(
+      minimum,
+      words.length - Math.min(remainingScenes, words.length)
+    )
+    const opening = narrations[sceneIndex]!
+      .split(/\s+/)
+      .map(speechMatchKey)
+      .filter(Boolean)
+      .slice(0, 4)
+    const requiredMatches = Math.min(2, opening.length)
+    let selected = -1
+    let selectedMatches = -1
+    let selectedDistance = Number.POSITIVE_INFINITY
+
+    if (requiredMatches > 0) {
+      for (let candidate = minimum; candidate <= maximum; candidate += 1) {
+        let matches = 0
+        while (
+          matches < opening.length &&
+          candidate + matches < words.length &&
+          speechMatchKey(words[candidate + matches]!.text) === opening[matches]
+        ) {
+          matches += 1
+        }
+        if (matches < requiredMatches) continue
+        const distance = Math.abs(candidate - fallback)
+        if (
+          matches > selectedMatches ||
+          (matches === selectedMatches && distance < selectedDistance)
+        ) {
+          selected = candidate
+          selectedMatches = matches
+          selectedDistance = distance
+        }
+      }
+    }
+
+    boundaries.push(
+      selected >= 0 ? selected : Math.max(minimum, Math.min(maximum, fallback))
+    )
+  }
+  boundaries.push(words.length)
+  return boundaries
+}
+
+function speechMatchKey(value: string) {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "")
 }
 
 /** 직접발언 장면에는 글로벌 문구를 흘리지 않고, 장면 나레이션만 쓴다. */
@@ -1140,6 +1292,152 @@ export function retimeSubtitleCuesToScenes(
       }
     })
   })
+}
+
+/**
+ * 보도형의 잠긴 문구·줄바꿈·자막 개수는 유지하되, 시간은 실제 TTS 단어
+ * 타임스탬프에 다시 붙인다. 대본 길이로 미리 추정한 시간을 그대로 쓰면
+ * Typecast의 실제 호흡과 문장별 속도 차이가 누적되어 뒤로 갈수록 어긋난다.
+ */
+export function retimeLockedSubtitleCuesToSpeech(
+  cues: SubtitleCue[],
+  timedScenes: Array<
+    NewsReportScene & {
+      start: number
+      end: number
+      alignment?: SpeechAlignmentUnit[]
+    }
+  >
+) {
+  if (!cues.length || !timedScenes.length) return cues
+  const grouped = groupCuesByScene(cues, timedScenes)
+
+  return timedScenes.flatMap((scene, sceneIndex) => {
+    const sceneCues = grouped[sceneIndex] ?? []
+    if (!sceneCues.length) return []
+    const words = (scene.alignment ?? [])
+      .filter(
+        (word) =>
+          word.text.trim() &&
+          Number.isFinite(word.start) &&
+          Number.isFinite(word.end) &&
+          word.end >= word.start
+      )
+      .sort((left, right) => left.start - right.start)
+    if (!words.length) return sceneCues
+
+    const boundaries = displayCueWordBoundaries(
+      sceneCues.map((cue) => cue.text),
+      words
+    )
+
+    const sceneDuration = Math.max(0.1, scene.end - scene.start)
+    return sceneCues.map((cue, cueIndex) => {
+      const first = words[boundaries[cueIndex] ?? 0]
+      const last = words[Math.max(0, (boundaries[cueIndex + 1] ?? 0) - 1)]
+      const fallbackStart =
+        scene.start + (sceneDuration * cueIndex) / sceneCues.length
+      const fallbackEnd =
+        scene.start + (sceneDuration * (cueIndex + 1)) / sceneCues.length
+      const start = first ? scene.start + first.start : fallbackStart
+      const end = last ? scene.start + last.end : fallbackEnd
+      return {
+        ...cue,
+        sceneId: scene.id,
+        start: round(Math.max(scene.start, Math.min(scene.end, start))),
+        end: round(
+          Math.max(
+            Math.max(scene.start, Math.min(scene.end, start)) + 0.04,
+            Math.min(scene.end, end)
+          )
+        ),
+      }
+    })
+  })
+}
+
+/** 검수 대본 문구는 보존하고 실제 TTS 어절의 앞뒤 경계만 대응한다. */
+function displayCueWordBoundaries(
+  cueTexts: string[],
+  words: Array<{ text: string }>
+) {
+  if (!cueTexts.length) return [0]
+  if (!words.length) return Array.from({ length: cueTexts.length + 1 }, () => 0)
+  const cueWeights = cueTexts.map(spokenUnitCount)
+  const totalCueWeight = cueWeights.reduce((sum, value) => sum + value, 0)
+  const boundaries = [0]
+  let elapsedCueWeight = 0
+
+  for (let cueIndex = 1; cueIndex < cueTexts.length; cueIndex += 1) {
+    elapsedCueWeight += cueWeights[cueIndex - 1]!
+    const fallback = Math.round(
+      (words.length * elapsedCueWeight) / Math.max(1, totalCueWeight)
+    )
+    const previousBoundary = boundaries.at(-1) ?? 0
+    const remainingCues = cueTexts.length - cueIndex
+    const minimum = Math.min(
+      words.length,
+      previousBoundary + (words.length >= cueTexts.length ? 1 : 0)
+    )
+    const maximum = Math.max(
+      minimum,
+      words.length - Math.min(remainingCues, words.length)
+    )
+    const nextOpening = cueTexts[cueIndex]!
+      .split(/\s+/)
+      .map(speechMatchKey)
+      .filter(Boolean)
+      .slice(0, 4)
+    const previousClosing = cueTexts[cueIndex - 1]!
+      .split(/\s+/)
+      .map(speechMatchKey)
+      .filter(Boolean)
+      .slice(-4)
+    const requiredOpening = Math.min(2, nextOpening.length)
+    const requiredClosing = Math.min(2, previousClosing.length)
+    let selected = -1
+    let selectedScore = Number.NEGATIVE_INFINITY
+
+    for (let candidate = minimum; candidate <= maximum; candidate += 1) {
+      let openingMatches = 0
+      while (
+        openingMatches < nextOpening.length &&
+        candidate + openingMatches < words.length &&
+        speechMatchKey(words[candidate + openingMatches]!.text) ===
+          nextOpening[openingMatches]
+      ) {
+        openingMatches += 1
+      }
+      let closingMatches = 0
+      while (
+        closingMatches < previousClosing.length &&
+        candidate - closingMatches - 1 >= 0 &&
+        speechMatchKey(words[candidate - closingMatches - 1]!.text) ===
+          previousClosing[previousClosing.length - closingMatches - 1]
+      ) {
+        closingMatches += 1
+      }
+      const openingValid =
+        requiredOpening > 0 && openingMatches >= requiredOpening
+      const closingValid =
+        requiredClosing > 0 && closingMatches >= requiredClosing
+      if (!openingValid && !closingValid) continue
+      const score =
+        openingMatches * 100 +
+        closingMatches * 90 -
+        Math.abs(candidate - fallback)
+      if (score > selectedScore) {
+        selected = candidate
+        selectedScore = score
+      }
+    }
+
+    boundaries.push(
+      selected >= 0 ? selected : Math.max(minimum, Math.min(maximum, fallback))
+    )
+  }
+  boundaries.push(words.length)
+  return boundaries
 }
 
 /** TTS/ASR 단어 정렬 → 읽기 좋은 자막 칸(내용+시간). 단어 하나씩 깜빡이지 않게 묶는다. */
@@ -1725,6 +2023,10 @@ function groupSequentialItemsByScene<T>(
 
 function comparableLength(value: string) {
   return value.replace(/[\s\p{P}\p{S}]+/gu, "").length
+}
+
+function spokenUnitCount(value: string) {
+  return Math.max(1, cleanPhrase(value).split(/\s+/).filter(Boolean).length)
 }
 
 /** FFmpeg 미리보기와 같은 기준으로 자막 폭을 계산한다. */

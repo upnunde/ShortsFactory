@@ -12,6 +12,8 @@ import {
   stepHeaderActionButtonClassName,
   stepHeaderActionsClassName,
   stepHeaderClassName,
+  stepHeaderContentClassName,
+  workspacePageContentClassName,
   type WorkspaceHistorySaveProps,
 } from "@/components/news-clips/step-action-bar"
 import {
@@ -23,6 +25,7 @@ import {
 } from "@/lib/news-clips/angles"
 import { snapSourceRangeToCompleteUtterance } from "@/lib/news-clips/speech-bounds"
 import type {
+  NewsClipProductionMode,
   NewsSourceSelectionMode,
   TranscriptSegment,
 } from "@/lib/news-clips/types"
@@ -31,6 +34,7 @@ export function NewsClipAnglesStep({
   angles,
   transcript,
   selectedAngleId,
+  productionMode,
   sourceSelectionMode,
   sourceOverview,
   sourceId,
@@ -47,6 +51,7 @@ export function NewsClipAnglesStep({
   angles: NewsAngleOption[]
   transcript: TranscriptSegment[]
   selectedAngleId: string
+  productionMode: NewsClipProductionMode
   sourceSelectionMode: NewsSourceSelectionMode
   sourceOverview: string
   sourceId: string
@@ -55,12 +60,13 @@ export function NewsClipAnglesStep({
   busy: string
   note: string
   progress: number | null
-  onRetry: () => void
+  onRetry: (focus?: string) => void
   onChoose: (angle: NewsAngleOption) => void
   onCancelSelection: () => void
   historySave: WorkspaceHistorySaveProps
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const [focus, setFocus] = useState("")
   const [previewRange, setPreviewRange] = useState<{
     angleId: string
     rangeId: string
@@ -77,8 +83,13 @@ export function NewsClipAnglesStep({
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
       <header className={stepHeaderClassName}>
+        <div className={stepHeaderContentClassName}>
         <h2 className="truncate text-xl leading-7 font-semibold">
-          {isVideoSummary ? "영상 요약 후보" : "핵심 내용 확인"}
+          {productionMode === "report"
+            ? "핵심 주제 선택"
+            : isVideoSummary
+              ? "영상 요약 후보"
+              : "핵심 내용 확인"}
         </h2>
         <div className={stepHeaderActionsClassName}>
           {note ? <p className="text-sm text-muted">{note}</p> : null}
@@ -100,11 +111,43 @@ export function NewsClipAnglesStep({
             </Button>
           ) : null}
         </div>
+        </div>
       </header>
       <div className={stepBodyClassName}>
-        <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 px-6">
+        <div className={`${workspacePageContentClassName} flex flex-col gap-5`}>
         {sourceTitle ? (
           <p className="truncate text-sm text-muted">{sourceTitle}</p>
+        ) : null}
+
+        {productionMode === "report" ? (
+          <Card>
+            <Card.Header className="flex-row items-center justify-between gap-4 border-b border-separator pb-4">
+              <Card.Title>원하는 핵심 내용</Card.Title>
+              <Button
+                className="shrink-0"
+                isDisabled={!focus.trim() || Boolean(busy)}
+                onPress={() => onRetry(focus.trim())}
+              >
+                <LoadingButtonLabel
+                  loading={busyMatches(busy, "angles")}
+                  label="다시 요약"
+                  loadingLabel="요약 중"
+                  progress={progress}
+                />
+              </Button>
+            </Card.Header>
+            <Card.Content className="pt-4">
+              <textarea
+                rows={2}
+                aria-label="원하는 핵심 내용"
+                value={focus}
+                maxLength={300}
+                placeholder="예: 예산 낭비, 재정 부담, 정책의 모순"
+                onChange={(event) => setFocus(event.currentTarget.value)}
+                className="w-full resize-none rounded-xl border border-separator bg-background px-3 py-2.5 text-sm outline-none focus:border-foreground/40"
+              />
+            </Card.Content>
+          </Card>
         ) : null}
 
         {isVideoSummary && sourceOverview ? (

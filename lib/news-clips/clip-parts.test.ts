@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
+  partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
   removeTrailingPartText,
   splitScenesByClipPart,
@@ -121,6 +122,52 @@ test("레거시 보도형도 장면 위치가 아닌 저장 ID로 서두를 복�
   assert.deepEqual(
     parts.body.map((scene) => scene.id),
     ["report-scene-2"]
+  )
+})
+
+test("마지막 본문 ID로 잘못 저장된 CTA 질문도 마무리 자막으로 복원한다", () => {
+  const cues = [
+    {
+      id: "body-last",
+      sceneId: "report-body-8",
+      start: 30,
+      end: 32,
+      text: "이 경고, 그냥 넘길 얘기일까?",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "legacy-question",
+      sceneId: "report-body-8",
+      start: 32,
+      end: 34,
+      text: "전세난에 대한 정부 대응을 어떻게 생각해?",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "end-cta-2",
+      sceneId: "end-cta",
+      start: 34,
+      end: 36,
+      text: "댓글로 남겨줘.",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const parts = partitionSubtitlesByPart(
+    cues,
+    [{ id: "report-lead-1" }],
+    [{ id: "report-body-8" }]
+  )
+
+  assert.deepEqual(
+    parts.body.map((cue) => cue.id),
+    ["body-last"]
+  )
+  assert.deepEqual(
+    parts.outro.map((cue) => cue.id),
+    ["legacy-question", "end-cta-2"]
   )
 })
 

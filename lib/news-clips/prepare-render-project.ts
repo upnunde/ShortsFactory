@@ -123,6 +123,29 @@ export function prepareRenderProject(
             primarySourceId,
             settings.titleVoiceRate
           )
+  const uploadedImageSourceIds = new Set(
+    [project.source, ...project.supportingSources]
+      .filter(
+        (source) =>
+          source?.mediaType === "image" && source.channel === "사용자 첨부"
+      )
+      .map((source) => source!.id)
+  )
+  if (uploadedImageSourceIds.size) {
+    reportScenes = reportScenes.map((scene) => {
+      const crop = scene.crop
+      const hasNeutralLayout =
+        !crop ||
+        (Math.abs(crop.x - 50) < 0.01 &&
+          Math.abs(crop.y - 50) < 0.01 &&
+          Math.abs(crop.zoom - 1) < 0.01)
+      return uploadedImageSourceIds.has(scene.sourceId || "") &&
+        hasNeutralLayout &&
+        scene.fit !== "contain"
+        ? { ...scene, fit: "contain" as const }
+        : scene
+    })
+  }
   if (
     !options.lockTimeline &&
     project.productionMode === "buildup2" &&
@@ -283,15 +306,21 @@ export function prepareRenderProject(
     generatedSceneParts.lead,
     generatedSceneParts.body
   )
-  // 서두는 짧고 빠르게 읽히도록 한 줄을 우선한다. 한 줄 폭을 넘는
-  // 문장은 같은 시간 범위 안에서 여러 자막 칸으로 나눈다.
+  // 서두와 보도형 본문은 짧고 빠르게 읽히도록 한 줄을 우선한다.
+  // 한 줄 폭을 넘는 문장은 같은 시간 범위 안에서 여러 자막 칸으로 나눈다.
   const generatedSubtitles = [
     ...layoutTimedSubtitleCues(
       generatedSubtitleParts.lead,
       settings.bodySubtitleText,
       { maxLines: 1 }
     ),
-    ...generatedSubtitleParts.body,
+    ...(project.productionMode === "report"
+      ? layoutTimedSubtitleCues(
+          generatedSubtitleParts.body,
+          settings.bodySubtitleText,
+          { maxLines: 1 }
+        )
+      : generatedSubtitleParts.body),
     ...generatedSubtitleParts.outro,
   ].sort((left, right) => left.start - right.start || left.end - right.end)
   const subtitles =

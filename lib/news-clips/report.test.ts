@@ -5,22 +5,27 @@ import {
   buildReportScenes,
   appendEndCtaScenes,
   canonicalReportScript,
+  continuousSpeechWordBoundaries,
   contextualEndCtaText,
   ensureReportEndCta,
   splitEndCtaFromScript,
   estimateReportDuration,
   estimateReportScenesDuration,
+  groupReportVisualContinuationSegments,
   normalizeQuoteScenes,
   quoteNarrationMatchesTranscript,
   quoteTranscriptAlignment,
   reportCaptionPhrases,
   reportSceneAudioMode,
   reportScriptFromScenes,
+  reportVisualContinuationAnchor,
+  resolveReportVisualContinuations,
   reportSubtitles,
   shortBreathReviewTranscript,
   subtitleCuesFromSpeechAlignment,
   applySubtitleTimingForRender,
   mergeEditedSubtitleText,
+  retimeLockedSubtitleCuesToSpeech,
   retimeSubtitleCuesToScenes,
 } from "./report.ts"
 import {
@@ -117,6 +122,7 @@ test("문장별 장면에 핵심 원본 식별자를 기본 저장하고 보조 
         sourceId: "supporting-source",
         sourceStart: 2,
         sourceEnd: 7,
+        continuePreviousVisual: true,
       },
     ],
     "primary-source"
@@ -124,7 +130,114 @@ test("문장별 장면에 핵심 원본 식별자를 기본 저장하고 보조 
   assert.equal(scenes[0].sourceId, "supporting-source")
   assert.equal(scenes[0].sourceStart, 2)
   assert.equal(scenes[0].sourceEnd, 7)
+  assert.equal(scenes[0].continuePreviousVisual, true)
   assert.equal(scenes[1].sourceId, "primary-source")
+})
+
+test("이어진 보도형 자료화면은 첫 화면 설정을 유지한다", () => {
+  const scenes: NewsReportScene[] = [
+    {
+      id: "scene-1",
+      narration: "첫 문장",
+      visual: "source",
+      sourceId: "source-a",
+      sourceStart: 2,
+      sourceEnd: 7,
+      crop: { x: 40, y: 55, zoom: 1.2, faceTracking: false },
+      fit: "contain",
+      motion: "zoom-in",
+    },
+    {
+      id: "scene-2",
+      narration: "둘째 문장",
+      visual: "source",
+      sourceId: "source-b",
+      sourceStart: 10,
+      sourceEnd: 14,
+      continuePreviousVisual: true,
+    },
+    {
+      id: "scene-3",
+      narration: "셋째 문장",
+      visual: "source",
+      sourceId: "source-c",
+      sourceStart: 20,
+      sourceEnd: 24,
+    },
+  ]
+
+  const resolved = resolveReportVisualContinuations(scenes)
+  assert.equal(resolved[1]?.sourceId, "source-a")
+  assert.equal(resolved[1]?.sourceStart, 2)
+  assert.deepEqual(resolved[1]?.crop, scenes[0]?.crop)
+  assert.equal(resolved[1]?.motion, "zoom-in")
+  assert.equal(resolved[2]?.sourceId, "source-c")
+  assert.equal(
+    reportVisualContinuationAnchor(scenes, "scene-2")?.id,
+    "scene-1"
+  )
+
+  const separated = resolveReportVisualContinuations(
+    scenes.map((scene) =>
+      scene.id === "scene-2"
+        ? { ...scene, continuePreviousVisual: false }
+        : scene
+    )
+  )
+  assert.equal(separated[1]?.sourceId, "source-b")
+  assert.equal(separated[1]?.sourceStart, 10)
+  assert.equal(
+    reportVisualContinuationAnchor(separated, "scene-2")?.id,
+    "scene-2"
+  )
+})
+
+test("이어진 보도형 자료화면만 한 렌더 세그먼트로 묶는다", () => {
+  const scenes = [
+    {
+      id: "scene-1",
+      narration: "첫 문장",
+      visual: "source" as const,
+      sourceId: "source-a",
+      sourceStart: 2,
+      sourceEnd: 7,
+      start: 0,
+      end: 2,
+      duration: 2,
+    },
+    {
+      id: "scene-2",
+      narration: "둘째 문장",
+      visual: "source" as const,
+      sourceId: "source-b",
+      sourceStart: 10,
+      sourceEnd: 14,
+      continuePreviousVisual: true,
+      start: 2,
+      end: 5.25,
+      duration: 3.25,
+    },
+    {
+      id: "scene-3",
+      narration: "셋째 문장",
+      visual: "source" as const,
+      sourceId: "source-c",
+      sourceStart: 20,
+      sourceEnd: 24,
+      start: 5.25,
+      end: 7,
+      duration: 1.75,
+    },
+  ]
+
+  const grouped = groupReportVisualContinuationSegments(scenes)
+  assert.equal(grouped.length, 2)
+  assert.equal(grouped[0]?.sourceId, "source-a")
+  assert.equal(grouped[0]?.start, 0)
+  assert.equal(grouped[0]?.end, 5.25)
+  assert.equal(grouped[0]?.duration, 5.25)
+  assert.equal(grouped[1]?.sourceId, "source-c")
+  assert.equal(grouped[1]?.start, 5.25)
 })
 
 test("장면 재구성 시 구간별 crop을 보존한다", () => {
@@ -645,6 +758,157 @@ test("잠긴 자막은 미리보기를 다시 만들어도 문구와 구간 개�
   assert.equal(rendered[0]?.end, 1)
   assert.equal(rendered[1]?.start, 1)
   assert.equal(rendered[1]?.end, 4)
+})
+
+test("보도형 잠긴 자막은 문구와 줄바꿈을 유지하며 실제 TTS 단어 시간에 붙는다", () => {
+  const scene: NewsReportScene & {
+    start: number
+    end: number
+    alignment: Array<{ text: string; start: number; end: number }>
+  } = {
+    id: "report-body-1",
+    narration: "민주당 서울 의원을 전수조사한 결과",
+    part: "body",
+    audioMode: "tts",
+    visualMode: "source",
+    visual: "source",
+    sourceStart: 0,
+    sourceEnd: 4,
+    start: 5,
+    end: 9,
+    alignment: [
+      { text: "민주당", start: 0.2, end: 0.5 },
+      { text: "서울", start: 0.6, end: 0.9 },
+      { text: "의원을", start: 1, end: 1.4 },
+      { text: "전수조사한", start: 1.8, end: 2.4 },
+      { text: "결과", start: 2.5, end: 2.8 },
+    ],
+  }
+  const locked = [
+    {
+      id: "locked-1",
+      sceneId: scene.id,
+      start: 5.5,
+      end: 7.5,
+      text: "민주당 서울\n의원을",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "locked-2",
+      sceneId: scene.id,
+      start: 7.5,
+      end: 9,
+      text: "전수조사한 결과",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+
+  const rendered = retimeLockedSubtitleCuesToSpeech(locked, [scene])
+
+  assert.deepEqual(
+    rendered.map((cue) => cue.text),
+    ["민주당 서울\n의원을", "전수조사한 결과"]
+  )
+  assert.deepEqual(
+    rendered.map((cue) => [cue.start, cue.end]),
+    [
+      [5.2, 6.4],
+      [6.8, 7.8],
+    ]
+  )
+})
+
+test("연속 TTS 장면 경계는 숫자 발음이 늘어나도 다음 문장의 첫 어절에서 나뉜다", () => {
+  const boundaries = continuousSpeechWordBoundaries(
+    [
+      "세제 개편안을 수정해야 한다는 의견이 30%였어.",
+      "그대로 가야 한다는 쪽은 24%에 그쳤다는 거야.",
+      "민주당 이언주 의원은 상황을 설명했어.",
+    ],
+    [
+      "세제",
+      "개편안을",
+      "수정해야",
+      "한다는",
+      "의견이",
+      "삼십",
+      "퍼센트였어.",
+      "그대로",
+      "가야",
+      "한다는",
+      "쪽은",
+      "이십사",
+      "퍼센트에",
+      "그쳤다는",
+      "거야.",
+      "민주당",
+      "이언주",
+      "의원은",
+      "상황을",
+      "설명했어.",
+    ].map((text) => ({ text }))
+  )
+
+  assert.deepEqual(boundaries, [0, 7, 15, 20])
+})
+
+test("표시 숫자가 발음 어절로 늘어나도 검수 문구를 유지하며 단어 시간에 붙인다", () => {
+  const scene: NewsReportScene & {
+    start: number
+    end: number
+    alignment: Array<{ text: string; start: number; end: number }>
+  } = {
+    id: "numeric-scene",
+    narration: "수정해야 한다는 의견이 30%였어.",
+    part: "body",
+    audioMode: "tts",
+    visualMode: "source",
+    visual: "source",
+    sourceStart: 0,
+    sourceEnd: 3,
+    start: 0,
+    end: 3,
+    alignment: [
+      { text: "수정해야", start: 0.1, end: 0.4 },
+      { text: "한다는", start: 0.45, end: 0.75 },
+      { text: "의견이", start: 0.8, end: 1.1 },
+      { text: "삼십", start: 1.2, end: 1.5 },
+      { text: "퍼센트였어.", start: 1.55, end: 2.3 },
+    ],
+  }
+  const rendered = retimeLockedSubtitleCuesToSpeech(
+    [
+      {
+        id: "numeric-1",
+        sceneId: scene.id,
+        start: 0,
+        end: 1,
+        text: "수정해야 한다는 의견이",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "numeric-2",
+        sceneId: scene.id,
+        start: 1,
+        end: 3,
+        text: "30%였어.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    [scene]
+  )
+
+  assert.deepEqual(
+    rendered.map((cue) => [cue.text, cue.start, cue.end]),
+    [
+      ["수정해야 한다는 의견이", 0.1, 1.1],
+      ["30%였어.", 1.2, 2.3],
+    ]
+  )
 })
 
 test("편집 문구 병합은 id·장면 순서로 맞춘다", () => {
@@ -1611,6 +1875,8 @@ test("이미 있는 마무리 장면의 구간·크롭은 다시 붙일 때 유�
           sourceStart: 12,
           sourceEnd: 18,
           crop: { x: 40, y: 30, zoom: 1.25, faceTracking: false },
+          fit: "contain" as const,
+          motion: "pan-left" as const,
         }
       : scene
   )
@@ -1626,6 +1892,8 @@ test("이미 있는 마무리 장면의 구간·크롭은 다시 붙일 때 유�
     zoom: 1.25,
     faceTracking: false,
   })
+  assert.equal(cta?.fit, "contain")
+  assert.equal(cta?.motion, "pan-left")
 })
 
 test("직접발언 장면에 마무리 멘트 자막이 흘러들어가지 않는다", () => {

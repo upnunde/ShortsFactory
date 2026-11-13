@@ -7,7 +7,14 @@ import { Play, Plus, Square, Trash2 } from "lucide-react"
 import { NewsFramePreview } from "@/components/news-clips/frame-preview"
 import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label"
 import { SegmentedTabs } from "@/components/news-clips/segmented-tabs"
-import { stepActionBarClassName } from "@/components/news-clips/step-action-bar"
+import {
+  stepBodyClassName,
+  stepHeaderActionButtonClassName,
+  stepHeaderActionsClassName,
+  stepHeaderClassName,
+  stepHeaderContentClassName,
+  workspacePageContentClassName,
+} from "@/components/news-clips/step-action-bar"
 import { AccountsPanel } from "@/components/studio/accounts-panel"
 import {
   resolveTextBox,
@@ -30,7 +37,6 @@ export function NewsClipSettingsPanel({
   profileId,
   previewTitle,
   previewSubtitle,
-  onClose,
   onPreviewChange,
   onSaved,
   initialTab = "search",
@@ -40,7 +46,6 @@ export function NewsClipSettingsPanel({
   profileId: string
   previewTitle: string
   previewSubtitle: string
-  onClose: () => void
   onPreviewChange: (settings: NewsClipSettings) => void
   onSaved: (settings: NewsClipSettings) => void
   initialTab?: "search" | "assets" | "text" | "audio" | "accounts"
@@ -376,33 +381,48 @@ export function NewsClipSettingsPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pt-6">
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-separator pb-4">
-          <div>
-            <h2 className="text-xl font-semibold">뉴스 리포트 채널 설정</h2>
-            <p className="mt-1 text-sm text-muted">
-              이 채널의 프레임과 TTS 설정을 관리합니다.
-            </p>
+      <header className={stepHeaderClassName}>
+        <div className={stepHeaderContentClassName}>
+          <h2 className="truncate text-xl leading-7 font-semibold">
+            뉴스 리포트 채널 설정
+          </h2>
+          <div className={stepHeaderActionsClassName}>
+            {note ? (
+              <p className="max-w-sm truncate text-sm text-muted">{note}</p>
+            ) : null}
+            <Button
+              className={stepHeaderActionButtonClassName}
+              isDisabled={!loaded || (pending ? false : !hasChanges)}
+              onPress={() => void save()}
+            >
+              <LoadingButtonLabel
+                loading={pending}
+                label="설정 저장"
+                loadingLabel="저장 중"
+              />
+            </Button>
           </div>
-          <Button variant="outline" onPress={onClose}>
-            닫기
-          </Button>
-        </header>
+        </div>
+      </header>
 
-        <SegmentedTabs
-          ariaLabel="뉴스 리포트 설정 구분"
-          equalWidth={false}
-          className="overflow-x-auto"
-          value={settingsTab}
-          onChange={setSettingsTab}
-          items={[
-            { id: "search", label: "검색" },
-            { id: "assets", label: "화면 자산" },
-            { id: "text", label: "텍스트 배치" },
-            { id: "audio", label: "오디오·자막" },
-            { id: "accounts", label: "채널 연결" },
-          ]}
-        />
+      <div className={stepBodyClassName}>
+        <div
+          className={`${workspacePageContentClassName} flex flex-col gap-5 pb-6`}
+        >
+          <SegmentedTabs
+            ariaLabel="뉴스 리포트 설정 구분"
+            equalWidth={false}
+            className="overflow-x-auto"
+            value={settingsTab}
+            onChange={setSettingsTab}
+            items={[
+              { id: "search", label: "검색" },
+              { id: "assets", label: "화면 자산" },
+              { id: "text", label: "텍스트 배치" },
+              { id: "audio", label: "오디오·자막" },
+              { id: "accounts", label: "채널 연결" },
+            ]}
+          />
 
         {settingsTab === "search" ? (
           <div className="flex flex-col gap-5">
@@ -1075,44 +1095,32 @@ export function NewsClipSettingsPanel({
           </div>
         ) : null}
 
-        {settingsTab === "accounts" ? (
-          <div className="flex flex-col gap-5">
-            <AccountsPanel
-              notice={accountNotice}
-              profileId={profileId}
-              returnTo="news"
-              expectedYoutubeChannelId={youtubeChannelId}
-            />
-            <label className="flex items-center justify-between gap-4 rounded-xl border border-separator p-4 text-sm">
-              <span className="font-medium">
-                최종본 완성 후 YouTube 비공개 자동 업로드
-              </span>
-              <input
-                type="checkbox"
-                checked={settings.youtubeAutoUpload}
-                onChange={(event) =>
-                  setSettings({
-                    ...settings,
-                    youtubeAutoUpload: event.currentTarget.checked,
-                  })
-                }
+          {settingsTab === "accounts" ? (
+            <div className="flex flex-col gap-5">
+              <AccountsPanel
+                notice={accountNotice}
+                profileId={profileId}
+                returnTo="news"
+                expectedYoutubeChannelId={youtubeChannelId}
               />
-            </label>
-          </div>
-        ) : null}
-      </div>
-      <div className={`${stepActionBarClassName} gap-3`}>
-        {note ? <p className="mr-auto text-sm text-muted">{note}</p> : null}
-        <Button
-          isDisabled={!loaded || (pending ? false : !hasChanges)}
-          onPress={() => void save()}
-        >
-          <LoadingButtonLabel
-            loading={pending}
-            label="설정 저장"
-            loadingLabel="저장 중"
-          />
-        </Button>
+              <label className="flex items-center justify-between gap-4 rounded-xl border border-separator p-4 text-sm">
+                <span className="font-medium">
+                  최종본 완성 후 YouTube 비공개 자동 업로드
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.youtubeAutoUpload}
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      youtubeAutoUpload: event.currentTarget.checked,
+                    })
+                  }
+                />
+              </label>
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

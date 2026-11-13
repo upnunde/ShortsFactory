@@ -16,6 +16,8 @@ import {
   stepHeaderActionButtonClassName,
   stepHeaderActionsClassName,
   stepHeaderClassName,
+  stepHeaderContentClassName,
+  workspacePageContentClassName,
   type WorkspaceHistorySaveProps,
 } from "@/components/news-clips/step-action-bar"
 import { extractYouTubeUrl } from "@/lib/news-clips/youtube-url"
@@ -442,12 +444,13 @@ export function NewsClipSourceStep({
     mode === "issue"
       ? isBuildup2
         ? "원본 추가"
-        : "이슈 고르기"
+        : "원문 내용 파악"
       : "원본 고르기"
 
   return (
     <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
       <header className={stepHeaderClassName}>
+        <div className={stepHeaderContentClassName}>
         <h2 className="truncate text-xl leading-7 font-semibold">
           {headerTitle}
         </h2>
@@ -484,9 +487,10 @@ export function NewsClipSourceStep({
             </>
           ) : null}
         </div>
+        </div>
       </header>
       <div className={stepBodyClassName}>
-        <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 px-6">
+        <div className={`${workspacePageContentClassName} flex flex-col gap-5`}>
         {mode === "issue" ? (
           <>
             <Card>

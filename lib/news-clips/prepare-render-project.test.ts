@@ -559,6 +559,41 @@ test("prepareRenderProject는 end-cta 구간·크롭을 유지한다", () => {
   })
 })
 
+test("마무리에 첨부한 기본 이미지가 과도하게 확대되지 않게 원본 비율을 적용한다", () => {
+  const base = sampleProject()
+  const imageSource = {
+    ...base.source,
+    id: "uploaded-outro-image",
+    title: "마무리 첨부 이미지",
+    channel: "사용자 첨부",
+    mediaType: "image" as const,
+    localFile: "/tmp/outro.png",
+  }
+  const draft = {
+    ...base,
+    supportingSources: [imageSource],
+    reportScenes: base.reportScenes.map((scene) =>
+      scene.id === "end-cta"
+        ? {
+            ...scene,
+            sourceId: imageSource.id,
+            crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
+            fit: "cover" as const,
+          }
+        : scene
+    ),
+  }
+
+  const { project, reason } = prepareRenderProject(
+    draft,
+    defaultNewsClipSettings
+  )
+  assert.equal(reason, "")
+  const outro = project.reportScenes.find((scene) => scene.id === "end-cta")
+  assert.equal(outro?.sourceId, imageSource.id)
+  assert.equal(outro?.fit, "contain")
+})
+
 test("빌드업 서두에 중복된 마무리 멘트를 렌더 전에 제거한다", () => {
   const base = sampleProject()
   const outro = "여러분 판단은 어때? 한마디 적어줘."

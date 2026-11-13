@@ -104,7 +104,11 @@ export function partitionSubtitlesByPart(
 
   for (const cue of cues) {
     const sceneId = cue.sceneId || ""
-    if (isEndCtaScene({ id: sceneId }) || cue.id.startsWith("end-cta")) {
+    if (
+      isEndCtaScene({ id: sceneId }) ||
+      cue.id.startsWith("end-cta") ||
+      subtitleCueLooksLikeEndCta(cue)
+    ) {
       outro.push(cue)
       continue
     }
@@ -120,4 +124,16 @@ export function partitionSubtitlesByPart(
   }
 
   return { lead, body, outro }
+}
+
+/** 레거시 저장본에서 CTA 첫 질문이 마지막 본문 sceneId로 남은 경우를 복구한다. */
+function subtitleCueLooksLikeEndCta(cue: SubtitleCue) {
+  const text = cue.text.replace(/\s+/g, " ").trim()
+  if (!text) return false
+  if (/(?:댓글|의견|한마디).*(?:남겨|달아|적어|알려|써)/u.test(text)) {
+    return true
+  }
+  return /(?:어떻게\s*(?:생각해|생각하|봐|보는지)|의견(?:은|이)\s*어때|생각(?:은|이)\s*어때)[?？]?$/u.test(
+    text
+  )
 }

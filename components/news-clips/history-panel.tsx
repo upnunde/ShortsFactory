@@ -4,6 +4,12 @@ import { useEffect, useState } from "react"
 
 import { AlertDialog, Button, Card, Chip } from "@heroui/react"
 import { Trash2 } from "lucide-react"
+import {
+  stepBodyClassName,
+  stepHeaderClassName,
+  stepHeaderContentClassName,
+  workspacePageContentClassName,
+} from "@/components/news-clips/step-action-bar"
 import type { NewsHistoryEntry } from "@/lib/news-clips/history"
 import { NEWS_CLIP_STEPS } from "@/lib/news-clips/types"
 
@@ -82,82 +88,94 @@ export function NewsHistoryPanel({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pt-6">
-      <header className="shrink-0 border-b border-separator pb-4">
-        <h2 className="text-xl leading-7 font-semibold">히스토리</h2>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <header className={stepHeaderClassName}>
+        <div className={stepHeaderContentClassName}>
+          <h2 className="truncate text-xl leading-7 font-semibold">
+            히스토리
+          </h2>
+        </div>
       </header>
-      {note ? <p className="text-sm text-warning">{note}</p> : null}
-      <section className="grid gap-3 md:grid-cols-2">
-        {items.map((item) => (
-          <Card
-            key={item.id}
-            role="button"
-            tabIndex={0}
-            aria-label={`${item.title} 불러오기`}
-            className="cursor-pointer transition hover:border-foreground/25 hover:shadow-md focus-visible:ring-2 focus-visible:ring-foreground/30 focus-visible:outline-none"
-            onClick={() => {
-              if (!deleting) void open(item.id)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault()
-                if (!deleting) void open(item.id)
-              }
-            }}
-          >
-            <Card.Header className="relative pr-14">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Card.Title className="truncate">{item.title}</Card.Title>
-                  <Chip
-                    size="sm"
-                    color={item.finalized ? "success" : "default"}
-                    variant="soft"
-                    className="shrink-0"
-                  >
-                    {item.finalized ? "최종" : `${stepNumber(item.step)}단계`}
-                  </Chip>
-                  {item.id === currentId ? (
-                    <Chip size="sm" variant="soft" className="shrink-0">
-                      현재
-                    </Chip>
-                  ) : null}
-                </div>
-                <Card.Description>
-                  {item.finalized ? "완료 " : "수정 "}
-                  {formatWhen(
-                    item.finalized && item.completedAt
-                      ? item.completedAt
-                      : item.updatedAt
-                  )}
-                  {showRecentEdit(item)
-                    ? ` · 최근 수정 ${formatWhen(item.updatedAt)}`
-                    : ""}
-                  {item.durationSeconds > 0
-                    ? ` · ${item.durationSeconds.toFixed(1)}초`
-                    : ""}
-                </Card.Description>
-              </div>
-              <div
-                className="absolute top-3 right-3"
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={(event) => event.stopPropagation()}
+      <div className={stepBodyClassName}>
+        <div
+          className={`${workspacePageContentClassName} flex flex-col gap-5 pb-6`}
+        >
+          {note ? <p className="text-sm text-warning">{note}</p> : null}
+          <section className="grid gap-3 md:grid-cols-2">
+            {items.map((item) => (
+              <Card
+                key={item.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`${item.title} 불러오기`}
+                className="cursor-pointer transition hover:border-foreground/25 hover:shadow-md focus-visible:ring-2 focus-visible:ring-foreground/30 focus-visible:outline-none"
+                onClick={() => {
+                  if (!deleting) void open(item.id)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    if (!deleting) void open(item.id)
+                  }
+                }}
               >
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  isIconOnly
-                  aria-label="삭제"
-                  isDisabled={deleting || opening !== ""}
-                  onPress={() => setConfirmDelete(item)}
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            </Card.Header>
-          </Card>
-        ))}
-      </section>
+                <Card.Header className="relative pr-14">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Card.Title className="truncate">{item.title}</Card.Title>
+                      <Chip
+                        size="sm"
+                        color={item.finalized ? "success" : "default"}
+                        variant="soft"
+                        className="shrink-0"
+                      >
+                        {item.finalized
+                          ? "최종"
+                          : `${stepNumber(item.step)}단계`}
+                      </Chip>
+                      {item.id === currentId ? (
+                        <Chip size="sm" variant="soft" className="shrink-0">
+                          현재
+                        </Chip>
+                      ) : null}
+                    </div>
+                    <Card.Description>
+                      {item.finalized ? "완료 " : "수정 "}
+                      {formatWhen(
+                        item.finalized && item.completedAt
+                          ? item.completedAt
+                          : item.updatedAt
+                      )}
+                      {showRecentEdit(item)
+                        ? ` · 최근 수정 ${formatWhen(item.updatedAt)}`
+                        : ""}
+                      {item.durationSeconds > 0
+                        ? ` · ${item.durationSeconds.toFixed(1)}초`
+                        : ""}
+                    </Card.Description>
+                  </div>
+                  <div
+                    className="absolute top-3 right-3"
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      isIconOnly
+                      aria-label="삭제"
+                      isDisabled={deleting || opening !== ""}
+                      onPress={() => setConfirmDelete(item)}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                </Card.Header>
+              </Card>
+            ))}
+          </section>
+        </div>
+      </div>
 
       <AlertDialog
         isOpen={confirmDelete !== null}

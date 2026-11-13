@@ -3,6 +3,7 @@ import test from "node:test"
 
 import {
   clampSceneSourceRange,
+  extendSceneSourceRangeFromStart,
   sceneAudioTimingChanged,
   sceneTimingChanged,
 } from "./scene-edit.ts"
@@ -82,5 +83,24 @@ test("자료영상 구간은 원본 길이 밖으로 벗어나지 않는다", ()
   assert.deepEqual(
     clampSceneSourceRange({ sourceStart: 110, sourceEnd: 130 }, 100),
     { start: 99.9, end: 100 }
+  )
+})
+
+test("합친 보도형 자료영상은 선택한 시작점부터 뒤로만 늘어난다", () => {
+  assert.deepEqual(
+    extendSceneSourceRangeFromStart(
+      { sourceStart: 31.25, sourceEnd: 36.8 },
+      12,
+      120
+    ),
+    { start: 31.25, end: 43.25 }
+  )
+  assert.deepEqual(
+    extendSceneSourceRangeFromStart(
+      { sourceStart: 98, sourceEnd: 99 },
+      8,
+      100
+    ),
+    { start: 98, end: 100 }
   )
 })

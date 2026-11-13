@@ -30,6 +30,43 @@ test("이미지는 명시한 경우에만 contain 경로를 탄다", () => {
   assert.match(filter, /force_original_aspect_ratio=decrease/)
 })
 
+test("원본 비율 화면은 1배 미만 축소와 위치값을 렌더 필터에 유지한다", () => {
+  const filter = buildScaleCropFilter({
+    targetWidth: 1080,
+    targetHeight: 1920,
+    zoom: 0.5,
+    cropX: "(iw-ow)*0.25",
+    cropY: "(ih-oh)*0.75",
+    fit: "contain",
+    positionX: 0.25,
+    positionY: 0.75,
+  })
+  assert.match(filter, /scale=540:960/)
+  assert.match(filter, /\(ow-iw\)\*0\.2500/)
+  assert.match(filter, /\(oh-ih\)\*0\.7500/)
+})
+
+test("원본 비율 이미지를 확대해도 작은 축의 위치값을 유지한다", () => {
+  const filter = buildScaleCropFilter({
+    targetWidth: 720,
+    targetHeight: 1280,
+    zoom: 1.25,
+    cropX: "(iw-ow)*0.7",
+    cropY: "(ih-oh)*0.2",
+    fit: "contain",
+    positionX: 0.7,
+    positionY: 0.2,
+  })
+  assert.match(filter, /scale=900:1600/)
+  assert.match(filter, /pad=w='max\(iw,720\)'/)
+  assert.match(filter, /h='max\(ih,1280\)'/)
+  assert.match(filter, /\(ow-iw\)\*0\.7000/)
+  assert.match(filter, /\(oh-ih\)\*0\.2000/)
+  assert.match(filter, /crop=720:1280/)
+  assert.match(filter, /\(iw-ow\)\*0\.7000/)
+  assert.match(filter, /\(ih-oh\)\*0\.2000/)
+})
+
 test("영상 모션은 장면 길이에 맞춘 확대량을 적용한다", () => {
   const filter = buildMediaMotionFilter({
     motion: "zoom-in",

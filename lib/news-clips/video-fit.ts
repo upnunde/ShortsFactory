@@ -90,6 +90,8 @@ export function buildScaleCropFilter({
   cropY,
   fit = "cover",
   padColor = "#101114",
+  positionX = 0.5,
+  positionY = 0.5,
 }: {
   targetWidth: number
   targetHeight: number
@@ -99,6 +101,8 @@ export function buildScaleCropFilter({
   /** 영상은 cover, 이미지로 저장된 화면만 contain을 명시한다. */
   fit?: "cover" | "contain"
   padColor?: string
+  positionX?: number
+  positionY?: number
 }) {
   const useContain = fit === "contain"
   const safeZoom = useContain
@@ -109,10 +113,15 @@ export function buildScaleCropFilter({
     const sceneHeight = Math.round(targetHeight * safeZoom)
     return `scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight}:x='${cropX}':y='${cropY}',setsar=1`
   }
-  if (safeZoom <= 1.0001) {
-    return `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=decrease,pad=${targetWidth}:${targetHeight}:(ow-iw)/2:(oh-ih)/2:color=${padColor},setsar=1`
-  }
   const zoomedWidth = Math.round(targetWidth * safeZoom)
   const zoomedHeight = Math.round(targetHeight * safeZoom)
-  return `scale=${zoomedWidth}:${zoomedHeight}:force_original_aspect_ratio=decrease,pad=${zoomedWidth}:${zoomedHeight}:(ow-iw)/2:(oh-ih)/2:color=${padColor},crop=${targetWidth}:${targetHeight}:x='${cropX}':y='${cropY}',setsar=1`
+  const x = Math.max(0, Math.min(1, positionX)).toFixed(4)
+  const y = Math.max(0, Math.min(1, positionY)).toFixed(4)
+  // contain 이미지는 확대 후에도 한 축은 캔버스보다 작을 수 있다. 예를 들어
+  // 가로 이미지를 120%로 키우면 가로는 잘라야 하지만 세로는 여전히 여백에
+  // 배치해야 한다. 확대 캔버스 중앙에 먼저 pad하면 이 세로 위치가 사라지므로,
+  // 각 축을 실제 미디어 크기와 최종 캔버스 크기 중 큰 쪽에 먼저 배치한 뒤
+  // 넘치는 축만 같은 위치 비율로 crop한다. 브라우저 미리보기의
+  // `(frame - media) * position` 배치와 동일하다.
+  return `scale=${zoomedWidth}:${zoomedHeight}:force_original_aspect_ratio=decrease,pad=w='max(iw,${targetWidth})':h='max(ih,${targetHeight})':x='max(0,(ow-iw)*${x})':y='max(0,(oh-ih)*${y})':color=${padColor},crop=${targetWidth}:${targetHeight}:x='max(0,(iw-ow)*${x})':y='max(0,(ih-oh)*${y})',setsar=1`
 }

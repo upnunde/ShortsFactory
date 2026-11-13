@@ -27,6 +27,7 @@ export async function POST(request: Request) {
     sourceSelectionMode?: unknown
     issueTitle?: unknown
     directSource?: unknown
+    focus?: unknown
   } | null
   const productionMode =
     body?.productionMode === "buildup2" ? "buildup2" : "report"
@@ -36,6 +37,8 @@ export async function POST(request: Request) {
       ? "video-summary"
       : "single-range"
   const directSource = body?.directSource === true
+  const focus =
+    typeof body?.focus === "string" ? body.focus.trim().slice(0, 300) : ""
   const sourceId = typeof body?.sourceId === "string" ? body.sourceId : ""
   let source = await readSource(sourceId)
   if (!source || !source.approved) {
@@ -128,6 +131,7 @@ export async function POST(request: Request) {
       issueTitle:
         typeof body?.issueTitle === "string" ? body.issueTitle.trim() : "",
       directSource,
+      focus,
     })
     if (angles.length === 0) {
       return NextResponse.json(

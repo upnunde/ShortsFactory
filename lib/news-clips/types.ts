@@ -213,6 +213,8 @@ export type NewsMediaMotion =
   | "pan-left"
   | "pan-right"
 
+export type NewsMediaFit = "cover" | "contain"
+
 export type NewsReportScene = {
   id: string
   narration: string
@@ -228,8 +230,12 @@ export type NewsReportScene = {
   sourceStart: number
   sourceEnd: number
   crop?: CropPosition
-  /** 첨부 이미지·영상에 적용하는 약 5% 미세 화면 움직임. */
+  /** cover는 자동 채움, contain은 원본 비율 유지 후 수동 조절이다. */
+  fit?: NewsMediaFit
+  /** 이미지·영상 자료화면에 적용하는 미세 화면 움직임. */
   motion?: NewsMediaMotion
+  /** 보도형에서 이전 장면의 자료화면을 현재 TTS·자막 구간까지 이어 쓴다. */
+  continuePreviousVisual?: boolean
 }
 
 export type CropPosition = {
@@ -352,10 +358,12 @@ export type NewsClipProject = {
   /** 인트로 화면에 별도로 지정한 이미지·영상 소스. 비어 있으면 원본에서 자동 선택한다. */
   introSourceId: string
   introStillTimeSeconds: number | null
+  /** 인트로 화면 맞춤. 기존 프로젝트에 없으면 소스 종류로 판단한다. */
+  introStillFit?: NewsMediaFit
   introStillZoom: number
   introStillX: number
   introStillY: number
-  /** 첨부 인트로 이미지·영상의 미세 화면 움직임. */
+  /** 인트로 이미지·영상의 미세 화면 움직임. */
   introMotion: NewsMediaMotion
   titleCardDurationSeconds: number
   outputDurationSeconds: number
@@ -551,6 +559,7 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     quoteVolume: 1,
     introSourceId: "",
     introStillTimeSeconds: null,
+    introStillFit: "cover",
     introStillZoom: 1,
     introStillX: 50,
     introStillY: 50,

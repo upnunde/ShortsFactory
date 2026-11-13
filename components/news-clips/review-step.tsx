@@ -4,6 +4,7 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type RefObject,
+  type VideoHTMLAttributes,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -27,7 +28,9 @@ import {
   stepHeaderActionButtonClassName,
   stepHeaderActionsClassName,
   stepHeaderClassName,
+  stepHeaderContentClassName,
   type WorkspaceHistorySaveProps,
+  workspacePageContentClassName,
 } from "@/components/news-clips/step-action-bar"
 import {
   operationProgressPercent,
@@ -87,7 +90,8 @@ import {
   estimateReportScenesDuration,
   isEndCtaScene,
   reportSceneAudioMode,
-  reportSceneVisualMode,
+  reportScriptFromScenes,
+  reportVisualContinuationAnchor,
   shortBreathReviewTranscript,
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
@@ -124,6 +128,7 @@ import type {
   NewsClipProject,
   NewsClipSettings,
   NewsClipStep,
+  NewsMediaFit,
   NewsMediaMotion,
   NewsPreviewPart,
   NewsReportScene,
@@ -156,6 +161,7 @@ type CompositionPane = NewsPreviewPart
 
 type SceneLayoutDraft = {
   crop: CropPosition
+  fit: NewsMediaFit
   sourceStart: number
   sourceEnd: number
   motion: NewsMediaMotion
@@ -169,11 +175,13 @@ type SceneVisualBaseline = {
   sourceStart: number
   sourceEnd: number
   crop?: CropPosition
+  fit?: NewsMediaFit
   motion?: NewsMediaMotion
 }
 
 type IntroLayoutDraft = {
   introStillTimeSeconds: number | null
+  introStillFit: NewsMediaFit
   introStillZoom: number
   introStillX: number
   introStillY: number
@@ -188,7 +196,7 @@ type IntroVisualBaseline = {
 
 type VisualUploadTarget = { type: "intro" } | { type: "scene"; sceneId: string }
 
-/** 위치 슬라이더: 중앙(50)이 기본, 좌·우/위·아래 각 200%. */
+/** 위치 슬라이더: 프레임 밖 이동까지 허용한다. */
 const POSITION_SLIDER_MIN = -50
 const POSITION_SLIDER_MAX = 150
 const POSITION_SLIDER_CENTER = 50
@@ -212,15 +220,6 @@ const DEFAULT_SOURCE_SCENE_CROP: CropPosition = {
   y: POSITION_SLIDER_CENTER,
   zoom: ZOOM_SLIDER_CENTER,
   faceTracking: false,
-}
-
-function sceneUsesCustomVisual(
-  scene: NewsReportScene,
-  project: Pick<NewsClipProject, "source">
-) {
-  const mainId = project.source?.id
-  if (scene.sourceId && mainId && scene.sourceId !== mainId) return true
-  return reportSceneVisualMode(scene) === "supporting"
 }
 
 function previewFootageZoom(
@@ -286,11 +285,38 @@ function composePartScripts(
 }
 
 function syncNarrationFromSubtitleEdit(
-  _project: NewsClipProject,
+  project: NewsClipProject,
   subtitles: NewsClipProject["subtitles"]
 ) {
+  if (project.productionMode === "report") {
+    const cuesByScene = new Map<string, typeof subtitles>()
+    for (const cue of subtitles) {
+      if (!cue.sceneId) continue
+      const cues = cuesByScene.get(cue.sceneId) ?? []
+      cues.push(cue)
+      cuesByScene.set(cue.sceneId, cues)
+    }
+    const reportScenes = project.reportScenes.map((scene) => {
+      const cues = cuesByScene.get(scene.id)
+      if (!cues?.length) return scene
+      const narration = [...cues]
+        .sort((left, right) => left.start - right.start || left.end - right.end)
+        .map((cue) => cue.text.replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+        .join(" ")
+      return narration ? { ...scene, narration } : scene
+    })
+    return {
+      subtitles,
+      reportScenes,
+      reportScript: reportScriptFromScenes(reportScenes),
+      // 보도형은 대본 → TTS → 단어 타임스탬프가 기준이다.
+      // 자막 시간을 먼저 잠그지 않고 다시 만든 TTS에서 매번 계산한다.
+      subtitleTimingsLocked: false,
+    }
+  }
   // 4번은 확정된 음성·영상 타임라인 위의 자막 오버레이 편집 단계다.
-  // 서두/마무리 자막을 고쳐도 TTS 대본이나 장면 길이를 다시 만들지 않는다.
+  // 빌드업형은 원본 영상이 기준이므로 승인한 시간을 유지한다.
   return { subtitles, subtitleTimingsLocked: true }
 }
 
@@ -355,7 +381,9 @@ export function NewsClipReviewStep({
   ) => void | Promise<void>
   onFinalized: (project: NewsClipProject) => boolean | Promise<boolean>
   onNext: () => void
-  onPrepareVisualAssets: (project: NewsClipProject) => Promise<boolean>
+  onPrepareVisualAssets: (
+    project: NewsClipProject
+  ) => Promise<NewsClipProject | null>
   onOperationProgress: UpdateNewsOperationProgress
   historySave: WorkspaceHistorySaveProps
 }) {
@@ -422,6 +450,9 @@ export function NewsClipReviewStep({
   const [sourcePanelOpen, setSourcePanelOpen] = useState(false)
   const [audioPanelOpen, setAudioPanelOpen] = useState(false)
   const [youtubeBusy, setYoutubeBusy] = useState(false)
+  const [downloadBusy, setDownloadBusy] = useState<
+    "video" | "thumbnail" | ""
+  >("")
   const [finalPlaybackChoice, setFinalPlaybackChoice] = useState(() => ({
     projectId: project.id,
     rate: normalizeFinalPlaybackRate(project.finalPlaybackRate),
@@ -460,8 +491,15 @@ export function NewsClipReviewStep({
     (scene) => scene.id === selectedDirectionSceneId
   )
   // 미리보기 seek용 폴백. 보정 패널 노출은 selectedDirectionScene만 사용.
-  const previewDirectionScene =
+  const previewContentScene =
     selectedDirectionScene ?? project.reportScenes[0]
+  const previewDirectionScene =
+    project.productionMode === "report" && previewContentScene
+      ? (reportVisualContinuationAnchor(
+          project.reportScenes,
+          previewContentScene.id
+        ) ?? previewContentScene)
+      : previewContentScene
   const previewSceneLayout = previewDirectionScene
     ? sceneLayoutFor(previewDirectionScene, project, sceneLayoutDrafts)
     : null
@@ -477,6 +515,14 @@ export function NewsClipReviewStep({
   const introLayoutDirty =
     introLayoutDraft !== null &&
     !sameIntroLayout(introLayoutDraft, snapshotIntroLayout(project))
+  const canResetIntroLayout =
+    introLayoutDirty ||
+    Boolean(introVisualBaseline) ||
+    introLayout.introStillFit !== "contain" ||
+    introLayout.introStillZoom !== 1 ||
+    introLayout.introStillX !== 50 ||
+    introLayout.introStillY !== 50 ||
+    normalizeNewsMediaMotion(introLayout.introMotion) !== "none"
   const [sourceDuration, setSourceDuration] = useState(() =>
     initialIntroSourceDuration(project)
   )
@@ -520,24 +566,13 @@ export function NewsClipReviewStep({
   const directionSourceVideoUrl = sourceVideoUrlFor(
     previewDirectionScene?.sourceId
   )
-  const scriptBodyVideoUrl = sourceVideoUrl
+  const scriptBodyVideoUrl = directionSourceVideoUrl
   const introVideoUrl = sourceVideoUrlFor(
     project.introSourceId || project.source?.id
   )
-  const introUsesUploadedVisual = Boolean(
-    project.introSourceId &&
-      sourceForId(project.introSourceId)?.channel === "사용자 첨부"
-  )
-  // 이미지 인트로만 전체를 보이고, 영상 인트로는 프레임을 채운다.
-  const introMediaIsImage =
-    sourceForId(project.introSourceId || project.source?.id)?.mediaType ===
-    "image"
-  const introMediaFitClass = introMediaIsImage
-    ? "size-full object-contain bg-black transition-transform"
-    : "size-full object-cover transition-transform"
-  const introMediaZoom = Math.max(
-    1,
-    Math.min(ZOOM_SLIDER_MAX, introLayout.introStillZoom)
+  const introMediaZoom = bodySourceTransform(
+    introLayout.introStillZoom,
+    introLayout.introStillFit
   )
   const introMotionPreviewStyle = {
     ...mediaMotionStyle(
@@ -546,6 +581,7 @@ export function NewsClipReviewStep({
       project.titleCardDurationSeconds || 2.8
     ),
     transformOrigin: `${introLayout.introStillX}% ${introLayout.introStillY}%`,
+    objectPosition: `${introLayout.introStillX}% ${introLayout.introStillY}%`,
   }
   const titleDraft = composeIntroTitle(titleLine1Draft, titleLine2Draft)
   const baselineTitle = composeIntroTitle(
@@ -875,6 +911,7 @@ export function NewsClipReviewStep({
         ...current,
         [scene.id]: {
           crop: patch.crop ?? baseline.crop,
+          fit: patch.fit ?? baseline.fit,
           sourceStart: patch.sourceStart ?? baseline.sourceStart,
           sourceEnd: patch.sourceEnd ?? baseline.sourceEnd,
           motion: patch.motion ?? baseline.motion,
@@ -888,6 +925,7 @@ export function NewsClipReviewStep({
     selectDirectionScene(scene.id, draft.sourceStart)
     updateReportScene(scene.id, {
       crop: draft.crop,
+      fit: draft.fit,
       sourceStart: draft.sourceStart,
       sourceEnd: draft.sourceEnd,
       motion: draft.motion,
@@ -912,18 +950,20 @@ export function NewsClipReviewStep({
     }
     selectDirectionScene(scene.id, draft.sourceStart)
     const crop = { ...draft.crop }
+    const fit = draft.fit
     const reportScenes = project.reportScenes.map((item) => {
       if (reportScenePart(item, project.productionMode) !== part) return item
       if (item.id === scene.id) {
         return {
           ...item,
           crop,
+          fit,
           sourceStart: draft.sourceStart,
           sourceEnd: draft.sourceEnd,
           motion: draft.motion,
         }
       }
-      return { ...item, crop: { ...crop } }
+      return { ...item, crop: { ...crop }, fit }
     })
     onProject({
       reportScenes,
@@ -938,8 +978,8 @@ export function NewsClipReviewStep({
         if (target.id === scene.id) continue
         const existing = next[target.id]
         if (!existing) continue
-        const withCrop = { ...target, crop }
-        const merged = { ...existing, crop: { ...crop } }
+        const withCrop = { ...target, crop, fit }
+        const merged = { ...existing, crop: { ...crop }, fit }
         if (sceneLayoutDirty(merged, withCrop, project.crop)) {
           next[target.id] = merged
         } else {
@@ -956,53 +996,27 @@ export function NewsClipReviewStep({
   }
 
   function resetSceneLayout(sceneId: string) {
+    const scene = project.reportScenes.find((item) => item.id === sceneId)
+    const currentLayout = scene
+      ? sceneLayoutFor(scene, project, sceneLayoutDrafts)
+      : null
     setSceneLayoutDrafts((current) => {
       const next = { ...current }
       delete next[sceneId]
       return next
     })
-    const scene = project.reportScenes.find((item) => item.id === sceneId)
-    const baseline = sceneVisualBaselines[sceneId]
-    const restore = baseline
-      ? {
-          sourceId: baseline.sourceId,
-          visual: baseline.visual,
-          visualMode: baseline.visualMode,
-          sourceStart: baseline.sourceStart,
-          sourceEnd: baseline.sourceEnd,
-          crop: baseline.crop ? { ...baseline.crop } : undefined,
-          motion: normalizeNewsMediaMotion(baseline.motion),
-        }
-      : scene && sceneUsesCustomVisual(scene, project)
-        ? {
-            sourceId: project.source?.id,
-            visual: "source" as const,
-            visualMode: "source" as const,
-            sourceStart: 0,
-            sourceEnd: Math.max(
-              0.5,
-              Math.min(
-                Math.max(0.5, scene.sourceEnd - scene.sourceStart),
-                project.source?.durationSeconds || 12
-              )
-            ),
-            crop: { ...(project.crop ?? DEFAULT_SOURCE_SCENE_CROP) },
-            motion: "none" as const,
-          }
-        : null
-    if (!restore) return
+    if (!scene || !currentLayout) return
     onProject((current) => ({
       reportScenes: current.reportScenes.map((item) =>
         item.id === sceneId
           ? {
               ...item,
-              sourceId: restore.sourceId,
-              visual: restore.visual,
-              visualMode: restore.visualMode,
-              sourceStart: restore.sourceStart,
-              sourceEnd: restore.sourceEnd,
-              crop: restore.crop ? { ...restore.crop } : item.crop,
-              motion: restore.motion,
+              // 현재 선택한 자료와 구간은 유지하고 화면 배치만 원본으로 돌린다.
+              sourceStart: currentLayout.sourceStart,
+              sourceEnd: currentLayout.sourceEnd,
+              crop: { ...DEFAULT_SOURCE_SCENE_CROP },
+              fit: "contain",
+              motion: "none",
             }
           : item
       ),
@@ -1015,7 +1029,7 @@ export function NewsClipReviewStep({
       delete next[sceneId]
       return next
     })
-    onNote("첨부 파일을 제거하고 원본 화면으로 되돌렸습니다.")
+    onNote("원본 비율과 중앙 위치로 초기화했습니다.")
   }
 
   function patchIntroLayout(patch: Partial<IntroLayoutDraft>) {
@@ -1039,6 +1053,10 @@ export function NewsClipReviewStep({
     if (project.introSourceId) {
       onProject((current) => ({
         introSourceId: "",
+        introStillFit: "cover",
+        introStillZoom: 1,
+        introStillX: 50,
+        introStillY: 50,
         introMotion: "zoom-in",
         introStillTimeSeconds: null,
         subtitles: current.subtitles,
@@ -1063,6 +1081,7 @@ export function NewsClipReviewStep({
     const draft = introLayoutDraft ?? snapshotIntroLayout(project)
     onProject({
       introStillTimeSeconds: draft.introStillTimeSeconds,
+      introStillFit: draft.introStillFit,
       introStillZoom: draft.introStillZoom,
       introStillX: draft.introStillX,
       introStillY: draft.introStillY,
@@ -1074,48 +1093,25 @@ export function NewsClipReviewStep({
   }
 
   function resetIntroLayout() {
-    const baseline = introVisualBaseline
-    if (baseline || project.introSourceId) {
-      const restoreSourceId = baseline?.introSourceId ?? ""
-      const restoreLayout = baseline?.layout ?? {
-        introStillTimeSeconds: null,
-        introStillZoom: 1,
-        introStillX: 50,
-        introStillY: 50,
-        introMotion: "zoom-in",
-      }
-      onProject((current) => ({
-        introSourceId: restoreSourceId,
-        introStillTimeSeconds: restoreLayout.introStillTimeSeconds,
-        introStillZoom: restoreLayout.introStillZoom,
-        introStillX: restoreLayout.introStillX,
-        introStillY: restoreLayout.introStillY,
-        introMotion: restoreLayout.introMotion,
-        subtitles: current.subtitles,
-        subtitleTimingsLocked: current.subtitleTimingsLocked,
-        renderSignature: "",
-      }))
-      setIntroLayoutDraft(null)
-      setIntroVisualBaseline(null)
-      setSourceDuration(
-        initialIntroSourceDuration({
-          ...project,
-          introSourceId: restoreSourceId,
-        })
-      )
-      const restoreTime =
-        restoreLayout.introStillTimeSeconds ?? automaticIntroTime
-      if (sourceVideoRef.current) {
-        sourceVideoRef.current.currentTime = restoreTime
-      }
-      onNote("첨부 파일을 제거하고 원본 인트로로 되돌렸습니다.")
-      return
-    }
+    const currentTime = introLayout.introStillTimeSeconds
+    onProject((current) => ({
+      // 현재 인트로 소스와 선택 시점은 유지하고 화면 배치만 초기화한다.
+      introStillTimeSeconds: currentTime,
+      introStillFit: "contain",
+      introStillZoom: 1,
+      introStillX: 50,
+      introStillY: 50,
+      introMotion: "none",
+      subtitles: current.subtitles,
+      subtitleTimingsLocked: current.subtitleTimingsLocked,
+      renderSignature: "",
+    }))
     setIntroLayoutDraft(null)
+    setIntroVisualBaseline(null)
     if (sourceVideoRef.current) {
-      sourceVideoRef.current.currentTime =
-        project.introStillTimeSeconds ?? automaticIntroTime
+      sourceVideoRef.current.currentTime = currentTime ?? automaticIntroTime
     }
+    onNote("인트로를 원본 비율과 중앙 위치로 초기화했습니다.")
   }
 
   /** 미리보기/다음 전에 저장 안 한 구간·인트로 드래프트를 프로젝트에 반영한다. */
@@ -1139,6 +1135,7 @@ export function NewsClipReviewStep({
       return {
         ...scene,
         crop: draft.crop,
+        fit: draft.fit,
         sourceStart: draft.sourceStart,
         sourceEnd: draft.sourceEnd,
         motion: draft.motion,
@@ -1148,6 +1145,7 @@ export function NewsClipReviewStep({
       ...base,
       reportScenes,
       introStillTimeSeconds: intro.introStillTimeSeconds,
+      introStillFit: intro.introStillFit,
       introStillZoom: intro.introStillZoom,
       introStillX: intro.introStillX,
       introStillY: intro.introStillY,
@@ -1162,6 +1160,7 @@ export function NewsClipReviewStep({
     onProject({
       reportScenes: next.reportScenes,
       introStillTimeSeconds: next.introStillTimeSeconds,
+      introStillFit: next.introStillFit,
       introStillZoom: next.introStillZoom,
       introStillX: next.introStillX,
       introStillY: next.introStillY,
@@ -1248,28 +1247,34 @@ export function NewsClipReviewStep({
     })
   }
 
-  function savePartScript(target: "lead" | "outro") {
+  function savePartScript(target: "lead" | "body" | "outro") {
     const savedParts = partScriptTexts(project)
     const leadText =
       target === "lead" ? leadScriptDraft.trim() : savedParts.lead
+    const bodyText =
+      target === "body" ? bodyScriptDraft.trim() : savedParts.body
     const outroText =
       target === "outro" ? outroScriptDraft.trim() : savedParts.outro
     scriptReviewDirtyRef.current =
-      target === "lead"
-        ? outroScriptDraft !== savedParts.outro
-        : leadScriptDraft !== savedParts.lead
+      (target !== "lead" && leadScriptDraft !== savedParts.lead) ||
+      (target !== "body" && bodyScriptDraft !== savedParts.body) ||
+      (target !== "outro" && outroScriptDraft !== savedParts.outro)
 
     if (project.productionMode !== "buildup2") {
       finishReportScript(
         composePartScripts(
           project.productionMode,
           leadText,
-          savedParts.body,
+          bodyText,
           outroText
         )
       )
       onNote(
-        target === "lead" ? "서두를 저장했습니다." : "마무리를 저장했습니다."
+        target === "lead"
+          ? "서두 TTS 대본을 저장했습니다."
+          : target === "body"
+            ? "본문 TTS 대본을 저장했습니다."
+            : "마무리 TTS 대본을 저장했습니다."
       )
       return
     }
@@ -1630,6 +1635,20 @@ export function NewsClipReviewStep({
     })
   }
 
+  function setSceneVisualContinuation(sceneId: string, enabled: boolean) {
+    updateReportScene(sceneId, { continuePreviousVisual: enabled })
+    setSceneLayoutDrafts((current) => {
+      const next = { ...current }
+      delete next[sceneId]
+      return next
+    })
+    onNote(
+      enabled
+        ? "다음 TTS·자막 구간까지 같은 자료화면을 이어서 사용합니다."
+        : "자료화면을 다시 구간별로 분리했습니다."
+    )
+  }
+
   function chooseVisualFile(target: VisualUploadTarget) {
     if (visualUploadBusy) return
     visualUploadTargetRef.current = target
@@ -1672,6 +1691,8 @@ export function NewsClipReviewStep({
             ? body.durationSeconds
             : detectedDuration,
       }
+      const attachedMediaFit: NewsMediaFit =
+        source.mediaType === "image" ? "contain" : "cover"
 
       if (target.type === "intro") {
         setIntroVisualBaseline((current) =>
@@ -1687,7 +1708,8 @@ export function NewsClipReviewStep({
           ),
           introSourceId: source.id,
           introStillTimeSeconds: null,
-          // 첨부는 확대 없이 원본 구도로 넣고, 확대·위치는 사용자가 따로 맞춘다.
+          // 이미지는 원본 전체를 먼저 보이고, 영상만 프레임을 채운다.
+          introStillFit: attachedMediaFit,
           introStillZoom: 1,
           introStillX: 50,
           introStillY: 50,
@@ -1721,6 +1743,7 @@ export function NewsClipReviewStep({
             sourceStart: scene.sourceStart,
             sourceEnd: scene.sourceEnd,
             crop: scene.crop ? { ...scene.crop } : undefined,
+            fit: scene.fit,
             motion: scene.motion,
           },
         }
@@ -1739,8 +1762,9 @@ export function NewsClipReviewStep({
                 visualMode: "supporting",
                 sourceStart: 0,
                 sourceEnd,
-                // 첨부는 확대 없이 원본 구도로 넣고, 확대·위치는 사용자가 따로 맞춘다.
+                // 이미지는 원본 전체를 먼저 보이고, 영상만 프레임을 채운다.
                 crop: { ...NEUTRAL_SCENE_CROP },
+                fit: attachedMediaFit,
                 motion: "none",
               }
             : item
@@ -1915,9 +1939,13 @@ export function NewsClipReviewStep({
         subtitles: preservePreviewSubtitleEdits(
           project.subtitles,
           body.subtitles,
-          project.subtitleTimingsLocked
+          project.subtitleTimingsLocked,
+          {
+            acceptRenderedLockedTimings:
+              project.productionMode === "report",
+          }
         ),
-        subtitleTimingsLocked: true,
+        subtitleTimingsLocked: project.productionMode !== "report",
         reportScenes: body.reportScenes ?? project.reportScenes,
         finalRevision: project.editorialRevision,
         youtubeVideoId: "",
@@ -2013,6 +2041,24 @@ export function NewsClipReviewStep({
     }
   }
 
+  function downloadOutputAsset(
+    type: "video" | "thumbnail",
+    url: string
+  ) {
+    if (!url || downloadBusy) return
+    setDownloadBusy(type)
+    onNote("")
+    const extension = type === "video" ? "mp4" : "png"
+    const suffix = type === "video" ? "영상" : "썸네일"
+    const fileName = `${safeDownloadFileStem(project.title)}-${suffix}.${extension}`
+    const downloadUrl = `/api/news-clips/download?projectId=${encodeURIComponent(
+      project.id
+    )}&type=${type}&name=${encodeURIComponent(fileName)}`
+    triggerBrowserDownload(downloadUrl, fileName)
+    onNote(`${suffix} 다운로드를 시작했습니다.`)
+    window.setTimeout(() => setDownloadBusy(""), 600)
+  }
+
   async function uploadFinalToYoutube() {
     const reuploading = Boolean(project.youtubeUploadUrl)
     const youtubeScheduledAt = scheduledAtDraft.trim() || savedScheduledAt
@@ -2058,7 +2104,14 @@ export function NewsClipReviewStep({
     })
   }
 
-  const heading = REVIEW_STEP_COPY[mode]
+  const heading =
+    project.productionMode === "report" && mode === "script"
+      ? { title: "대본 작성" }
+      : project.productionMode === "report" && mode === "preview"
+        ? { title: "영상 검수" }
+        : REVIEW_STEP_COPY[mode]
+  const reportScriptOnly =
+    mode === "script" && project.productionMode === "report"
   const partPreviewUrl =
     compositionPane === "all"
       ? project.previewUrl
@@ -2128,6 +2181,9 @@ export function NewsClipReviewStep({
 
   function draftProjectForPreview(): NewsClipProject | null {
     let draft = commitPendingLayoutDrafts(project)
+    if (draft.productionMode === "report" && draft.subtitleTimingsLocked) {
+      draft = { ...draft, subtitleTimingsLocked: false }
+    }
     if (titleDirty) {
       if (!titleValid) {
         onNote(
@@ -2305,8 +2361,14 @@ export function NewsClipReviewStep({
         }
       : prepared
     if (changed) onProject(draft)
-    const ready = await onPrepareVisualAssets(draft)
-    if (ready) onNext()
+    const visualDraft = await onPrepareVisualAssets(draft)
+    if (!visualDraft) return
+    const created = await onPreview(true, {
+      ...visualDraft,
+      subtitles: [],
+      subtitleTimingsLocked: false,
+    })
+    if (created) onNext()
   }
 
   const audioSettingsCard = (
@@ -2464,6 +2526,7 @@ export function NewsClipReviewStep({
       />
       <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
           <header className={stepHeaderClassName}>
+            <div className={stepHeaderContentClassName}>
             <h2 className="truncate text-xl leading-7 font-semibold">
               {heading.title}
             </h2>
@@ -2476,7 +2539,6 @@ export function NewsClipReviewStep({
                 <Button
                   className={stepHeaderActionButtonClassName}
                   isDisabled={
-                    project.productionMode === "buildup2" &&
                     busyMatches(busy, "preview")
                       ? false
                       : busy !== "" ||
@@ -2485,10 +2547,7 @@ export function NewsClipReviewStep({
                         !titleValid
                   }
                   onPress={() => {
-                    if (
-                      project.productionMode === "buildup2" &&
-                      busyMatches(busy, "preview")
-                    ) {
+                    if (busyMatches(busy, "preview")) {
                       onCancelPreview()
                       return
                     }
@@ -2499,13 +2558,12 @@ export function NewsClipReviewStep({
                     }
                   }}
                 >
-                  {project.productionMode === "buildup2" &&
-                  busyMatches(busy, "preview") ? (
+                  {busyMatches(busy, "preview") ? (
                     previewCancelLabel(previewProgress)
                   ) : project.productionMode === "report" ? (
                     <LoadingButtonLabel
                       loading={busyMatches(busy, "visual-assets")}
-                      label="화면 구성"
+                      label="영상 만들기"
                       loadingLabel="자료 찾는 중"
                       progress={busyProgress}
                     />
@@ -2605,9 +2663,10 @@ export function NewsClipReviewStep({
                 </Button>
               ) : null}
             </div>
+            </div>
           </header>
           <div className={`${stepBodyClassName} lg:overflow-hidden`}>
-            <div className="mx-auto flex h-full w-full max-w-[1200px] flex-col gap-4 px-6">
+            <div className={`${workspacePageContentClassName} flex h-full flex-col gap-4`}>
               {mode === "preview" ? (
                 <div className="flex flex-col gap-4">
                   <div className="flex flex-wrap items-center justify-end gap-2">
@@ -2626,36 +2685,19 @@ export function NewsClipReviewStep({
                       음향 설정
                     </Button>
                     {project.productionMode === "report" ? (
-                      <>
-                        <Button
-                          size="sm"
-                          variant={
-                            project.supplementalContext
-                              ? "secondary"
-                              : "outline"
-                          }
-                          isDisabled={busy !== ""}
-                          onPress={() => {
-                            setSupplementDraft(project.supplementalContext)
-                            setSupplementOpen(true)
-                          }}
-                        >
-                          내용 첨부
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          isDisabled={buttonBusyDisabled(busy, "reselect")}
-                          onPress={() => void onReselect("all")}
-                        >
-                          <LoadingButtonLabel
-                            loading={busyMatches(busy, "reselect")}
-                            label="전체 재작성"
-                            loadingLabel="재작성 중"
-                            progress={busyProgress}
-                          />
-                        </Button>
-                      </>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        isDisabled={buttonBusyDisabled(busy, "reselect")}
+                        onPress={() => void onReselect("all")}
+                      >
+                        <LoadingButtonLabel
+                          loading={busyMatches(busy, "reselect")}
+                          label="전체 재작성"
+                          loadingLabel="재작성 중"
+                          progress={busyProgress}
+                        />
+                      </Button>
                     ) : null}
                   </div>
                   {sourcePanelOpen ? commonSourceCreditField : null}
@@ -2677,7 +2719,7 @@ export function NewsClipReviewStep({
                   ]}
                 />
               ) : null}
-              {mode === "script" ? (
+              {mode === "script" && !reportScriptOnly ? (
                 <SegmentedTabs
                   ariaLabel="프레임 미리보기"
                   className="shrink-0"
@@ -2689,7 +2731,14 @@ export function NewsClipReviewStep({
                   ]}
                 />
               ) : null}
-              <div className="grid min-h-0 w-full flex-1 gap-5 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)]">
+              <div
+                className={`grid min-h-0 w-full flex-1 gap-5 lg:grid-rows-[minmax(0,1fr)] ${
+                  reportScriptOnly
+                    ? "lg:grid-cols-1"
+                    : "lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]"
+                }`}
+              >
+              {!reportScriptOnly ? (
               <div className="flex w-full min-h-0 flex-col gap-4 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
                 {mode === "script" ? (
                   <NewsFramePreview
@@ -2707,14 +2756,16 @@ export function NewsClipReviewStep({
                     className="w-full"
                     backgroundContent={
                       frameMode === "title" && introVideoUrl ? (
-                        <video
-                          ref={scriptFrameVideoRef}
+                        <PositionedMediaVideo
+                          videoRef={scriptFrameVideoRef}
                           src={introVideoUrl}
+                          fit={introLayout.introStillFit}
+                          positionX={introLayout.introStillX}
+                          positionY={introLayout.introStillY}
+                          mediaStyle={introMotionPreviewStyle}
                           muted
                           playsInline
                           preload="metadata"
-                          className={introMediaFitClass}
-                          style={introMotionPreviewStyle}
                           onLoadedMetadata={(event) => {
                             event.currentTarget.currentTime = introCursor
                           }}
@@ -2730,6 +2781,7 @@ export function NewsClipReviewStep({
                             previewDirectionScene,
                             bodyPreviewCrop.zoom
                           )}
+                          fit={previewSceneLayout?.fit ?? "cover"}
                           cropX={bodyPreviewCrop.x}
                           cropY={bodyPreviewCrop.y}
                           currentTime={Math.max(
@@ -2749,7 +2801,7 @@ export function NewsClipReviewStep({
                       title={titleDraft}
                       subtitle={
                         project.subtitles.find(
-                          (cue) => cue.sceneId === previewDirectionScene?.id
+                          (cue) => cue.sceneId === previewContentScene?.id
                         )?.text ||
                         selectedSubtitle?.text ||
                         "본문 자막 미리보기"
@@ -2767,6 +2819,7 @@ export function NewsClipReviewStep({
                             previewDirectionScene,
                             bodyPreviewCrop.zoom
                           )}
+                          fit={previewSceneLayout?.fit ?? "cover"}
                           cropX={bodyPreviewCrop.x}
                           cropY={bodyPreviewCrop.y}
                           sourceStart={Math.max(
@@ -2850,7 +2903,7 @@ export function NewsClipReviewStep({
                       playsInline
                       className="aspect-[9/16] w-full rounded-2xl bg-black shadow-xl"
                     />
-                  ) : mode === "preview" && sourceVideoUrl ? (
+                  ) : mode === "preview" && directionSourceVideoUrl ? (
                     <NewsFramePreview
                       mode={compositionPane === "intro" ? "title" : "body"}
                       title={titleDraft}
@@ -2870,14 +2923,16 @@ export function NewsClipReviewStep({
                       className="w-full"
                       backgroundContent={
                         compositionPane === "intro" && introVideoUrl ? (
-                          <video
-                            ref={sourceVideoRef}
+                          <PositionedMediaVideo
+                            videoRef={sourceVideoRef}
                             src={introVideoUrl}
+                            fit={introLayout.introStillFit}
+                            positionX={introLayout.introStillX}
+                            positionY={introLayout.introStillY}
+                            mediaStyle={introMotionPreviewStyle}
                             muted
                             playsInline
                             preload="metadata"
-                            className={introMediaFitClass}
-                            style={introMotionPreviewStyle}
                             onLoadedMetadata={(event) => {
                               event.currentTarget.currentTime = introCursor
                             }}
@@ -2888,11 +2943,12 @@ export function NewsClipReviewStep({
                         compositionPane !== "intro" ? (
                           <BodySourceVideo
                             videoRef={scriptFrameVideoRef}
-                            src={sourceVideoUrl}
+                            src={directionSourceVideoUrl}
                             zoom={previewFootageZoom(
                               previewDirectionScene,
                               bodyPreviewCrop.zoom
                             )}
+                            fit={previewSceneLayout?.fit ?? "cover"}
                             cropX={bodyPreviewCrop.x}
                             cropY={bodyPreviewCrop.y}
                             currentTime={Math.max(
@@ -2928,14 +2984,16 @@ export function NewsClipReviewStep({
                     className="w-full"
                       backgroundContent={
                       frameMode === "title" && introVideoUrl ? (
-                        <video
-                          ref={sourceVideoRef}
+                        <PositionedMediaVideo
+                          videoRef={sourceVideoRef}
                           src={introVideoUrl}
+                          fit={introLayout.introStillFit}
+                          positionX={introLayout.introStillX}
+                          positionY={introLayout.introStillY}
+                          mediaStyle={introMotionPreviewStyle}
                           muted
                           playsInline
                           preload="metadata"
-                          className={introMediaFitClass}
-                          style={introMotionPreviewStyle}
                           onLoadedMetadata={(event) => {
                             event.currentTarget.currentTime = introCursor
                           }}
@@ -2951,6 +3009,7 @@ export function NewsClipReviewStep({
                             previewDirectionScene,
                             bodyPreviewCrop.zoom
                           )}
+                          fit={previewSceneLayout?.fit ?? "cover"}
                           cropX={bodyPreviewCrop.x}
                           cropY={bodyPreviewCrop.y}
                           currentTime={Math.max(
@@ -2985,8 +3044,15 @@ export function NewsClipReviewStep({
                   )}
                 </div>
               </div>
+              ) : null}
 
-              <div className="flex min-h-0 min-w-0 flex-col gap-4 pb-20 lg:overflow-y-auto lg:overscroll-contain lg:pl-1">
+              <div
+                className={`flex min-h-0 min-w-0 flex-col gap-4 pb-20 lg:overflow-y-auto lg:overscroll-contain ${
+                  reportScriptOnly
+                    ? "mx-auto w-full max-w-4xl"
+                    : "lg:pl-1"
+                }`}
+              >
                 {mode !== "preview" && editorTabs.length > 1 ? (
                   <SegmentedTabs
                     ariaLabel="편집 주제"
@@ -3035,25 +3101,12 @@ export function NewsClipReviewStep({
                             progress={busyProgress}
                           />
                         </Button>
-                        <Button
-                          size="sm"
-                          variant={
-                            project.supplementalContext
-                              ? "secondary"
-                              : "outline"
-                          }
-                          isDisabled={busy !== ""}
-                          onPress={() => {
-                            setSupplementDraft(project.supplementalContext)
-                            setSupplementOpen(true)
-                          }}
-                        >
-                          내용 첨부
-                        </Button>
                       </Card.Header>
                     ) : null}
                     <Card.Content className="flex flex-col gap-6">
-                      {mode === "script" ? commonSourceCreditField : null}
+                      {mode === "script" && !reportScriptOnly
+                        ? commonSourceCreditField
+                        : null}
                       {mode !== "preview" || compositionPane === "intro" ? (
                         <div className="flex flex-col gap-3">
                           <div className={sectionHeaderClass}>
@@ -3209,6 +3262,7 @@ export function NewsClipReviewStep({
                             />
                           </section>
 
+                          {project.productionMode === "buildup2" ? (
                           <section className="flex flex-col gap-3 border-t border-separator pt-5">
                             <div className={sectionHeaderClass}>
                               <h3 className={sectionTitleClass}>본문</h3>
@@ -3351,6 +3405,80 @@ export function NewsClipReviewStep({
                               </div>
                             ) : null}
                           </section>
+                          ) : (
+                            <section className="flex flex-col gap-3 border-t border-separator pt-5">
+                              <div className={sectionHeaderClass}>
+                                <label
+                                  htmlFor="news-clip-body-script"
+                                  className={sectionTitleClass}
+                                >
+                                  본문
+                                </label>
+                                <span className="ml-auto flex items-center justify-end gap-2">
+                                  {bodyScriptDraft !==
+                                  projectPartScripts.body ? (
+                                    <span className="text-xs text-warning">
+                                      저장 전
+                                    </span>
+                                  ) : null}
+                                  <Button
+                                    size="sm"
+                                    isDisabled={
+                                      busy !== "" ||
+                                      !bodyScriptDraft.trim() ||
+                                      bodyScriptDraft ===
+                                        projectPartScripts.body
+                                    }
+                                    onPress={() => savePartScript("body")}
+                                  >
+                                    저장
+                                  </Button>
+                                  {project.productionMode === "report" ? (
+                                    <Button
+                                      size="sm"
+                                      variant={
+                                        project.supplementalContext
+                                          ? "secondary"
+                                          : "outline"
+                                      }
+                                      isDisabled={busy !== ""}
+                                      onPress={() => {
+                                        setSupplementDraft(
+                                          project.supplementalContext
+                                        )
+                                        setSupplementOpen(true)
+                                      }}
+                                    >
+                                      내용 첨부
+                                    </Button>
+                                  ) : null}
+                                </span>
+                              </div>
+                              <textarea
+                                id="news-clip-body-script"
+                                aria-label="본문 TTS 대본"
+                                rows={1}
+                                value={bodyScriptDraft}
+                                onChange={(event) => {
+                                  resizeTextareaToContent(event.currentTarget)
+                                  const next = event.currentTarget.value
+                                  scriptReviewDirtyRef.current =
+                                    composePartScripts(
+                                      project.productionMode,
+                                      leadScriptDraft,
+                                      next,
+                                      outroScriptDraft
+                                    ) !== project.reportScript
+                                  setBodyScriptDraft(next)
+                                }}
+                                className={`${field} [field-sizing:content] min-h-48 resize-none overflow-hidden`}
+                              />
+                              <p className="text-xs leading-5 text-muted">
+                                확정한 대본 전체를 TTS로 읽고, 자료 영상은
+                                무음 화면으로만 사용합니다.
+                              </p>
+                            </section>
+                          )}
 
                           <section className="flex flex-col gap-3 border-t border-separator pt-5">
                             <div className={sectionHeaderClass}>
@@ -3444,6 +3572,27 @@ export function NewsClipReviewStep({
                               >
                                 저장
                               </Button>
+                              {project.productionMode === "report" &&
+                              (mode !== "preview" ||
+                                compositionPane === "body") ? (
+                                <Button
+                                  size="sm"
+                                  variant={
+                                    project.supplementalContext
+                                      ? "secondary"
+                                      : "outline"
+                                  }
+                                  isDisabled={busy !== ""}
+                                  onPress={() => {
+                                    setSupplementDraft(
+                                      project.supplementalContext
+                                    )
+                                    setSupplementOpen(true)
+                                  }}
+                                >
+                                  내용 첨부
+                                </Button>
+                              ) : null}
                               {mode === "preview" &&
                               compositionPane === "intro" ? null : (
                                 <Button
@@ -3602,11 +3751,7 @@ export function NewsClipReviewStep({
                             <Button
                               size="sm"
                               variant="outline"
-                              isDisabled={
-                                !introLayoutDirty &&
-                                !introVisualBaseline &&
-                                !project.introSourceId
-                              }
+                              isDisabled={!canResetIntroLayout}
                               onPress={resetIntroLayout}
                             >
                               초기화
@@ -3626,14 +3771,16 @@ export function NewsClipReviewStep({
                             settings={settings}
                             className="mx-auto w-full max-w-[260px] rounded-xl shadow-none"
                             backgroundContent={
-                              <video
-                                ref={sourceVideoRef}
+                              <PositionedMediaVideo
+                                videoRef={sourceVideoRef}
                                 src={introVideoUrl}
+                                fit={introLayout.introStillFit}
+                                positionX={introLayout.introStillX}
+                                positionY={introLayout.introStillY}
+                                mediaStyle={introMotionPreviewStyle}
                                 muted
                                 playsInline
                                 preload="metadata"
-                                className={introMediaFitClass}
-                                style={introMotionPreviewStyle}
                                 onLoadedMetadata={(event) => {
                                   const duration = Number.isFinite(
                                     event.currentTarget.duration
@@ -3649,39 +3796,88 @@ export function NewsClipReviewStep({
                               />
                             }
                           />
-                          {introUsesUploadedVisual ? (
-                            <div className="flex flex-col gap-2 text-sm">
-                              <span>화면 움직임</span>
-                              <div
-                                className="flex flex-wrap gap-2"
-                                role="group"
-                                aria-label="인트로 첨부 화면 움직임"
+                          <div className="flex flex-col gap-2 text-sm">
+                            <span>화면 맞춤</span>
+                            <div
+                              className="flex flex-wrap gap-2"
+                              role="group"
+                              aria-label="인트로 화면 맞춤"
+                            >
+                              <Button
+                                size="sm"
+                                className="h-8 rounded-full px-3"
+                                variant={
+                                  introLayout.introStillFit === "cover"
+                                    ? "secondary"
+                                    : "outline"
+                                }
+                                aria-pressed={
+                                  introLayout.introStillFit === "cover"
+                                }
+                                onPress={() =>
+                                  patchIntroLayout({
+                                    introStillFit: "cover",
+                                    introStillZoom: Math.max(
+                                      1,
+                                      introLayout.introStillZoom
+                                    ),
+                                  })
+                                }
                               >
-                                {NEWS_MEDIA_MOTION_OPTIONS.map((option) => (
-                                  <Button
-                                    key={option.value}
-                                    size="sm"
-                                    className="h-8 rounded-full px-3"
-                                    variant={
-                                      introLayout.introMotion === option.value
-                                        ? "secondary"
-                                        : "outline"
-                                    }
-                                    aria-pressed={
-                                      introLayout.introMotion === option.value
-                                    }
-                                    onPress={() =>
-                                      patchIntroLayout({
-                                        introMotion: option.value,
-                                      })
-                                    }
-                                  >
-                                    {option.label}
-                                  </Button>
-                                ))}
-                              </div>
+                                자동 채움
+                              </Button>
+                              <Button
+                                size="sm"
+                                className="h-8 rounded-full px-3"
+                                variant={
+                                  introLayout.introStillFit === "contain"
+                                    ? "secondary"
+                                    : "outline"
+                                }
+                                aria-pressed={
+                                  introLayout.introStillFit === "contain"
+                                }
+                                onPress={() =>
+                                  patchIntroLayout({
+                                    introStillFit: "contain",
+                                  })
+                                }
+                              >
+                                원본 비율
+                              </Button>
                             </div>
-                          ) : null}
+                          </div>
+                          <div className="flex flex-col gap-2 text-sm">
+                            <span>화면 움직임</span>
+                            <div
+                              className="flex flex-wrap gap-2"
+                              role="group"
+                              aria-label="인트로 화면 움직임"
+                            >
+                              {NEWS_MEDIA_MOTION_OPTIONS.map((option) => (
+                                <Button
+                                  key={option.value}
+                                  size="sm"
+                                  className="h-8 rounded-full px-3"
+                                  variant={
+                                    introLayout.introMotion === option.value
+                                      ? "secondary"
+                                      : "outline"
+                                  }
+                                  aria-pressed={
+                                    introLayout.introMotion === option.value
+                                  }
+                                  onPress={() =>
+                                    patchIntroLayout({
+                                      introMotion: option.value,
+                                    })
+                                  }
+                                >
+                                  {option.label}
+                                </Button>
+                              ))}
+                            </div>
+                          </div>
                           <label className="flex flex-col gap-2">
                             <span className="flex items-center justify-between text-sm">
                               <span>
@@ -3709,25 +3905,29 @@ export function NewsClipReviewStep({
                           </label>
                           <label className="flex flex-col gap-2">
                             <span className="flex items-center justify-between text-sm">
-                              <span>추가 확대</span>
+                              <span>화면 크기 · 축소/확대</span>
                               <span className="text-muted tabular-nums">
                                 {ratioPercent(introLayout.introStillZoom)}
                               </span>
                             </span>
                             <input
-                              aria-label="인트로 이미지 추가 확대"
+                              aria-label="인트로 화면 확대"
                               type="range"
-                              min={1}
+                              min={ZOOM_SLIDER_MIN}
                               max={ZOOM_SLIDER_MAX}
                               step={0.01}
                               value={introLayout.introStillZoom}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const introStillZoom = Number(
+                                  event.currentTarget.value
+                                )
                                 patchIntroLayout({
-                                  introStillZoom: Number(
-                                    event.currentTarget.value
-                                  ),
+                                  introStillZoom,
+                                  ...(introStillZoom < 1
+                                    ? { introStillFit: "contain" as const }
+                                    : {}),
                                 })
-                              }
+                              }}
                             />
                           </label>
                           <div className="grid gap-4 sm:grid-cols-2">
@@ -3821,29 +4021,99 @@ export function NewsClipReviewStep({
                               .map((scene, index) => {
                                 const selected =
                                   scene.id === selectedDirectionSceneId
-                                const layout = sceneLayoutFor(
-                                  scene,
-                                  project,
-                                  sceneLayoutDrafts
-                                )
-                                const crop = layout.crop
-                                const sceneSource = sourceForId(scene.sourceId)
-                                const sceneUsesUploadedVisual =
-                                  sceneSource?.channel === "사용자 첨부"
-                                const layoutDirty = sceneLayoutDirty(
-                                  layout,
-                                  scene,
-                                  project.crop
-                                )
                                 const scenePart = reportScenePart(
                                   scene,
                                   project.productionMode
                                 )
+                                const partScenes = project.reportScenes.filter(
+                                  (item) =>
+                                    reportScenePart(
+                                      item,
+                                      project.productionMode
+                                    ) === scenePart
+                                )
+                                const visualScene =
+                                  project.productionMode === "report"
+                                    ? (reportVisualContinuationAnchor(
+                                        partScenes,
+                                        scene.id
+                                      ) ?? scene)
+                                    : scene
+                                const scenePartIndex = partScenes.findIndex(
+                                  (item) => item.id === scene.id
+                                )
+                                const visualGroupStartIndex =
+                                  partScenes.findIndex(
+                                    (item) => item.id === visualScene.id
+                                  )
+                                let visualGroupEndIndex =
+                                  visualGroupStartIndex
+                                while (
+                                  visualGroupEndIndex + 1 <
+                                    partScenes.length &&
+                                  partScenes[visualGroupEndIndex + 1]
+                                    ?.continuePreviousVisual === true
+                                ) {
+                                  visualGroupEndIndex += 1
+                                }
+                                const visualGroupSize = Math.max(
+                                  1,
+                                  visualGroupEndIndex -
+                                    visualGroupStartIndex +
+                                    1
+                                )
+                                const visualGroupPosition =
+                                  scenePartIndex - visualGroupStartIndex + 1
+                                const visualGroupScenes = partScenes.slice(
+                                  visualGroupStartIndex,
+                                  visualGroupEndIndex + 1
+                                )
+                                const visualGroupDurationSeconds =
+                                  visualGroupSize > 1
+                                    ? reportVisualGroupPlaybackSeconds(
+                                        visualGroupScenes,
+                                        project.subtitles,
+                                        settings.titleVoiceRate
+                                      )
+                                    : undefined
+                                const visualGroupClass =
+                                  visualGroupSize <= 1
+                                    ? ""
+                                    : visualGroupPosition === 1
+                                      ? "rounded-t-2xl border-x border-t border-foreground/25 bg-default/40 p-2 pb-3"
+                                      : visualGroupPosition === visualGroupSize
+                                        ? "-mt-3 rounded-b-2xl border-x border-b border-foreground/25 bg-default/40 p-2 pt-3"
+                                        : "-mt-3 border-x border-foreground/25 bg-default/40 px-2 py-3"
+                                const layout = sceneLayoutFor(
+                                  visualScene,
+                                  project,
+                                  sceneLayoutDrafts
+                                )
+                                const crop = layout.crop
+                                const sceneSource = sourceForId(
+                                  visualScene.sourceId
+                                )
+                                const layoutDirty = sceneLayoutDirty(
+                                  layout,
+                                  visualScene,
+                                  project.crop,
+                                  "cover"
+                                )
+                                const nextPartScene =
+                                  scenePartIndex >= 0
+                                    ? partScenes[scenePartIndex + 1]
+                                    : undefined
+                                const continuesPreviousVisual =
+                                  project.productionMode === "report" &&
+                                  scene.continuePreviousVisual === true
+                                const continuesIntoNextVisual =
+                                  project.productionMode === "report" &&
+                                  nextPartScene?.continuePreviousVisual === true
                                 const canAttachVisual = mode === "preview"
                                 const partSiblingScenes =
                                   project.reportScenes.filter(
                                     (item) =>
-                                      item.id !== scene.id &&
+                                      item.id !== visualScene.id &&
                                       reportScenePart(
                                         item,
                                         project.productionMode
@@ -3851,12 +4121,14 @@ export function NewsClipReviewStep({
                                   )
                                 const siblingsNeedCrop = partSiblingScenes.some(
                                   (item) => {
-                                    const siblingCrop = sceneLayoutFor(
+                                    const siblingLayout = sceneLayoutFor(
                                       item,
                                       project,
                                       sceneLayoutDrafts
-                                    ).crop
+                                    )
+                                    const siblingCrop = siblingLayout.crop
                                     return (
+                                      siblingLayout.fit !== layout.fit ||
                                       siblingCrop.x !== crop.x ||
                                       siblingCrop.y !== crop.y ||
                                       siblingCrop.zoom !== crop.zoom ||
@@ -3870,15 +4142,23 @@ export function NewsClipReviewStep({
                                   (layoutDirty || siblingsNeedCrop)
                                 const canResetLayout =
                                   layoutDirty ||
-                                  Boolean(sceneVisualBaselines[scene.id]) ||
-                                  sceneUsesCustomVisual(scene, project)
+                                  Boolean(
+                                    sceneVisualBaselines[visualScene.id]
+                                  ) ||
+                                  layout.fit !== "contain" ||
+                                  crop.x !== POSITION_SLIDER_CENTER ||
+                                  crop.y !== POSITION_SLIDER_CENTER ||
+                                  crop.zoom !== ZOOM_SLIDER_CENTER ||
+                                  normalizeNewsMediaMotion(layout.motion) !==
+                                    "none"
                                 const draftScene = {
-                                  ...scene,
+                                  ...visualScene,
                                   sourceStart: layout.sourceStart,
                                   sourceEnd: layout.sourceEnd,
+                                  fit: layout.fit,
                                 }
                                 const sourceTitle = sourceTitleFor(
-                                  scene.sourceId
+                                  visualScene.sourceId
                                 )
                                 const visualLabel =
                                   project.productionMode === "report"
@@ -3889,8 +4169,17 @@ export function NewsClipReviewStep({
                                 return (
                                   <div
                                     key={scene.id}
-                                    className="flex flex-col gap-2"
+                                    className={`flex flex-col gap-2 ${visualGroupClass}`}
                                   >
+                                    {visualGroupSize > 1 &&
+                                    visualGroupPosition === 1 ? (
+                                      <div className="flex items-center justify-between gap-3 px-1 text-xs font-semibold">
+                                        <span>연결된 화면</span>
+                                        <span className="text-muted">
+                                          {visualGroupSize}개 구간
+                                        </span>
+                                      </div>
+                                    ) : null}
                                     <button
                                       type="button"
                                       aria-pressed={selected}
@@ -3908,8 +4197,10 @@ export function NewsClipReviewStep({
                                       }
                                     >
                                       <video
-                                        key={`${scene.sourceId || project.source?.id || "source"}-${layout.sourceStart}`}
-                                        src={sourceVideoUrlFor(scene.sourceId)}
+                                        key={`${visualScene.sourceId || project.source?.id || "source"}-${layout.sourceStart}`}
+                                        src={sourceVideoUrlFor(
+                                          visualScene.sourceId
+                                        )}
                                         poster={sceneSource?.thumbnailUrl}
                                         muted
                                         playsInline
@@ -3934,6 +4225,12 @@ export function NewsClipReviewStep({
                                         <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted">
                                           <span>구간 {index + 1}</span>
                                           <span>{visualLabel}</span>
+                                          {visualGroupSize > 1 ? (
+                                            <span className="rounded-full bg-foreground/10 px-2 py-0.5 font-medium text-foreground">
+                                              같은 화면 {visualGroupPosition}/
+                                              {visualGroupSize}
+                                            </span>
+                                          ) : null}
                                           {layoutDirty ? (
                                             <span className="text-warning">
                                               저장 전
@@ -3953,6 +4250,37 @@ export function NewsClipReviewStep({
                                     {selected ? (
                                       <div className="flex flex-col gap-4 rounded-xl bg-default/60 p-4">
                                         <div className="flex items-center justify-end gap-2">
+                                          {continuesPreviousVisual ? (
+                                            <Button
+                                              size="sm"
+                                              variant="outline"
+                                              onPress={() =>
+                                                setSceneVisualContinuation(
+                                                  scene.id,
+                                                  false
+                                                )
+                                              }
+                                            >
+                                              이전 화면과 분리
+                                            </Button>
+                                          ) : null}
+                                          {project.productionMode ===
+                                            "report" && nextPartScene ? (
+                                            <Button
+                                              size="sm"
+                                              variant="outline"
+                                              onPress={() =>
+                                                setSceneVisualContinuation(
+                                                  nextPartScene.id,
+                                                  !continuesIntoNextVisual
+                                                )
+                                              }
+                                            >
+                                              {continuesIntoNextVisual
+                                                ? "다음 화면 분리"
+                                                : "다음 화면과 합치기"}
+                                            </Button>
+                                          ) : null}
                                           {canAttachVisual ? (
                                             <Button
                                               size="sm"
@@ -3963,12 +4291,13 @@ export function NewsClipReviewStep({
                                               onPress={() =>
                                                 chooseVisualFile({
                                                   type: "scene",
-                                                  sceneId: scene.id,
+                                                  sceneId: visualScene.id,
                                                 })
                                               }
                                             >
                                               <FileUp className="size-4" />
-                                              {visualUploadBusy === scene.id
+                                              {visualUploadBusy ===
+                                              visualScene.id
                                                 ? "첨부 중"
                                                 : "파일 첨부"}
                                             </Button>
@@ -3983,7 +4312,7 @@ export function NewsClipReviewStep({
                                             variant="outline"
                                             isDisabled={!canResetLayout}
                                             onPress={() =>
-                                              resetSceneLayout(scene.id)
+                                              resetSceneLayout(visualScene.id)
                                             }
                                           >
                                             초기화
@@ -3994,7 +4323,9 @@ export function NewsClipReviewStep({
                                               variant="outline"
                                               isDisabled={!canBatchSaveCrop}
                                               onPress={() =>
-                                                saveSceneLayoutCropToPart(scene)
+                                                saveSceneLayoutCropToPart(
+                                                  visualScene
+                                                )
                                               }
                                             >
                                               일괄저장
@@ -4004,7 +4335,7 @@ export function NewsClipReviewStep({
                                             size="sm"
                                             isDisabled={!layoutDirty}
                                             onPress={() =>
-                                              saveSceneLayout(scene)
+                                              saveSceneLayout(visualScene)
                                             }
                                           >
                                             저장
@@ -4017,7 +4348,7 @@ export function NewsClipReviewStep({
                                               <select
                                                 aria-label={`구간 ${index + 1} 장면 자료`}
                                                 value={
-                                                  scene.sourceId ||
+                                                  visualScene.sourceId ||
                                                   project.source?.id ||
                                                   ""
                                                 }
@@ -4026,21 +4357,25 @@ export function NewsClipReviewStep({
                                                     event.currentTarget.value
                                                   const nextSource =
                                                     sourceForId(sourceId)
-                                                  updateReportScene(scene.id, {
-                                                    sourceId,
-                                                    visual: "source",
-                                                    visualMode:
-                                                      sourceId ===
-                                                      project.source?.id
-                                                        ? "source"
-                                                        : "supporting",
-                                                    sourceStart: 0,
-                                                    sourceEnd: Math.max(
-                                                      0.5,
-                                                      nextSource?.durationSeconds ||
-                                                        12
-                                                    ),
-                                                  })
+                                                  updateReportScene(
+                                                    visualScene.id,
+                                                    {
+                                                      sourceId,
+                                                      visual: "source",
+                                                      visualMode:
+                                                        sourceId ===
+                                                        project.source?.id
+                                                          ? "source"
+                                                          : "supporting",
+                                                      sourceStart: 0,
+                                                      sourceEnd: Math.max(
+                                                        0.5,
+                                                        nextSource?.durationSeconds ||
+                                                          12
+                                                      ),
+                                                      fit: "cover",
+                                                    }
+                                                  )
                                                 }}
                                                 className={field}
                                               >
@@ -4117,7 +4452,7 @@ export function NewsClipReviewStep({
                                         mode === "direction" ? (
                                           <SceneCropPreview
                                             sourceUrl={sourceVideoUrlFor(
-                                              scene.sourceId
+                                              visualScene.sourceId
                                             )}
                                             sourceStart={layout.sourceStart}
                                             sourceEnd={layout.sourceEnd}
@@ -4135,66 +4470,128 @@ export function NewsClipReviewStep({
                                               project.productionMode ===
                                               "report"
                                             }
-                                            fit={
-                                              sceneSource?.mediaType === "image"
-                                                ? "contain"
-                                                : "cover"
-                                            }
+                                            fit={layout.fit}
                                             settings={settings}
                                           />
                                         ) : null}
-                                        {sceneUsesUploadedVisual ? (
-                                          <div className="flex flex-col gap-2 text-sm">
-                                            <span>화면 움직임</span>
-                                            <div
-                                              className="flex flex-wrap gap-2"
-                                              role="group"
-                                              aria-label={`구간 ${index + 1} 첨부 화면 움직임`}
-                                            >
-                                              {NEWS_MEDIA_MOTION_OPTIONS.map(
-                                                (option) => (
-                                                  <Button
-                                                    key={option.value}
-                                                    size="sm"
-                                                    className="h-8 rounded-full px-3"
-                                                    variant={
-                                                      layout.motion ===
-                                                      option.value
-                                                        ? "secondary"
-                                                        : "outline"
-                                                    }
-                                                    aria-pressed={
-                                                      layout.motion ===
-                                                      option.value
-                                                    }
-                                                    onPress={() =>
-                                                      patchSceneLayoutDraft(
-                                                        scene,
-                                                        {
-                                                          motion: option.value,
-                                                        }
-                                                      )
-                                                    }
-                                                  >
-                                                    {option.label}
-                                                  </Button>
+                                        <div className="flex flex-col gap-2 text-sm">
+                                          <span>화면 맞춤</span>
+                                          <div
+                                            className="flex flex-wrap gap-2"
+                                            role="group"
+                                            aria-label={`구간 ${index + 1} 화면 맞춤`}
+                                          >
+                                            <Button
+                                              size="sm"
+                                              className="h-8 rounded-full px-3"
+                                              variant={
+                                                layout.fit === "cover"
+                                                  ? "secondary"
+                                                  : "outline"
+                                              }
+                                              aria-pressed={
+                                                layout.fit === "cover"
+                                              }
+                                              onPress={() =>
+                                                patchSceneLayoutDraft(
+                                                  visualScene,
+                                                  {
+                                                    fit: "cover",
+                                                    crop: {
+                                                      ...crop,
+                                                      zoom: Math.max(
+                                                        1,
+                                                        crop.zoom
+                                                      ),
+                                                    },
+                                                  }
                                                 )
-                                              )}
-                                            </div>
+                                              }
+                                            >
+                                              자동 채움
+                                            </Button>
+                                            <Button
+                                              size="sm"
+                                              className="h-8 rounded-full px-3"
+                                              variant={
+                                                layout.fit === "contain"
+                                                  ? "secondary"
+                                                  : "outline"
+                                              }
+                                              aria-pressed={
+                                                layout.fit === "contain"
+                                              }
+                                              onPress={() =>
+                                                patchSceneLayoutDraft(
+                                                  visualScene,
+                                                  {
+                                                    fit: "contain",
+                                                  }
+                                                )
+                                              }
+                                            >
+                                              원본 비율
+                                            </Button>
                                           </div>
-                                        ) : null}
+                                        </div>
+                                        <div className="flex flex-col gap-2 text-sm">
+                                          <span>화면 움직임</span>
+                                          <div
+                                            className="flex flex-wrap gap-2"
+                                            role="group"
+                                            aria-label={`구간 ${index + 1} 화면 움직임`}
+                                          >
+                                            {NEWS_MEDIA_MOTION_OPTIONS.map(
+                                              (option) => (
+                                                <Button
+                                                  key={option.value}
+                                                  size="sm"
+                                                  className="h-8 rounded-full px-3"
+                                                  variant={
+                                                    layout.motion ===
+                                                    option.value
+                                                      ? "secondary"
+                                                      : "outline"
+                                                  }
+                                                  aria-pressed={
+                                                    layout.motion ===
+                                                    option.value
+                                                  }
+                                                  onPress={() =>
+                                                    patchSceneLayoutDraft(
+                                                      visualScene,
+                                                      {
+                                                        motion: option.value,
+                                                      }
+                                                    )
+                                                  }
+                                                >
+                                                  {option.label}
+                                                </Button>
+                                              )
+                                            )}
+                                          </div>
+                                        </div>
                                         <div className="grid gap-5 md:grid-cols-3">
                                           <RangeInput
-                                            label="화면 확대"
+                                            label="화면 크기 · 축소/확대"
                                             value={crop.zoom}
                                             min={ZOOM_SLIDER_MIN}
                                             max={ZOOM_SLIDER_MAX}
                                             step={0.01}
                                             formatValue={ratioPercent}
                                             onChange={(zoom) =>
-                                              patchSceneLayoutDraft(scene, {
-                                                crop: { ...crop, zoom },
-                                              })
+                                              patchSceneLayoutDraft(
+                                                visualScene,
+                                                {
+                                                  crop: { ...crop, zoom },
+                                                  ...(zoom < 1
+                                                    ? {
+                                                        fit: "contain" as const,
+                                                      }
+                                                    : {}),
+                                                }
+                                              )
                                             }
                                           />
                                           <RangeInput
@@ -4207,9 +4604,12 @@ export function NewsClipReviewStep({
                                               axisPosition(x, "왼쪽", "오른쪽")
                                             }
                                             onChange={(x) =>
-                                              patchSceneLayoutDraft(scene, {
-                                                crop: { ...crop, x },
-                                              })
+                                              patchSceneLayoutDraft(
+                                                visualScene,
+                                                {
+                                                  crop: { ...crop, x },
+                                                }
+                                              )
                                             }
                                           />
                                           <RangeInput
@@ -4222,9 +4622,12 @@ export function NewsClipReviewStep({
                                               axisPosition(y, "위", "아래")
                                             }
                                             onChange={(y) =>
-                                              patchSceneLayoutDraft(scene, {
-                                                crop: { ...crop, y },
-                                              })
+                                              patchSceneLayoutDraft(
+                                                visualScene,
+                                                {
+                                                  crop: { ...crop, y },
+                                                }
+                                              )
                                             }
                                           />
                                         </div>
@@ -4243,14 +4646,14 @@ export function NewsClipReviewStep({
                                             (item) => item.id === scene.id
                                           ) ? (
                                           <p className="text-sm text-muted">
-                                            본문은 확정된 영상 구간입니다. 화면
-                                            위치만 조절할 수 있습니다.
+                                            영상 구간은 유지됩니다. 화면 맞춤,
+                                            크기와 위치만 조절할 수 있습니다.
                                           </p>
                                         ) : (
                                           <SourceRangeTimeline
                                             scene={draftScene}
                                             sourceId={
-                                              scene.sourceId ||
+                                              visualScene.sourceId ||
                                               project.source?.id ||
                                               ""
                                             }
@@ -4259,12 +4662,15 @@ export function NewsClipReviewStep({
                                               draftScene,
                                               directionSourceMetadata.url ===
                                                 sourceVideoUrlFor(
-                                                  scene.sourceId ||
+                                                  visualScene.sourceId ||
                                                     project.source?.id
                                                 )
                                                 ? directionSourceMetadata.duration
                                                 : 0
                                             )}
+                                            requiredDuration={
+                                              visualGroupDurationSeconds
+                                            }
                                             onMove={(
                                               sourceStart,
                                               sourceEnd
@@ -4273,10 +4679,13 @@ export function NewsClipReviewStep({
                                                 scene.id,
                                                 sourceStart
                                               )
-                                              patchSceneLayoutDraft(scene, {
-                                                sourceStart,
-                                                sourceEnd,
-                                              })
+                                              patchSceneLayoutDraft(
+                                                visualScene,
+                                                {
+                                                  sourceStart,
+                                                  sourceEnd,
+                                                }
+                                              )
                                             }}
                                           />
                                         )}
@@ -4505,20 +4914,38 @@ export function NewsClipReviewStep({
                           <Card.Content className="flex flex-col gap-4">
                             <div className="flex flex-wrap gap-3">
                               {project.outputUrl ? (
-                                <a
-                                  className="text-sm underline"
-                                  href={project.outputUrl}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  isDisabled={Boolean(downloadBusy)}
+                                  onPress={() =>
+                                    void downloadOutputAsset(
+                                      "video",
+                                      project.outputUrl
+                                    )
+                                  }
                                 >
-                                  영상 받기
-                                </a>
+                                  {downloadBusy === "video"
+                                    ? "저장 중"
+                                    : "영상 받기"}
+                                </Button>
                               ) : null}
                               {project.thumbnailUrl ? (
-                                <a
-                                  className="text-sm underline"
-                                  href={project.thumbnailUrl}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  isDisabled={Boolean(downloadBusy)}
+                                  onPress={() =>
+                                    void downloadOutputAsset(
+                                      "thumbnail",
+                                      project.thumbnailUrl
+                                    )
+                                  }
                                 >
-                                  썸네일 받기
-                                </a>
+                                  {downloadBusy === "thumbnail"
+                                    ? "저장 중"
+                                    : "썸네일 받기"}
+                                </Button>
                               ) : null}
                             </div>
                           </Card.Content>
@@ -4626,6 +5053,7 @@ export function NewsClipReviewStep({
                     </Button>
                   </div>
                 ) : null}
+
               </div>
               </div>
             </div>
@@ -4936,8 +5364,10 @@ function SubtitleLineFields({
   )
 }
 
-function bodySourceTransform(zoom: number) {
-  return Math.max(1, Math.min(ZOOM_SLIDER_MAX, zoom))
+function bodySourceTransform(zoom: number, fit: NewsMediaFit) {
+  return fit === "contain"
+    ? Math.max(ZOOM_SLIDER_MIN, Math.min(ZOOM_SLIDER_MAX, zoom))
+    : Math.max(1, Math.min(ZOOM_SLIDER_MAX, zoom))
 }
 
 function mediaMotionStyle(
@@ -4945,7 +5375,10 @@ function mediaMotionStyle(
   baseScale: number,
   durationSeconds: number
 ): CSSProperties {
-  const safeScale = Math.max(1, Math.min(ZOOM_SLIDER_MAX, baseScale))
+  const safeScale = Math.max(
+    ZOOM_SLIDER_MIN,
+    Math.min(ZOOM_SLIDER_MAX, baseScale)
+  )
   if (motion === "none") {
     return { transform: `scale(${safeScale})` }
   }
@@ -4978,10 +5411,82 @@ function mediaMotionStyle(
   } as CSSProperties
 }
 
+type PositionedMediaVideoProps = Omit<
+  VideoHTMLAttributes<HTMLVideoElement>,
+  "className" | "style"
+> & {
+  videoRef: RefObject<HTMLVideoElement | null>
+  fit: NewsMediaFit
+  positionX: number
+  positionY: number
+  mediaStyle: CSSProperties
+}
+
+/** 전체 캔버스 박스가 아니라 실제 영상 픽셀 레이어만 크기·위치를 바꾼다. */
+function PositionedMediaVideo({
+  videoRef,
+  fit,
+  positionX,
+  positionY,
+  mediaStyle,
+  onLoadedMetadata,
+  ...videoProps
+}: PositionedMediaVideoProps) {
+  const [aspectRatio, setAspectRatio] = useState(16 / 9)
+  const frameRatio = 9 / 16
+  const landscapeRelative = aspectRatio / frameRatio
+  const widthPercent =
+    fit === "contain"
+      ? aspectRatio >= frameRatio
+        ? 100
+        : landscapeRelative * 100
+      : aspectRatio >= frameRatio
+        ? landscapeRelative * 100
+        : 100
+  const heightPercent =
+    fit === "contain"
+      ? aspectRatio >= frameRatio
+        ? (frameRatio / aspectRatio) * 100
+        : 100
+      : aspectRatio >= frameRatio
+        ? 100
+        : (frameRatio / aspectRatio) * 100
+
+  return (
+    <div
+      className="absolute"
+      style={{
+        left: `${positionX}%`,
+        top: `${positionY}%`,
+        width: `${widthPercent}%`,
+        height: `${heightPercent}%`,
+        transform: `translate(${-positionX}%, ${-positionY}%)`,
+      }}
+    >
+      <video
+        {...videoProps}
+        ref={videoRef}
+        className="size-full"
+        style={{
+          ...mediaStyle,
+          transformOrigin: `${positionX}% ${positionY}%`,
+        }}
+        onLoadedMetadata={(event) => {
+          const width = event.currentTarget.videoWidth
+          const height = event.currentTarget.videoHeight
+          if (width > 0 && height > 0) setAspectRatio(width / height)
+          onLoadedMetadata?.(event)
+        }}
+      />
+    </div>
+  )
+}
+
 function BodySourceVideo({
   videoRef,
   src,
   zoom,
+  fit,
   cropX,
   cropY,
   currentTime,
@@ -4990,23 +5495,25 @@ function BodySourceVideo({
   videoRef: RefObject<HTMLVideoElement | null>
   src: string
   zoom: number
+  fit: NewsMediaFit
   cropX: number
   cropY: number
   currentTime: number
   onDuration?: (duration: number) => void
 }) {
   return (
-    <video
-      ref={videoRef}
+    <PositionedMediaVideo
+      videoRef={videoRef}
       src={src}
+      fit={fit}
+      positionX={cropX}
+      positionY={cropY}
+      mediaStyle={{
+        transform: `scale(${bodySourceTransform(zoom, fit)})`,
+      }}
       muted
       playsInline
       preload="metadata"
-      className="size-full object-cover"
-      style={{
-        transform: `scale(${bodySourceTransform(zoom)})`,
-        transformOrigin: `${cropX}% ${cropY}%`,
-      }}
       onLoadedMetadata={(event) => {
         event.currentTarget.playbackRate = NEWS_SOURCE_PLAYBACK_RATE
         event.currentTarget.currentTime = Math.max(0, currentTime)
@@ -5026,6 +5533,7 @@ function DirectionBodySourceVideo({
   videoRef,
   src,
   zoom,
+  fit,
   cropX,
   cropY,
   sourceStart,
@@ -5037,6 +5545,7 @@ function DirectionBodySourceVideo({
   videoRef: RefObject<HTMLVideoElement | null>
   src: string
   zoom: number
+  fit: NewsMediaFit
   cropX: number
   cropY: number
   sourceStart: number
@@ -5046,17 +5555,18 @@ function DirectionBodySourceVideo({
   onTimeChange: (time: number) => void
 }) {
   return (
-    <video
-      ref={videoRef}
+    <PositionedMediaVideo
+      videoRef={videoRef}
       src={src}
+      fit={fit}
+      positionX={cropX}
+      positionY={cropY}
+      mediaStyle={{
+        transform: `scale(${bodySourceTransform(zoom, fit)})`,
+      }}
       muted
       playsInline
       preload="metadata"
-      className="size-full object-cover"
-      style={{
-        transform: `scale(${bodySourceTransform(zoom)})`,
-        transformOrigin: `${cropX}% ${cropY}%`,
-      }}
       onLoadedMetadata={(event) => {
         event.currentTarget.playbackRate = NEWS_SOURCE_PLAYBACK_RATE
         if (Number.isFinite(event.currentTarget.duration)) {
@@ -5113,9 +5623,7 @@ function SceneCropPreview({
   const resolvedFit = fit
   const previewScale =
     resolvedFit === "contain"
-      ? crop.zoom <= 1.0001
-        ? 1
-        : crop.zoom
+      ? Math.max(ZOOM_SLIDER_MIN, Math.min(ZOOM_SLIDER_MAX, crop.zoom))
       : Math.max(1, Math.min(ZOOM_SLIDER_MAX, crop.zoom))
 
   useEffect(() => {
@@ -5142,25 +5650,20 @@ function SceneCropPreview({
         zoom={crop.zoom}
         className="mx-auto w-full max-w-[260px] rounded-xl shadow-none"
         videoContent={
-          <video
-            ref={videoRef}
+          <PositionedMediaVideo
+            videoRef={videoRef}
             src={sourceUrl}
+            fit={resolvedFit}
+            positionX={crop.x}
+            positionY={crop.y}
+            mediaStyle={mediaMotionStyle(
+              motion,
+              previewScale,
+              safeEnd - safeStart
+            )}
             muted={muted}
             playsInline
             preload="metadata"
-            className={
-              resolvedFit === "contain"
-                ? "size-full object-contain bg-black"
-                : "size-full object-cover"
-            }
-            style={{
-              ...mediaMotionStyle(
-                motion,
-                previewScale,
-                safeEnd - safeStart
-              ),
-              transformOrigin: `${crop.x}% ${crop.y}%`,
-            }}
             onLoadedMetadata={(event) => {
               event.currentTarget.playbackRate = NEWS_SOURCE_PLAYBACK_RATE
               event.currentTarget.currentTime = safeStart
@@ -5228,13 +5731,19 @@ function SourceRangeTimeline({
   scene,
   sourceId,
   duration,
+  requiredDuration,
   onMove,
 }: {
   scene: NewsReportScene
   sourceId: string
   duration: number
+  requiredDuration?: number
   onMove: (sourceStart: number, sourceEnd: number) => void
 }) {
+  const requestedEnd = Math.max(
+    scene.sourceEnd,
+    scene.sourceStart + Math.max(0, requiredDuration ?? 0)
+  )
   const safeDuration = Math.max(0.1, duration, scene.sourceEnd)
   const minimumLength = Math.min(0.5, safeDuration)
   const start = Math.max(
@@ -5243,7 +5752,7 @@ function SourceRangeTimeline({
   )
   const end = Math.max(
     start + minimumLength,
-    Math.min(safeDuration, scene.sourceEnd)
+    Math.min(safeDuration, requestedEnd)
   )
   const segmentLength = Math.max(minimumLength, end - start)
   const maxMoveStart = Math.max(0, safeDuration - segmentLength)
@@ -5409,10 +5918,23 @@ function axisPosition(value: number, start: string, end: string) {
 
 function snapshotSceneLayout(
   scene: NewsReportScene,
-  fallbackCrop: CropPosition
+  fallbackCrop: CropPosition,
+  fallbackFit: NewsMediaFit = "cover"
 ): SceneLayoutDraft {
+  const savedCrop = scene.crop ?? fallbackCrop
   return {
-    crop: { ...(scene.crop ?? fallbackCrop) },
+    crop: {
+      ...savedCrop,
+      x: Math.max(
+        POSITION_SLIDER_MIN,
+        Math.min(POSITION_SLIDER_MAX, savedCrop.x)
+      ),
+      y: Math.max(
+        POSITION_SLIDER_MIN,
+        Math.min(POSITION_SLIDER_MAX, savedCrop.y)
+      ),
+    },
+    fit: scene.fit ?? fallbackFit,
     sourceStart: scene.sourceStart,
     sourceEnd: scene.sourceEnd,
     motion: normalizeNewsMediaMotion(scene.motion),
@@ -5424,15 +5946,19 @@ function sceneLayoutFor(
   project: NewsClipProject,
   drafts: Record<string, SceneLayoutDraft>
 ) {
-  return drafts[scene.id] ?? snapshotSceneLayout(scene, project.crop)
+  const fallbackFit: NewsMediaFit = "cover"
+  return (
+    drafts[scene.id] ?? snapshotSceneLayout(scene, project.crop, fallbackFit)
+  )
 }
 
 function sceneLayoutDirty(
   draft: SceneLayoutDraft,
   scene: NewsReportScene,
-  fallbackCrop: CropPosition
+  fallbackCrop: CropPosition,
+  fallbackFit: NewsMediaFit = "cover"
 ) {
-  const saved = snapshotSceneLayout(scene, fallbackCrop)
+  const saved = snapshotSceneLayout(scene, fallbackCrop, fallbackFit)
   return (
     draft.sourceStart !== saved.sourceStart ||
     draft.sourceEnd !== saved.sourceEnd ||
@@ -5440,16 +5966,28 @@ function sceneLayoutDirty(
     draft.crop.y !== saved.crop.y ||
     draft.crop.zoom !== saved.crop.zoom ||
     draft.crop.faceTracking !== saved.crop.faceTracking ||
+    draft.fit !== saved.fit ||
     draft.motion !== saved.motion
   )
 }
 
 function snapshotIntroLayout(project: NewsClipProject): IntroLayoutDraft {
+  const fallbackFit: NewsMediaFit = "cover"
   return {
     introStillTimeSeconds: project.introStillTimeSeconds,
+    introStillFit:
+      project.introStillFit === "contain" || project.introStillFit === "cover"
+        ? project.introStillFit
+        : fallbackFit,
     introStillZoom: project.introStillZoom,
-    introStillX: project.introStillX,
-    introStillY: project.introStillY,
+    introStillX: Math.max(
+      POSITION_SLIDER_MIN,
+      Math.min(POSITION_SLIDER_MAX, project.introStillX)
+    ),
+    introStillY: Math.max(
+      POSITION_SLIDER_MIN,
+      Math.min(POSITION_SLIDER_MAX, project.introStillY)
+    ),
     introMotion: normalizeNewsMediaMotion(project.introMotion, "zoom-in"),
   }
 }
@@ -5457,6 +5995,7 @@ function snapshotIntroLayout(project: NewsClipProject): IntroLayoutDraft {
 function sameIntroLayout(left: IntroLayoutDraft, right: IntroLayoutDraft) {
   return (
     left.introStillTimeSeconds === right.introStillTimeSeconds &&
+    left.introStillFit === right.introStillFit &&
     left.introStillZoom === right.introStillZoom &&
     left.introStillX === right.introStillX &&
     left.introStillY === right.introStillY &&
@@ -5534,6 +6073,45 @@ function sceneSourceDuration(
     source?.durationSeconds ?? 0,
     scene.sourceEnd
   )
+}
+
+function reportVisualGroupPlaybackSeconds(
+  scenes: NewsReportScene[],
+  subtitles: NewsClipProject["subtitles"],
+  ratePercent: number
+) {
+  const sceneIds = new Set(scenes.map((scene) => scene.id))
+  const cues = subtitles.filter(
+    (cue) => cue.sceneId && sceneIds.has(cue.sceneId)
+  )
+  const cueDuration = cues.length
+    ? Math.max(...cues.map((cue) => cue.end)) -
+      Math.min(...cues.map((cue) => cue.start))
+    : 0
+  return Math.max(
+    0.5,
+    cueDuration,
+    estimateReportScenesDuration(scenes, ratePercent)
+  )
+}
+
+function triggerBrowserDownload(url: string, fileName: string) {
+  const anchor = document.createElement("a")
+  anchor.href = url
+  anchor.download = fileName
+  anchor.rel = "noreferrer"
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+}
+
+function safeDownloadFileStem(title: string) {
+  const normalized = title
+    .replace(/\s+/g, " ")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .trim()
+    .slice(0, 60)
+  return normalized || "뉴스쇼츠"
 }
 
 function composeIntroTitle(firstLine: string, secondLine: string) {

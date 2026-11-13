@@ -51,6 +51,15 @@ test("잠긴 자막은 렌더 응답과 무관하게 문구와 시간을 모두 
   assert.deepEqual(result, [edited])
 })
 
+test("보도형은 잠긴 문구를 유지한 렌더의 TTS 실측 시간을 받아들인다", () => {
+  const rendered = [{ ...edited, start: 10.4, end: 12.6 }]
+  const result = preservePreviewSubtitleEdits([edited], rendered, true, {
+    acceptRenderedLockedTimings: true,
+  })
+
+  assert.deepEqual(result, rendered)
+})
+
 test("부분 렌더가 자막을 돌려주지 않아도 현재 수정본을 비우지 않는다", () => {
   assert.deepEqual(preservePreviewSubtitleEdits([edited], undefined, false), [
     edited,

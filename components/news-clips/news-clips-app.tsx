@@ -232,10 +232,7 @@ export function NewsClipsApp({
               : NEWS_CLIP_STEPS.some((item) => item.id === saved.step)
                 ? (saved.step as NewsClipStep)
                 : "issue"
-          const migratedStep = visibleWorkflowStep(
-            storedStep,
-            migratedProject.productionMode
-          )
+          const migratedStep = visibleWorkflowStep(storedStep)
           if (sourceMatchesIssue) {
             savedStep = migratedStep
             const storedFurthest = NEWS_CLIP_STEPS.some(
@@ -243,10 +240,7 @@ export function NewsClipsApp({
             )
               ? (saved.furthestStep as NewsClipStep)
               : migratedStep
-            savedFurthestStep = visibleWorkflowStep(
-              storedFurthest,
-              migratedProject.productionMode
-            )
+            savedFurthestStep = visibleWorkflowStep(storedFurthest)
             savedTranscript = saved.transcriptDraft ?? ""
           } else if (migratedProject.selectedIssue) {
             savedStep = "source"
@@ -422,13 +416,10 @@ export function NewsClipsApp({
     const snapshot = body.snapshot
     const restored = normalizeSavedNewsProject(snapshot.project, profile!.id)
     setProject(restored)
-    const restoredStep = visibleWorkflowStep(
-      snapshot.step,
-      restored.productionMode
-    )
+    const restoredStep = visibleWorkflowStep(snapshot.step)
     setStep(restoredStep)
     setFurthestStep(
-      visibleWorkflowStep(snapshot.furthestStep, restored.productionMode)
+      visibleWorkflowStep(snapshot.furthestStep)
     )
     setTranscriptDraft(snapshot.transcriptDraft ?? "")
     setIssueSearch(normalizeNewsIssueSearchState(snapshot.issueSearch))
@@ -810,6 +801,11 @@ export function NewsClipsApp({
       quoteVolume: settings.quoteVolume,
       introSourceId: "",
       introStillTimeSeconds: null,
+      introStillFit: "cover",
+      introStillZoom: 1,
+      introStillX: 50,
+      introStillY: 50,
+      introMotion: "zoom-in",
       titleCardDurationSeconds:
         settings.titleCardSeconds + NEWS_INTRO_GAP_SECONDS,
       metadata: {
@@ -1101,16 +1097,21 @@ export function NewsClipsApp({
             body.titleCardDurationSeconds ?? current.titleCardDurationSeconds,
           outputDurationSeconds:
             body.outputDurationSeconds ?? current.outputDurationSeconds,
-          // 4번에서 확정한 문구·줄바꿈·시간은 렌더 응답으로 다시 쓰지 않는다.
+          // 빌드업형은 확정한 영상 자막 시간을 유지한다. 보도형은 대본으로
+          // 다시 만든 TTS의 실측 단어 시간을 렌더 응답에서 받아들인다.
           subtitles: preservePreviewSubtitleEdits(
             current.subtitles,
             Array.isArray(body.subtitles) ? body.subtitles : undefined,
-            draft.subtitleTimingsLocked
+            draft.subtitleTimingsLocked,
+            {
+              acceptRenderedLockedTimings:
+                draft.productionMode === "report",
+            }
           ),
           transcript: Array.isArray(body.transcript)
             ? body.transcript
             : current.transcript,
-          subtitleTimingsLocked: true,
+          subtitleTimingsLocked: draft.productionMode !== "report",
           // 다시 만들 때는 승인한 영상 선택·컷 구간을 그대로 유지한다.
           // 첫 초안이나 대본/연출을 명시적으로 바꾼 경우에만 서버 구성을 받는다.
           reportScenes: draft.subtitleTimingsLocked
@@ -1437,7 +1438,7 @@ export function NewsClipsApp({
   async function prepareReportVisualAssets(draft: NewsClipProject) {
     if (draft.productionMode !== "report") {
       setProject(draft)
-      return true
+      return draft
     }
     const progressKey = "visual-assets"
     const runId = crypto.randomUUID()
@@ -1449,11 +1450,11 @@ export function NewsClipsApp({
       updateOperationProgress(progressKey, runId, 100)
       setProject(result.project)
       setNote(result.message)
-      return true
+      return result.project
     } catch {
       setProject(draft)
       setNote("공개 자료를 찾지 못해 기존 원본 화면으로 계속 진행합니다.")
-      return true
+      return draft
     } finally {
       setBusy("")
       updateOperationProgress(progressKey, runId, null)
@@ -1638,7 +1639,7 @@ export function NewsClipsApp({
     }
   }
 
-  async function retryAngles() {
+  async function retryAngles(focus = "") {
     if (!project.source) {
       openStep("issue")
       return
@@ -1650,7 +1651,8 @@ export function NewsClipsApp({
         project,
         project.source,
         project.selectedIssue,
-        project.selectedIssue?.directSource === true
+        project.selectedIssue?.directSource === true,
+        focus
       )
     } catch (error) {
       setNote(
@@ -1667,7 +1669,8 @@ export function NewsClipsApp({
     sourceProject: NewsClipProject,
     source: NewsSource,
     selectedIssue: RecommendedNewsIssue | null,
-    directSource: boolean
+    directSource: boolean,
+    focus = ""
   ) {
     const response = await fetch("/api/news-clips/angles", {
       method: "POST",
@@ -1679,6 +1682,7 @@ export function NewsClipsApp({
         sourceSelectionMode: sourceProject.sourceSelectionMode,
         issueTitle: selectedIssue?.title ?? "",
         directSource,
+        focus,
       }),
     })
     const body = (await response.json()) as {
@@ -1937,12 +1941,12 @@ export function NewsClipsApp({
               </ListBox>
             </Select.Popover>
           </Select>
-          {visibleNewsClipSteps(project.productionMode).map((item, index) => {
+          {visibleNewsClipSteps().map((item, index) => {
             const completed = stepIndex(item.id) < stepIndex(furthestStep)
-            const activeStep = visibleWorkflowStep(step, project.productionMode)
+            const activeStep = visibleWorkflowStep(step)
             const stepLabel =
-              item.id === "issue" && project.productionMode === "report"
-                ? "이슈·자료 선택"
+              project.productionMode === "report"
+                ? reportStepLabel(item.id)
                 : item.label
             return (
               <Button
@@ -2024,11 +2028,6 @@ export function NewsClipsApp({
             accountNotice={accountNotice}
             youtubeChannelId={profile.youtubeChannelId}
             onPreviewChange={applySettingsPreview}
-            onClose={() =>
-              router.push(
-                `/studio/news-clips?channel=${encodeURIComponent(profile.id)}`
-              )
-            }
             onSaved={applySettingsPreview}
           />
         ) : step === "angles" ? (
@@ -2036,6 +2035,7 @@ export function NewsClipsApp({
             angles={project.angleOptions}
             transcript={project.transcript}
             selectedAngleId={project.selectedAngleId}
+            productionMode={project.productionMode}
             sourceSelectionMode={project.sourceSelectionMode}
             sourceOverview={project.sourceOverview}
             sourceId={project.source?.id ?? ""}
@@ -2043,7 +2043,7 @@ export function NewsClipsApp({
             sourceTitle={project.source?.title}
             busy={busy}
             note={note}
-            onRetry={() => void retryAngles()}
+            onRetry={(focus) => void retryAngles(focus)}
             onChoose={(angle) => void runSelectedAngle(angle)}
             onCancelSelection={cancelSelectedAngle}
             progress={operationProgressPercent(operationProgress, busy)}
@@ -2126,7 +2126,7 @@ export function NewsClipsApp({
             onOperationProgress={updateOperationProgress}
             historySave={historySaveProps}
             onNext={() =>
-              advanceStep(nextReviewStep(step, project.productionMode))
+              advanceStep(nextReviewStep(step))
             }
             onPrepareVisualAssets={prepareReportVisualAssets}
             onProject={updateProject}
@@ -2292,8 +2292,9 @@ async function attachPublicVisualAssets(
       sourceId: publicSource.id,
       sourceStart: 0,
       sourceEnd: Math.max(0.5, publicSource.durationSeconds || 12),
-      // 공개 자료도 확대 없이 넣고, 확대·위치는 사용자가 따로 맞춘다.
+      // 자동 배치는 전체 프레임을 채우고, 사용자가 필요할 때 직접 축소한다.
       crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
+      fit: "cover" as const,
     }
   })
   const acceptedSources = returnedSources.filter((source) =>
@@ -2447,6 +2448,11 @@ function resetAngleSelection(project: NewsClipProject): NewsClipProject {
     subtitleTimingsLocked: false,
     introSourceId: "",
     introStillTimeSeconds: null,
+    introStillFit: "cover",
+    introStillZoom: 1,
+    introStillX: 50,
+    introStillY: 50,
+    introMotion: "zoom-in",
     titleCardDurationSeconds: 0,
     outputDurationSeconds: 0,
     renderSignature: "",
@@ -3007,6 +3013,10 @@ function normalizeSavedNewsProject(
         : null,
     introSourceId:
       typeof saved.introSourceId === "string" ? saved.introSourceId : "",
+    introStillFit:
+      saved.introStillFit === "contain" || saved.introStillFit === "cover"
+        ? saved.introStillFit
+        : undefined,
     introMotion: normalizeNewsMediaMotion(saved.introMotion, "zoom-in"),
     introStillZoom: Number.isFinite(saved.introStillZoom)
       ? saved.introStillZoom
@@ -3087,34 +3097,36 @@ function productionFormatKey(
     : "single-range"
 }
 
+function reportStepLabel(step: NewsClipStep) {
+  if (step === "issue") return "원문 내용 파악"
+  if (step === "angles") return "핵심 주제 선택"
+  if (step === "script") return "대본 작성"
+  if (step === "preview") return "영상 검수"
+  if (step === "final") return "최종본"
+  return "원문 내용 파악"
+}
+
 function stepIndex(step: NewsClipStep) {
   return NEWS_CLIP_STEPS.findIndex((item) => item.id === step)
 }
 
-function nextReviewStep(
-  step: NewsClipStep,
-  productionMode: NewsClipProductionMode
-): NewsClipStep {
-  if (step === "script")
-    return productionMode === "report" ? "direction" : "preview"
+function nextReviewStep(step: NewsClipStep): NewsClipStep {
+  if (step === "script") return "preview"
   if (step === "direction") return "preview"
   if (step === "preview") return "final"
   return "final"
 }
 
-function visibleNewsClipSteps(productionMode: NewsClipProductionMode) {
+function visibleNewsClipSteps() {
   return NEWS_CLIP_STEPS.filter(
     (item) =>
       item.id !== "source" &&
-      (productionMode === "report" || item.id !== "direction")
+      item.id !== "direction"
   )
 }
 
-function visibleWorkflowStep(
-  step: NewsClipStep,
-  productionMode: NewsClipProductionMode
-): NewsClipStep {
-  if (step === "direction" && productionMode !== "report") return "preview"
+function visibleWorkflowStep(step: NewsClipStep): NewsClipStep {
+  if (step === "direction") return "preview"
   // 원본 선택은 이슈 단계 안의 내부 과정으로만 두고 사이드바에는 노출하지 않는다.
   if (step === "source") return "issue"
   return step

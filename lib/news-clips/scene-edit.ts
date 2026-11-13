@@ -66,3 +66,30 @@ export function clampSceneSourceRange(
     end: Math.round(Math.min(safeDuration, end) * 1000) / 1000,
   }
 }
+
+/**
+ * 보도형 자료화면은 사용자가 고른 시작점을 첫 프레임으로 유지한 채
+ * TTS/합친 장면 길이만큼 종료점만 뒤로 늘린다. 원본 끝을 넘으면 FFmpeg가
+ * 마지막 프레임을 채우며, 시작점을 임의로 앞당기지 않는다.
+ */
+export function extendSceneSourceRangeFromStart(
+  scene: Pick<NewsReportScene, "sourceStart" | "sourceEnd">,
+  requiredDuration: number,
+  sourceDuration: number
+) {
+  const clamped = clampSceneSourceRange(scene, sourceDuration)
+  const duration = Math.max(
+    0.1,
+    Number.isFinite(requiredDuration) ? requiredDuration : 0.1
+  )
+  return {
+    start: clamped.start,
+    end:
+      Math.round(
+        Math.min(
+          Math.max(0.1, sourceDuration),
+          Math.max(clamped.end, clamped.start + duration)
+        ) * 1000
+      ) / 1000,
+  }
+}

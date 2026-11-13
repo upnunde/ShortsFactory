@@ -49,8 +49,14 @@ export function localizeLockedSubtitleCues(
 export function preservePreviewSubtitleEdits(
   current: SubtitleCue[],
   rendered: SubtitleCue[] | undefined,
-  timingsLocked: boolean
+  timingsLocked: boolean,
+  options: { acceptRenderedLockedTimings?: boolean } = {}
 ) {
-  if (timingsLocked || !rendered?.length) return current
+  if (!rendered?.length) return current
+  if (timingsLocked) {
+    // 보도형은 렌더 서버가 기존 문구·줄바꿈을 보존한 채 실제 TTS 단어
+    // 시각만 갱신한다. 이 경우 예전 잠긴 시간을 다시 덮어쓰지 않는다.
+    return options.acceptRenderedLockedTimings === true ? rendered : current
+  }
   return mergeEditedSubtitleText(rendered, current, { trustExactId: true })
 }

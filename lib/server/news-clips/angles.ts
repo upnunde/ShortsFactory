@@ -23,6 +23,7 @@ export async function extractNewsAngles(
     sourceTitle?: string
     issueTitle?: string
     directSource?: boolean
+    focus?: string
   }
 ): Promise<NewsAngleOption[]> {
   const fullTranscript = parseTranscript(transcriptText)
@@ -52,6 +53,9 @@ export async function extractNewsAngles(
       options.directSource
         ? "사용자가 지정한 원본 영상이다. 영상 내용 자체를 기준으로 각도를 뽑는다."
         : "선택된 이슈가 있으면 그 이슈와 연결되는 각도를 우선한다.",
+      options.focus?.trim()
+        ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. 원본에서 실제로 확인되는 내용 중 focus와 의미가 가까운 주장·근거·발언을 최우선으로 다시 요약한다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함하되, 원본에 없는 내용은 만들지 않는다."
+        : "",
       options.productionMode === "buildup2"
         ? "빌드업형: 짧은 TTS 서두에서 원본 핵심 발언으로 자연스럽게 넘길 수 있는 각도를 우선한다."
         : "보도형: 짧은 논평 대본으로 풀어낼 수 있는 각도를 우선한다.",
@@ -62,6 +66,7 @@ export async function extractNewsAngles(
       sourceTitle: options.sourceTitle ?? "",
       issueTitle: options.issueTitle ?? "",
       directSource: options.directSource === true,
+      focus: options.focus?.trim() ?? "",
       transcript,
     }),
     1400
