@@ -1,10 +1,12 @@
 import type { NewsAngleOption } from "./angles.ts"
 import type { RecommendedNewsIssue } from "./issues.ts"
 import { isPrimarilyKorean } from "./language.ts"
+import { nextKoreaUploadSlot } from "../youtube-metadata.ts"
 
 export type ProjectType = "character" | "news_clip"
 
 export type NewsClipProductionMode = "report" | "buildup2"
+export type NewsSourceSelectionMode = "single-range" | "video-summary"
 export type NewsPreviewPart = "all" | "intro" | "lead" | "body" | "outro"
 
 export type NewsChannelProfile = {
@@ -17,7 +19,9 @@ export type NewsChannelProfile = {
   createdAt: string
 }
 
-export type NewsSourceKind = "search" | "youtube" | "upload"
+export type NewsSourceKind = "search" | "youtube" | "upload" | "web"
+
+export type NewsSourceMediaType = "video" | "image"
 
 export type NewsSearchChannel = {
   id: string
@@ -59,6 +63,16 @@ export type NewsSource = {
   requiresUpload: boolean
   commentCount: number
   searchMetrics: NewsCandidateMetrics | null
+  /** 원본 자료의 매체 유형. 레거시 저장본은 video로 해석한다. */
+  mediaType?: NewsSourceMediaType
+  /** 공개 자료 공급자와 라이선스 추적 정보. */
+  provider?: string
+  pageUrl?: string
+  thumbnailUrl?: string
+  creator?: string
+  licenseName?: string
+  licenseUrl?: string
+  attribution?: string
 }
 
 export type NewsSourceSearchState = {
@@ -168,6 +182,9 @@ export type SubtitleCue = {
   sceneId?: string
   start: number
   end: number
+  /** 원본 음성 자막이 가리키는 소스 영상의 절대 타임코드. */
+  sourceStart?: number
+  sourceEnd?: number
   text: string
   emphasis: string[]
   emphasisColor: "yellow" | "green"
@@ -176,16 +193,43 @@ export type SubtitleCue = {
   /** 개별 초기화를 위해 마지막 자동 생성 문구·강조를 보관한다. */
   originalText?: string
   originalEmphasis?: string[]
+  /** `다음과 합치기` 직전의 두 자막. 합치기 취소 시 시간까지 복원한다. */
+  mergedFrom?: SubtitleCue[]
 }
+
+/** 보도 대본의 의미 파트. 배열 순서로 서두·본문을 추론하지 않는다. */
+export type NewsReportScenePart = "lead" | "body" | "outro"
+
+/** 장면의 기준 음성. 보도형은 tts, 빌드업 직접 발언만 original을 쓴다. */
+export type NewsReportAudioMode = "tts" | "original"
+
+/** 음성과 독립된 화면 소스의 역할. */
+export type NewsReportVisualMode = "source" | "supporting" | "still" | "quote"
+
+export type NewsMediaMotion =
+  | "none"
+  | "zoom-in"
+  | "zoom-out"
+  | "pan-left"
+  | "pan-right"
 
 export type NewsReportScene = {
   id: string
   narration: string
+  /** 신규 장면은 반드시 저장하고, 없는 값은 레거시 장면으로 해석한다. */
+  part?: NewsReportScenePart
+  /** legacy visual과 분리된 음성 정책. */
+  audioMode?: NewsReportAudioMode
+  /** legacy visual과 분리된 화면 정책. */
+  visualMode?: NewsReportVisualMode
+  /** 레거시 프로젝트·렌더러 호환 필드. */
   visual: "source" | "quote"
   sourceId?: string
   sourceStart: number
   sourceEnd: number
   crop?: CropPosition
+  /** 첨부 이미지·영상에 적용하는 약 5% 미세 화면 움직임. */
+  motion?: NewsMediaMotion
 }
 
 export type CropPosition = {
@@ -266,6 +310,10 @@ export type NewsClipProject = {
   createdAt: string
   updatedAt: string
   productionMode: NewsClipProductionMode
+  /** 같은 빌드업 렌더 파이프라인에서 원본을 고르는 방식을 구분한다. */
+  sourceSelectionMode: NewsSourceSelectionMode
+  /** 영상 요약형에서 검수·대본 생성의 기준이 되는 원본 전체 요약. */
+  sourceOverview: string
   /**
    * 빌드업형 편집 스냅샷의 일련번호. 대본·자막·구간·스타일이 바뀌면 증가한다.
    * 미리보기와 최종본은 이 번호를 저장해 예전 영상이 현재 편집본과 섞이지 않게 한다.
@@ -286,6 +334,8 @@ export type NewsClipProject = {
   titleOptions: string[]
   reportScript: string
   supplementalContext: string
+  /** 인트로·서두·본문·마무리에 공통으로 표시하는 프로젝트 출처. */
+  sourceCredit: string
   reportScenes: NewsReportScene[]
   detectedSilences: RemovedRange[]
   removedRanges: RemovedRange[]
@@ -299,10 +349,14 @@ export type NewsClipProject = {
   titleVolume: number
   sourceVolume: number
   quoteVolume: number
+  /** 인트로 화면에 별도로 지정한 이미지·영상 소스. 비어 있으면 원본에서 자동 선택한다. */
+  introSourceId: string
   introStillTimeSeconds: number | null
   introStillZoom: number
   introStillX: number
   introStillY: number
+  /** 첨부 인트로 이미지·영상의 미세 화면 움직임. */
+  introMotion: NewsMediaMotion
   titleCardDurationSeconds: number
   outputDurationSeconds: number
   finalPlaybackRate: number
@@ -317,6 +371,7 @@ export type NewsClipProject = {
   previewSignature: string
   renderSettingsKey: string
   thumbnailUrl: string
+  youtubeScheduledAt: string
   youtubeVideoId: string
   youtubeUploadUrl: string
   metadata: { youtubeTitle: string; description: string; tags: string[] }
@@ -463,6 +518,8 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     createdAt: now,
     updatedAt: now,
     productionMode: "buildup2",
+    sourceSelectionMode: "single-range",
+    sourceOverview: "",
     editorialRevision: 1,
     previewRevision: 0,
     finalRevision: 0,
@@ -479,22 +536,25 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     titleOptions: [],
     reportScript: "",
     supplementalContext: "",
+    sourceCredit: "",
     reportScenes: [],
     detectedSilences: [],
     removedRanges: [],
     keepRanges: [],
     subtitles: [],
     subtitleTimingsLocked: false,
-    crop: { x: 50, y: 50, zoom: 1.02, faceTracking: false },
+    crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
     bgmEnabled: true,
     bgmVolume: 0.12,
     titleVolume: 1,
     sourceVolume: 1,
     quoteVolume: 1,
+    introSourceId: "",
     introStillTimeSeconds: null,
     introStillZoom: 1,
     introStillX: 50,
     introStillY: 50,
+    introMotion: "zoom-in",
     titleCardDurationSeconds: 0,
     outputDurationSeconds: 0,
     finalPlaybackRate: 1.1,
@@ -508,6 +568,7 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     previewSignature: "",
     renderSettingsKey: "",
     thumbnailUrl: "",
+    youtubeScheduledAt: nextKoreaUploadSlot(),
     youtubeVideoId: "",
     youtubeUploadUrl: "",
     metadata: { youtubeTitle: "", description: "", tags: [] },
@@ -523,6 +584,8 @@ export function resetNewsClipProjectProgress(
     id: project.id,
     createdAt: project.createdAt,
     productionMode: project.productionMode,
+    sourceSelectionMode: project.sourceSelectionMode,
+    youtubeScheduledAt: project.youtubeScheduledAt,
     selectedIssue,
   }
 }

@@ -114,7 +114,9 @@ export function nextKoreaUploadSlot(now = new Date()) {
 
 export function scheduleForUpload(value: string, now = new Date()) {
   const at = koreaInstant(value)
-  if (!inKoreaUploadWindow(value) || at <= now.getTime()) {
+  // 오전 6~9시는 권장 공개 시간일 뿐, 사용자가 고른 미래 시각을
+  // 강제로 다음 날 오전 7시로 바꾸면 안 된다.
+  if (!at || at <= now.getTime()) {
     return nextKoreaUploadSlot(now)
   }
   return value
@@ -125,7 +127,8 @@ export function koreaPublishAt(value: string) {
   if (!match) {
     return null
   }
-  return `${match[1]}:00+09:00`
+  const instant = new Date(`${match[1]}:00+09:00`)
+  return Number.isNaN(instant.getTime()) ? null : instant.toISOString()
 }
 
 export function buildSrt(scenes: Scene[]) {

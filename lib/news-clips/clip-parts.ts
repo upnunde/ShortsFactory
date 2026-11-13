@@ -2,6 +2,7 @@ import { isEndCtaScene } from "./report.ts"
 import type {
   NewsClipProductionMode,
   NewsReportScene,
+  NewsReportScenePart,
   SubtitleCue,
 } from "./types.ts"
 
@@ -22,8 +23,7 @@ export function removeTrailingPartText(value: string, trailing: string) {
 export function removeTrailingCtaFromLead(value: string, trailing = "") {
   const source = removeTrailingPartText(value, trailing)
   const sentences =
-    source.match(/[^.!?。！？]+[.!?。！？]?/g)?.map((item) => item.trim()) ??
-    []
+    source.match(/[^.!?。！？]+[.!?。！？]?/g)?.map((item) => item.trim()) ?? []
   if (!sentences.length) return source
   const tailStart = Math.max(0, sentences.length - 3)
   let cutIndex = -1
@@ -39,11 +39,7 @@ export function removeTrailingCtaFromLead(value: string, trailing = "") {
       )
     if (!question && !request) continue
     cutIndex = index
-    if (
-      request &&
-      index > tailStart &&
-      /[?？]$/.test(sentences[index - 1]!)
-    ) {
+    if (request && index > tailStart && /[?？]$/.test(sentences[index - 1]!)) {
       cutIndex = index - 1
     }
     break
@@ -52,31 +48,39 @@ export function removeTrailingCtaFromLead(value: string, trailing = "") {
 }
 
 /** 본편 장면을 서두·본문·마무리로 나눈다. 인트로(제목 카드)는 별도. */
+export function reportScenePart(
+  scene: NewsReportScene,
+  productionMode: NewsClipProductionMode
+): NewsReportScenePart {
+  if (isEndCtaScene(scene)) return "outro"
+  if (scene.part) return scene.part
+  if (productionMode === "buildup2") {
+    return scene.id === "buildup2-lead" ? "lead" : "body"
+  }
+  // 신규 보도 장면은 part를 저장한다. 아래 ID 판정은 기존 저장본 전용이며
+  // 배열의 첫 항목을 서두로 간주하지 않아 재정렬해도 역할이 바뀌지 않는다.
+  return /^(?:report-)?lead(?:-|$)/.test(scene.id) ||
+    scene.id === "report-scene-1"
+    ? "lead"
+    : "body"
+}
+
+/** 본편 장면을 서두·본문·마무리로 나눈다. 인트로(제목 카드)는 별도. */
 export function splitScenesByClipPart(
   scenes: NewsReportScene[],
   productionMode: NewsClipProductionMode
 ) {
-  const outro = scenes.filter((scene) => isEndCtaScene(scene))
-  const main = scenes.filter((scene) => !isEndCtaScene(scene))
-
-  if (productionMode === "buildup2") {
-    return {
-      lead: main.filter((scene) => scene.id === "buildup2-lead"),
-      body: main.filter((scene) => scene.id !== "buildup2-lead"),
-      outro,
-    }
+  return {
+    lead: scenes.filter(
+      (scene) => reportScenePart(scene, productionMode) === "lead"
+    ),
+    body: scenes.filter(
+      (scene) => reportScenePart(scene, productionMode) === "body"
+    ),
+    outro: scenes.filter(
+      (scene) => reportScenePart(scene, productionMode) === "outro"
+    ),
   }
-
-  // 보도형: 장면이 2개 이상이면 첫 장면을 서두, 나머지를 본문으로 둔다.
-  if (main.length >= 2) {
-    return {
-      lead: [main[0]!],
-      body: main.slice(1),
-      outro,
-    }
-  }
-
-  return { lead: [] as NewsReportScene[], body: main, outro }
 }
 
 export function isLeadSceneId(

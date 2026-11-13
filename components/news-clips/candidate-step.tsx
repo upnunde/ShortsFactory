@@ -127,7 +127,7 @@ export function NewsClipCandidateStep({
         </Card>
       ) : null}
 
-      <div className="flex justify-end gap-2">
+      <div className="sticky bottom-0 z-20 -mx-6 flex justify-end gap-2 border-t border-separator bg-background/95 px-6 py-3 backdrop-blur">
         <Button variant="outline" onPress={onBack}>
           이전
         </Button>

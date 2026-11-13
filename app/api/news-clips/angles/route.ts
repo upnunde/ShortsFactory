@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server"
 
 import { isPrimarilyKorean } from "@/lib/news-clips/language"
-import { extractNewsAngles } from "@/lib/server/news-clips/angles"
 import { parseTranscript } from "@/lib/news-clips/transcript"
+import { transcriptHasExplicitTimestamps } from "@/lib/news-clips/transcript-storage"
+import { extractNewsAngles } from "@/lib/server/news-clips/angles"
 import { newsChannelId } from "@/lib/server/news-clips/channels"
 import { readNewsClipSettings } from "@/lib/server/news-clips/settings"
 import {
@@ -13,6 +14,8 @@ import {
 } from "@/lib/server/news-clips/source-store"
 import { transcribeWithLocalWhisper } from "@/lib/server/news-clips/whisper"
 import { detectAudioSilence } from "@/lib/server/news-clips/vad"
+import { extractVideoSummaryPlan } from "@/lib/server/news-clips/video-summary"
+import { videoSummaryPlanToAngleOptions } from "@/lib/news-clips/video-summary"
 
 export const runtime = "nodejs"
 
@@ -21,11 +24,17 @@ export async function POST(request: Request) {
     sourceId?: unknown
     profileId?: unknown
     productionMode?: unknown
+    sourceSelectionMode?: unknown
     issueTitle?: unknown
     directSource?: unknown
   } | null
   const productionMode =
     body?.productionMode === "buildup2" ? "buildup2" : "report"
+  const sourceSelectionMode =
+    productionMode === "buildup2" &&
+    body?.sourceSelectionMode === "video-summary"
+      ? "video-summary"
+      : "single-range"
   const directSource = body?.directSource === true
   const sourceId = typeof body?.sourceId === "string" ? body.sourceId : ""
   let source = await readSource(sourceId)
@@ -46,9 +55,13 @@ export async function POST(request: Request) {
   }
   await readNewsClipSettings(newsChannelId(body?.profileId))
   let transcript = (await readStoredTranscript(sourceId)) || ""
-  // 빌드업형의 원본 발언 자막은 영상 자막의 롤링 구간이 아니라
-  // 실제 음성에서 얻은 단어 타임스탬프를 우선한다.
-  if (productionMode === "buildup2" && source.localFile) {
+  // 원본 SRT/VTT가 있으면 전체 영상 Whisper 캐시로 덮어쓰지 않는다.
+  // 빌드업형인데 시간 정보가 전혀 없을 때만 단어 시간 STT를 만든다.
+  if (
+    productionMode === "buildup2" &&
+    source.localFile &&
+    !transcriptHasExplicitTimestamps(transcript)
+  ) {
     try {
       transcript = await transcribeWithLocalWhisper(source.localFile, source.id)
       await writeStoredTranscript(source.id, transcript)
@@ -85,6 +98,30 @@ export async function POST(request: Request) {
     )
   }
   try {
+    if (sourceSelectionMode === "video-summary") {
+      const plan = await extractVideoSummaryPlan(transcript, {
+        sourceId: source.id,
+        sourceTitle: source.title,
+      })
+      const angles = videoSummaryPlanToAngleOptions(plan)
+      if (angles.length === 0) {
+        return NextResponse.json(
+          { message: "전체 영상에서 요약 후보를 찾지 못했습니다." },
+          { status: 422 }
+        )
+      }
+      const detectedSilences = await detectAudioSilence(source.localFile).catch(
+        () => []
+      )
+      return NextResponse.json({
+        transcript: parsedTranscript,
+        angles,
+        sourceOverview: plan.overallSummary,
+        detectedSilences,
+        sourceChannel: source.channel,
+        sourceTitle: source.title,
+      })
+    }
     const angles = await extractNewsAngles(transcript, {
       productionMode,
       sourceTitle: source.title,
@@ -92,9 +129,9 @@ export async function POST(request: Request) {
         typeof body?.issueTitle === "string" ? body.issueTitle.trim() : "",
       directSource,
     })
-    if (angles.length < 3) {
+    if (angles.length === 0) {
       return NextResponse.json(
-        { message: "원본에서 핵심 각도를 충분히 뽑지 못했습니다." },
+        { message: "원본에서 선택할 핵심 내용을 찾지 못했습니다." },
         { status: 422 }
       )
     }
@@ -110,7 +147,12 @@ export async function POST(request: Request) {
     })
   } catch {
     return NextResponse.json(
-      { message: "핵심 각도를 만들지 못했습니다." },
+      {
+        message:
+          sourceSelectionMode === "video-summary"
+            ? "영상 전체 요약을 만들지 못했습니다. 다시 분석해 주세요."
+            : "핵심 각도를 만들지 못했습니다.",
+      },
       { status: 500 }
     )
   }

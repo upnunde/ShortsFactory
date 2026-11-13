@@ -12,6 +12,10 @@ import {
   synthesizeNewsSpeech,
 } from "@/lib/server/news-clips/tts-provider"
 import type { NewsTtsProvider } from "@/lib/news-clips/types"
+import {
+  validRenderJobId,
+  writeNewsRenderProgress,
+} from "@/lib/server/news-clips/render-progress"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -50,7 +54,12 @@ export async function POST(request: Request) {
     typecastVoiceId?: unknown
     ratePercent?: unknown
     text?: unknown
+    jobId?: unknown
   } | null
+  const jobId = validRenderJobId(body?.jobId) ? body.jobId : ""
+  const progress = (percent: number, label: string) =>
+    jobId ? writeNewsRenderProgress(jobId, percent, label) : Promise.resolve()
+  await progress(5, "음성 요청 확인 중")
   const text =
     typeof body?.text === "string" ? body.text.trim().slice(0, 500) : ""
   if (!text) {
@@ -82,6 +91,7 @@ export async function POST(request: Request) {
   }).catch((error: unknown) =>
     error instanceof Error ? error : new Error("typecast-failed")
   )
+  await progress(30, "음성 제공자 확인 완료")
   if (provider instanceof Error) {
     return NextResponse.json(
       {
@@ -105,8 +115,10 @@ export async function POST(request: Request) {
   const output = path.join(previewDir, `${key}.wav`)
   try {
     await mkdir(previewDir, { recursive: true })
+    await progress(45, "음성 캐시 확인 중")
     let usedProvider = provider.id
     await access(output).catch(async () => {
+      await progress(55, "음성 생성 중")
       usedProvider = await synthesizeNewsSpeech(
         text,
         ratePercent,
@@ -114,6 +126,7 @@ export async function POST(request: Request) {
         provider
       )
     })
+    await progress(100, "완료")
     return NextResponse.json({
       key,
       url: `/api/news-clips/voice-preview?key=${key}`,

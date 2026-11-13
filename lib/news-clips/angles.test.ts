@@ -39,15 +39,12 @@ test("구간이 너무 짧으면 locked range가 아니다", () => {
 })
 
 test("사용 구간과 겹치는 모든 전사 문장을 시간순으로 반환한다", () => {
-  const segments = transcriptForAngle(
-    { sourceStart: 10, sourceEnd: 20 },
-    [
-      { id: "after", text: "범위 뒤", start: 20, end: 24 },
-      { id: "middle", text: "두 번째 문장", start: 14, end: 18 },
-      { id: "edge", text: "첫 번째 문장", start: 8, end: 12 },
-      { id: "before", text: "범위 앞", start: 2, end: 8 },
-    ]
-  )
+  const segments = transcriptForAngle({ sourceStart: 10, sourceEnd: 20 }, [
+    { id: "after", text: "범위 뒤", start: 20, end: 24 },
+    { id: "middle", text: "두 번째 문장", start: 14, end: 18 },
+    { id: "edge", text: "첫 번째 문장", start: 8, end: 12 },
+    { id: "before", text: "범위 앞", start: 2, end: 8 },
+  ])
 
   assert.deepEqual(
     segments.map((segment) => segment.id),
@@ -55,12 +52,53 @@ test("사용 구간과 겹치는 모든 전사 문장을 시간순으로 반환�
   )
 })
 
+test("선택 시작 전에 발음이 끝난 자막 tail은 2번 전체 내용에 포함하지 않는다", () => {
+  const transcript = [
+    {
+      id: "previous",
+      text: "목격했습니다.",
+      start: 67.7,
+      end: 71.44,
+      words: [{ text: "목격했습니다.", start: 67.7, end: 70.3 }],
+    },
+    {
+      id: "selected",
+      text: "2026년 11월 6일",
+      start: 70.64,
+      end: 73.94,
+      words: [
+        { text: "2026년", start: 70.64, end: 72.04 },
+        { text: "11월", start: 72.04, end: 73.44 },
+        { text: "6일", start: 73.44, end: 73.94 },
+      ],
+    },
+  ]
+  const range = { sourceStart: 70.3, sourceEnd: 73.94 }
+
+  assert.deepEqual(
+    transcriptForAngle(range, transcript).map((segment) => segment.id),
+    ["selected"]
+  )
+  const locked = lockAngleRangeToTranscript(
+    {
+      id: "date",
+      title: "날짜 발언",
+      summary: "설명",
+      keywords: [],
+      evidence: "",
+      ...range,
+    },
+    transcript
+  )
+  assert.equal(locked.sourceStart, 70.64)
+  assert.equal(locked.sourceEnd, 73.94)
+})
+
 test("사용 구간이 확정되지 않으면 전사를 표시하지 않는다", () => {
   assert.deepEqual(
-    transcriptForAngle(
-      { sourceStart: 10, sourceEnd: 11 },
-      [{ id: "one", text: "문장", start: 10, end: 11 }]
-    ),
+    transcriptForAngle({ sourceStart: 10, sourceEnd: 11 }, [
+      { id: "one", text: "문장", start: 10, end: 11 },
+    ]),
     []
   )
 })

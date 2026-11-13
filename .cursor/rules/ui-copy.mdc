@@ -11,3 +11,7 @@ alwaysApply: false
 - Titles and labels should name the thing; do not restate what the controls already make obvious.
 - Disable buttons when needed instead of explaining why in yellow warning text.
 - Keep error `note`s short and factual only when an action actually failed.
+
+# Layout
+
+- Card / Modal / AlertDialog footers with action buttons are always right-aligned (`justify-end`). Never leave footer buttons left-aligned by default.

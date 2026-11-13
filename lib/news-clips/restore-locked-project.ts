@@ -10,6 +10,19 @@ export type LockedEditorialSnapshot = {
   subtitles: SubtitleCue[]
 }
 
+/** 4번에서 자막을 확정한 뒤에는 렌더 중 STT가 승인 문구를 다시 만들지 않는다. */
+export function shouldRefreshQuoteTranscripts(
+  project: Pick<
+    NewsClipProject,
+    "productionMode" | "subtitleTimingsLocked" | "subtitles"
+  >
+) {
+  return (
+    project.productionMode === "buildup2" &&
+    !(project.subtitleTimingsLocked && project.subtitles.length > 0)
+  )
+}
+
 /**
  * 4번에서 확정한 장면·자막은 새로고침 마이그레이션의 입력이 아니다.
  * 장면 ID·원본 구간·크롭과 자막 ID·문구·시간을 그대로 복제한다.

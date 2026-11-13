@@ -21,6 +21,7 @@ import {
   titleLineFontSize,
   titleLineFits,
   titleLineRenderMetrics,
+  undoSubtitleCueMerge,
 } from "./text-layout.ts"
 import {
   clearLegacyAutomaticCaptionBoundaries,
@@ -210,17 +211,17 @@ test("기간을 뜻하는 두 자리 연도는 네 자리 연도로 바꾸지 �
   assert.equal(segment?.text, "26년 동안 이어졌어.")
 })
 
-test("자동 자막 폭은 렌더 직전 단어 묶음에도 같은 기준을 제공한다", () => {
+test("자동 자막도 FFmpeg 실제 한 줄 폭을 사용한다", () => {
   const limit = automaticSubtitleLineCharacterLimit(
     defaultNewsClipSettings.bodySubtitleText
   )
-  assert.ok(limit >= 4)
-  assert.ok(
-    limit < titleLineCharacterLimit(defaultNewsClipSettings.bodySubtitleText)
+  assert.equal(
+    limit,
+    subtitleLineCharacterLimit(defaultNewsClipSettings.bodySubtitleText)
   )
 })
 
-test("수동 자막 편집은 자동 생성 여유 폭이 아닌 FFmpeg 전체 폭을 허용한다", () => {
+test("자동 생성과 수동 편집은 같은 실제 한 줄 폭을 사용한다", () => {
   const automatic = automaticSubtitleLineCharacterLimit(
     defaultNewsClipSettings.bodySubtitleText
   )
@@ -228,7 +229,7 @@ test("수동 자막 편집은 자동 생성 여유 폭이 아닌 FFmpeg 전체 �
     defaultNewsClipSettings.bodySubtitleText
   )
 
-  assert.ok(editable > automatic)
+  assert.equal(editable, automatic)
 })
 
 test("자동 자막은 한 줄 최대 글자 단위를 넘기지 않고 다음 칸으로 배치한다", () => {
@@ -242,6 +243,8 @@ test("자동 자막은 한 줄 최대 글자 단위를 넘기지 않고 다음 �
         id: "long-auto-caption",
         start: 0,
         end: 8,
+        sourceStart: 100,
+        sourceEnd: 108,
         text: original,
         emphasis: [],
         emphasisColor: "yellow",
@@ -255,6 +258,17 @@ test("자동 자막은 한 줄 최대 글자 단위를 넘기지 않고 다음 �
     cues.every((cue) =>
       cue.text.split("\n").every((line) => [...line].length <= limit)
     )
+  )
+  assert.ok(
+    cues.every(
+      (cue) =>
+        cue.sourceStart === 100 + cue.start && cue.sourceEnd === 100 + cue.end
+    )
+  )
+  assert.ok(
+    cues.slice(1).every((cue, index) => {
+      return cue.sourceStart === cues[index]?.sourceEnd
+    })
   )
   assert.equal(
     cues
@@ -273,6 +287,8 @@ test("같은 장면의 다음 자막을 합치면 전체 시간과 수정 문구
         sceneId: "scene-date",
         start: 1,
         end: 2,
+        sourceStart: 101,
+        sourceEnd: 102,
         text: "26년",
         emphasis: [],
         emphasisColor: "yellow",
@@ -282,6 +298,8 @@ test("같은 장면의 다음 자막을 합치면 전체 시간과 수정 문구
         sceneId: "scene-date",
         start: 2.1,
         end: 3.4,
+        sourceStart: 102.1,
+        sourceEnd: 103.4,
         text: "11월 6일",
         emphasis: [],
         emphasisColor: "yellow",
@@ -295,7 +313,30 @@ test("같은 장면의 다음 자막을 합치면 전체 시간과 수정 문구
   assert.equal(merged[0]?.text.replace(/\n/g, " "), "2026년 11월 6일")
   assert.equal(merged[0]?.start, 1)
   assert.equal(merged[0]?.end, 3.4)
+  assert.equal(merged[0]?.sourceStart, 101)
+  assert.equal(merged[0]?.sourceEnd, 103.4)
   assert.equal(merged[0]?.edited, true)
+
+  const restored = undoSubtitleCueMerge(merged, "date-1")
+  assert.deepEqual(
+    restored.map(({ id, start, end, sourceStart, sourceEnd }) => ({
+      id,
+      start,
+      end,
+      sourceStart,
+      sourceEnd,
+    })),
+    [
+      { id: "date-1", start: 1, end: 2, sourceStart: 101, sourceEnd: 102 },
+      {
+        id: "date-2",
+        start: 2.1,
+        end: 3.4,
+        sourceStart: 102.1,
+        sourceEnd: 103.4,
+      },
+    ]
+  )
 })
 
 test("전사 오타 수정은 원본 단어 타임코드를 유지한다", () => {
@@ -546,6 +587,33 @@ test("검수된 자동 구간과 사용자 수정 구간은 재전사 대상에�
     ),
     false
   )
+})
+
+test("표시만 늘어난 이전 자막 tail을 검수 범위의 실제 발화로 보지 않는다", () => {
+  const previous = {
+    id: "previous-caption",
+    text: "목격했습니다.",
+    start: 67.7,
+    end: 71.44,
+    speaker: "speaker-1",
+    words: [{ text: "목격했습니다.", start: 67.7, end: 70.3 }],
+    captionBoundaryAfter: true,
+    captionBoundarySource: "automatic" as const,
+  }
+
+  assert.equal(
+    transcriptRangeIsReviewed([previous], { start: 70.31, end: 70.6 }),
+    false
+  )
+
+  const legacy = { ...previous, captionBoundarySource: undefined }
+  const segments = [legacy]
+  const cleaned = clearLegacyAutomaticCaptionBoundaries(segments, {
+    start: 70.31,
+    end: 70.6,
+  })
+  assert.equal(cleaned, segments)
+  assert.equal(cleaned[0]?.captionBoundaryAfter, true)
 })
 
 test("겹친 문구를 합칠 때 중복을 없애고 오른쪽 발화 시간을 쓴다", () => {
@@ -918,7 +986,7 @@ test("한 줄을 넘는 문장은 단어를 보존한 두 줄 자막으로 구�
   assert.equal(cues[1].end, 6)
 })
 
-test("화면에 들어가더라도 한 줄 최대 글자 수를 넘으면 자동 줄바꿈한다", () => {
+test("실제 한 줄 폭 안의 자연스러운 표현은 한 줄로 유지한다", () => {
   const cues = normalizeSubtitleCues(
     [
       {
@@ -939,10 +1007,10 @@ test("화면에 들어가더라도 한 줄 최대 글자 수를 넘으면 자동
   )
 
   assert.equal(cues.length, 1)
-  assert.equal(cues[0].text, "2년간 시범\n시행됩니다.")
+  assert.equal(cues[0].text, "2년간 시범 시행됩니다.")
 })
 
-test("첫 미리보기 자막은 수정 여유를 위해 한 줄 최대 폭의 80%만 사용한다", () => {
+test("첫 미리보기 자막도 실제 한 줄 폭과 최대 두 줄을 사용한다", () => {
   const layout = {
     ...defaultNewsClipSettings.bodySubtitleText,
     fontSize: 58,
@@ -962,14 +1030,15 @@ test("첫 미리보기 자막은 수정 여유를 위해 한 줄 최대 폭의 8
     ],
     layout
   )
-  const automaticLimit = Math.floor(titleLineCharacterLimit(layout) * 0.8)
+  const lineLimit = subtitleLineCharacterLimit(layout)
 
   assert.ok(cues.length >= 1)
   assert.ok(
     cues.every((cue) =>
-      cue.text.split("\n").every((line) => [...line].length <= automaticLimit)
+      cue.text.split("\n").every((line) => [...line].length <= lineLimit)
     )
   )
+  assert.ok(cues.every((cue) => cue.text.split("\n").length <= 2))
 })
 
 test("여유 폭을 넘어도 실제 화면에 들어가면 한글 어절을 자르지 않는다", () => {
@@ -997,6 +1066,59 @@ test("여유 폭을 넘어도 실제 화면에 들어가면 한글 어절을 자
   assert.equal(cues[0]?.text.includes("체포되\n셔서"), false)
 })
 
+test("짧은 호흡이어도 의존 서술어 앞에서 끊지 않는다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    fontSize: 75,
+    letterSpacing: -4,
+    width: 1058,
+  }
+  const cues = layoutTimedSubtitleCues(
+    [
+      {
+        id: "caption-natural-clause",
+        start: 0,
+        end: 4,
+        text: "오늘 우리는 이재명 맞서 대한민국을 지키는 것은 이재명입니다.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    layout
+  )
+  const joined = cues.map((cue) => cue.text).join("\n")
+  assert.equal(joined.includes("이재명\n맞서"), false)
+  assert.equal(joined.includes("이재명 맞서"), true)
+  assert.ok(
+    cues.every((cue) =>
+      cue.text
+        .split("\n")
+        .every(
+          (line) =>
+            [...line].length <= automaticSubtitleLineCharacterLimit(layout)
+        )
+    )
+  )
+})
+
+test("명사형 -고와 목적 관형구는 피수식어를 고아 줄로 남기지 않는다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    fontSize: 75,
+    letterSpacing: -4,
+    width: 1058,
+  }
+
+  assert.equal(
+    reflowSubtitleTextPreservingContent("대형 사고 원인을 밝히기 위해", layout),
+    "대형 사고 원인을\n밝히기 위해"
+  )
+  assert.equal(
+    reflowSubtitleTextPreservingContent("탈옥시키기 위한 법입니다.", layout),
+    "탈옥시키기\n위한 법입니다."
+  )
+})
+
 test("확정 자막은 수정한 문구를 보존하면서 FFmpeg 폭에 맞게 재배치한다", () => {
   const layout = {
     ...defaultNewsClipSettings.bodySubtitleText,
@@ -1015,7 +1137,7 @@ test("확정 자막은 수정한 문구를 보존하면서 FFmpeg 폭에 맞게 
   const limit = automaticSubtitleLineCharacterLimit(layout)
 
   assert.equal(anger, "우리를 분노케 한\n것은 이재명입니다.")
-  assert.equal(together, "이 자리에\n함께했습니다.")
+  assert.equal(together, "이 자리에 함께했습니다.")
   assert.ok(
     [anger, together].every((caption) =>
       caption.split("\n").every((line) => [...line].length <= limit)

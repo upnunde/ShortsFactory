@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import { access, mkdir, readFile } from "node:fs/promises"
 import path from "node:path"
 
+import { paddedWhisperRange } from "@/lib/news-clips/whisper-range"
 import { ffmpegBin } from "@/lib/server/ffmpeg-bin"
 
 type WhisperJson = {
@@ -97,10 +98,13 @@ export async function transcribeRangeWithLocalWhisper(
   sourceFile: string,
   projectId: string,
   range: { start: number; end: number },
-  initialPrompt = ""
+  initialPrompt = "",
+  options: { paddingSeconds?: number } = {}
 ) {
-  const start = Math.max(0, Math.min(range.start, range.end) - 1.5)
-  const end = Math.max(start + 0.5, Math.max(range.start, range.end) + 1.5)
+  const { start, end } = paddedWhisperRange(
+    range,
+    options.paddingSeconds ?? 1.5
+  )
   const key = createHash("sha256")
     .update(JSON.stringify({ sourceFile, start, end, initialPrompt }))
     .digest("hex")

@@ -5,14 +5,15 @@ import { NextResponse } from "next/server"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import { isPrimarilyKorean } from "@/lib/news-clips/language"
 import { scoreSourceRelevance } from "@/lib/news-clips/source-relevance"
+import { normalizeSourceAssemblyRanges } from "@/lib/news-clips/source-assembly"
 import { analyzeNewsTranscript } from "@/lib/server/news-clips/analyze"
 import {
   parseTranscript,
   normalizeKoreanRecognitionText,
-  replaceTranscriptRange,
   serializeTranscript,
   updateTranscriptSegmentText,
 } from "@/lib/news-clips/transcript"
+import { selectTranscriptRangeReplacement } from "@/lib/news-clips/transcript-quality"
 import { newsChannelId } from "@/lib/server/news-clips/channels"
 import { readNewsClipSettings } from "@/lib/server/news-clips/settings"
 import {
@@ -28,6 +29,10 @@ import {
   transcribeWithLocalWhisper,
 } from "@/lib/server/news-clips/whisper"
 import { detectAudioSilence } from "@/lib/server/news-clips/vad"
+import {
+  validRenderJobId,
+  writeNewsRenderProgress,
+} from "@/lib/server/news-clips/render-progress"
 import type { RemovedRange } from "@/lib/news-clips/types"
 
 export const runtime = "nodejs"
@@ -52,10 +57,16 @@ export async function POST(request: Request) {
     angleKeywords?: unknown
     angleSourceStart?: unknown
     angleSourceEnd?: unknown
+    angleSourceRanges?: unknown
     previousTitle?: unknown
     previousTitles?: unknown
     previousScript?: unknown
+    jobId?: unknown
   } | null
+  const jobId = validRenderJobId(body?.jobId) ? body.jobId : ""
+  const progress = (percent: number, label: string) =>
+    jobId ? writeNewsRenderProgress(jobId, percent, label) : Promise.resolve()
+  await progress(2, "요청 확인 중")
   const productionMode =
     body?.productionMode === "buildup2" ? "buildup2" : "report"
   const directSource = body?.directSource === true
@@ -72,10 +83,17 @@ export async function POST(request: Request) {
     : []
   const angleSourceStart = Number(body?.angleSourceStart)
   const angleSourceEnd = Number(body?.angleSourceEnd)
-  const lockedAngleRange =
-    Number.isFinite(angleSourceStart) &&
-    Number.isFinite(angleSourceEnd) &&
-    Math.abs(angleSourceEnd - angleSourceStart) >= 3
+  const lockedAngleRanges = normalizeSourceAssemblyRanges(
+    body?.angleSourceRanges
+  )
+  const lockedAngleRange = lockedAngleRanges.length
+    ? {
+        start: lockedAngleRanges[0]!.start,
+        end: lockedAngleRanges.at(-1)!.end,
+      }
+    : Number.isFinite(angleSourceStart) &&
+        Number.isFinite(angleSourceEnd) &&
+        Math.abs(angleSourceEnd - angleSourceStart) >= 3
       ? {
           start: Math.min(angleSourceStart, angleSourceEnd),
           end: Math.max(angleSourceStart, angleSourceEnd),
@@ -92,6 +110,7 @@ export async function POST(request: Request) {
   if (source.requiresUpload && source.originalUrl) {
     source = (await downloadApprovedSource(sourceId)) ?? source
   }
+  await progress(10, "원본 확인 완료")
   const profileId =
     typeof body?.profileId === "string" ? newsChannelId(body.profileId) : ""
   if (!profileId) {
@@ -101,6 +120,7 @@ export async function POST(request: Request) {
     )
   }
   const settings = await readNewsClipSettings(profileId)
+  await progress(15, "설정 확인 완료")
   const settingsKey = newsRenderSettingsKey(settings)
   const supportingSourceIds = Array.isArray(body?.supportingSourceIds)
     ? [
@@ -149,11 +169,17 @@ export async function POST(request: Request) {
     ? createHash("sha256").update(pasted).digest("hex")
     : "stored-transcript"
   const sourceSetKey = [
-    "issue-script-v5-local-range-stt",
+    "issue-script-v7-locked-angle-bounds",
     productionMode,
     directSource ? "direct" : "issue",
     sourceId,
     ...supportingSourceIds,
+    lockedAngleRange
+      ? `${lockedAngleRange.start.toFixed(2)}-${lockedAngleRange.end.toFixed(2)}`
+      : "automatic-range",
+    ...lockedAngleRanges.map(
+      (range) => `${range.start.toFixed(2)}-${range.end.toFixed(2)}`
+    ),
     settings.issueSearchGuidance,
     issueContext.title,
     ...issueContext.keywords,
@@ -189,6 +215,7 @@ export async function POST(request: Request) {
         : ""
       if (isPrimarilyKorean(cachedTranscript)) {
         const refreshedSource = (await readSource(source.id)) ?? source
+        await progress(100, "캐시 분석 완료")
         return NextResponse.json({
           ...(cached as object),
           sourceChannel: refreshedSource.channel,
@@ -217,6 +244,7 @@ export async function POST(request: Request) {
       { status: 422 }
     )
   }
+  await progress(30, "원본 자막 준비 완료")
   const transcriptLanguageText = parseTranscript(transcript)
     .map((segment) => segment.text)
     .join(" ")
@@ -250,7 +278,9 @@ export async function POST(request: Request) {
       )
     }
   }
+  await progress(38, "관련성 확인 완료")
   try {
+    await progress(42, "보조 자료 확인 중")
     const supportingSources = await Promise.all(
       supportingSourceIds.map(async (supportingSourceId) => {
         let supporting = await readSource(supportingSourceId)
@@ -295,6 +325,7 @@ export async function POST(request: Request) {
         }
       })
     )
+    await progress(52, "보조 자료 확인 완료")
     const cachedSilences =
       cached &&
       typeof cached === "object" &&
@@ -306,6 +337,7 @@ export async function POST(request: Request) {
       : source.localFile
         ? await detectAudioSilence(source.localFile).catch(() => [])
         : []
+    await progress(60, "음성 구간 확인 완료")
     const previousTitle =
       typeof body?.previousTitle === "string" ? body.previousTitle.trim() : ""
     const previousTitles = Array.isArray(body?.previousTitles)
@@ -342,10 +374,20 @@ export async function POST(request: Request) {
       directSource,
       avoidPrevious,
       lockedRange: lockedAngleRange,
+      lockedRanges: lockedAngleRanges,
     }
     let transcriptForAnalysis = transcript
     let refinedRange = lockedAngleRange
-    if (source.localFile && !pasted) {
+    let transcriptRefinementStatus:
+      | "not-attempted"
+      | "accepted"
+      | "retry-accepted"
+      | "baseline-retained"
+      | "unavailable" = "not-attempted"
+    let transcriptNeedsReview = false
+    let transcriptQualityReasons: string[] = []
+    await progress(66, "핵심 구간 정밀 분석 중")
+    if (source.localFile && !pasted && lockedAngleRanges.length <= 1) {
       try {
         if (!refinedRange) {
           const preliminary = await analyzeNewsTranscript(
@@ -361,29 +403,75 @@ export async function POST(request: Request) {
             end: preliminary.selectedCandidate.sourceEnd,
           }
         }
-        const refinedTimedText = await transcribeRangeWithLocalWhisper(
-          source.localFile,
-          source.id,
-          refinedRange
+        const rangeToRefine = refinedRange
+        const baselineSegments = parseTranscript(transcript)
+        const precedingBaseline = baselineSegments.filter(
+          (segment) => segment.end <= rangeToRefine.start + 0.1
         )
-        const refinedSegments = parseTranscript(refinedTimedText).map(
-          (segment) =>
+        const normalizeRecognition = (timedText: string) =>
+          parseTranscript(timedText).map((segment) =>
             updateTranscriptSegmentText(
               segment,
               normalizeKoreanRecognitionText(segment.text)
             )
-        )
-        transcriptForAnalysis = serializeTranscript(
-          replaceTranscriptRange(
-            parseTranscript(transcript),
-            refinedSegments,
-            refinedRange
           )
+        const selectReplacement = (candidate: typeof baselineSegments) =>
+          selectTranscriptRangeReplacement({
+            candidate,
+            baseline: baselineSegments,
+            preceding: precedingBaseline,
+            range: rangeToRefine,
+          })
+
+        const refinedTimedText = await transcribeRangeWithLocalWhisper(
+          source.localFile,
+          source.id,
+          rangeToRefine
         )
+        const refinedSegments = normalizeRecognition(refinedTimedText)
+        let replacement = selectReplacement(refinedSegments)
+        transcriptRefinementStatus = "accepted"
+
+        if (!replacement.accepted) {
+          const initialReasons = replacement.assessment.reasons
+          await progress(72, "의심 구간 재확인 중")
+          const retryTimedText = await transcribeRangeWithLocalWhisper(
+            source.localFile,
+            source.id,
+            rangeToRefine,
+            "",
+            { paddingSeconds: 7 }
+          )
+          const retrySegments = normalizeRecognition(retryTimedText)
+          replacement = selectReplacement(retrySegments)
+          if (replacement.accepted) {
+            transcriptRefinementStatus = "retry-accepted"
+          } else {
+            transcriptRefinementStatus = "baseline-retained"
+            transcriptNeedsReview = true
+            transcriptQualityReasons = [
+              ...new Set([
+                ...initialReasons,
+                ...replacement.assessment.reasons,
+              ]),
+            ]
+          }
+        }
+
+        // 구간 전사가 낮은 신뢰도·앞 문장 재생성·반복 환각으로 의심되면
+        // YouTube 자막을 정답으로 간주하지는 않되, 검증되지 않은 결과로
+        // 덮어쓰지 않고 기존 기준 전사를 그대로 유지한다.
+        if (replacement.accepted) {
+          transcriptForAnalysis = serializeTranscript(replacement.transcript)
+        }
       } catch {
         // 로컬 2차 전사가 불가능하면 기존 자막으로 계속 진행한다.
+        transcriptRefinementStatus = "unavailable"
+        transcriptNeedsReview = true
+        transcriptQualityReasons = ["range-transcription-unavailable"]
       }
     }
+    await progress(80, "대본 작성 중")
     const analysis = await analyzeNewsTranscript(
       transcriptForAnalysis,
       settings,
@@ -392,16 +480,21 @@ export async function POST(request: Request) {
       productionMode,
       detectedSilences
     )
+    await progress(95, "분석 결과 저장 중")
     const refreshedSource = (await readSource(source.id)) ?? source
     const result = {
       ...analysis,
       detectedSilences,
       settingsKey,
       sourceSetKey,
+      transcriptRefinementStatus,
+      transcriptNeedsReview,
+      transcriptQualityReasons,
       sourceChannel: refreshedSource.channel,
       sourceTitle: refreshedSource.title,
     }
     await writeAnalysisCache(sourceId, result)
+    await progress(100, "완료")
     return NextResponse.json({ ...result, cached: false })
   } catch (error) {
     if (error instanceof Error && error.message === "issue-focus-mismatch") {

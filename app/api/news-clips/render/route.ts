@@ -3,6 +3,10 @@ import { NextResponse } from "next/server"
 import type { NewsClipProject, NewsClipSettings } from "@/lib/news-clips/types"
 import { normalizeFinalPlaybackRate } from "@/lib/news-clips/final-playback"
 import { renderNewsClip } from "@/lib/server/news-clips/render"
+import {
+  validRenderJobId,
+  writeNewsRenderProgress,
+} from "@/lib/server/news-clips/render-progress"
 import { newsTtsErrorMessage } from "@/lib/server/news-clips/tts-provider"
 
 export const runtime = "nodejs"
@@ -14,6 +18,7 @@ export async function POST(request: Request) {
     settings?: NewsClipSettings
     force?: boolean
     finalPlaybackRate?: number
+    jobId?: string
   } | null
   if (!body?.project || !body.settings) {
     return NextResponse.json(
@@ -21,10 +26,15 @@ export async function POST(request: Request) {
       { status: 400 }
     )
   }
+  const jobId = validRenderJobId(body.jobId) ? body.jobId : ""
   try {
+    if (jobId) await writeNewsRenderProgress(jobId, 1, "준비 중")
     const result = await renderNewsClip(body.project, body.settings, "final", {
       force: body.force === true,
       finalPlaybackRate: normalizeFinalPlaybackRate(body.finalPlaybackRate),
+      onProgress: jobId
+        ? (percent, label) => writeNewsRenderProgress(jobId, percent, label)
+        : undefined,
     })
     return NextResponse.json(
       {

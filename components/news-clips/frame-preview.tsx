@@ -32,15 +32,14 @@ export function NewsFramePreview({
 }) {
   const image =
     mode === "title" ? settings.titleFrameImage : settings.bodyFrameImage
-  const rect = settings.videoRect
   const safe = settings.safeMarginPercent
+  const mediaContent = mode === "title" ? backgroundContent : videoContent
   const previewTitle =
     title.trim() ||
     (mode === "title" ? "1단 핵심 제목\n2단 보조 제목" : "본문 제목")
   const previewSubtitle =
     subtitle.trim() || "아나운서 음성에 맞춰 자막이 표시됩니다"
-  const previewSourceCredit =
-    sourceCredit.trim() || "출처 · 원본 채널"
+  const previewSourceCredit = sourceCredit.trim()
   const fullFramePreview = !backgroundContent && !videoContent
   const overlayRequestKey = JSON.stringify({
     mode,
@@ -123,11 +122,10 @@ export function NewsFramePreview({
       className={`relative aspect-[9/16] overflow-hidden rounded-2xl bg-neutral-950 text-white shadow-xl ${className}`}
       style={{ containerType: "inline-size" }}
     >
-      {!fullFramePreview && mode === "title" && backgroundContent ? (
-        <div className="absolute inset-0 z-0 overflow-hidden">
-          {backgroundContent}
-        </div>
-      ) : !fullFramePreview && mode === "title" ? (
+      {/* 영상은 맨 뒤. 프레임이 노출 영역을 가린다. */}
+      {!fullFramePreview && mediaContent ? (
+        <div className="absolute inset-0 z-0 overflow-hidden">{mediaContent}</div>
+      ) : !fullFramePreview ? (
         <Image
           src={NEWS_PREVIEW_PLACEHOLDER}
           alt=""
@@ -135,6 +133,11 @@ export function NewsFramePreview({
           unoptimized
           aria-hidden="true"
           className="z-0 object-cover"
+          style={
+            mode === "body"
+              ? { transform: `scale(${Math.max(1, zoom)})` }
+              : undefined
+          }
         />
       ) : null}
 
@@ -144,32 +147,8 @@ export function NewsFramePreview({
           alt={mode === "title" ? "제목 고정 프레임" : "본문 고정 프레임"}
           fill
           unoptimized
-          className="z-10 object-contain"
+          className="pointer-events-none z-10 object-contain"
         />
-      ) : null}
-
-      {!fullFramePreview && mode === "body" ? (
-        <div
-          className="absolute z-20 overflow-hidden"
-          style={{
-            left: percentX(rect.x),
-            top: percentY(rect.y),
-            width: percentX(rect.width),
-            height: percentY(rect.height),
-          }}
-        >
-          {videoContent ?? (
-            <Image
-              src={NEWS_PREVIEW_PLACEHOLDER}
-              alt=""
-              fill
-              unoptimized
-              aria-hidden="true"
-              className="object-cover"
-              style={{ transform: `scale(${Math.max(1.02, zoom)})` }}
-            />
-          )}
-        </div>
       ) : null}
 
       {exactOverlayUrl ? (
@@ -195,12 +174,4 @@ export function NewsFramePreview({
       ) : null}
     </div>
   )
-}
-
-function percentX(value: number) {
-  return `${(value / 10.8).toFixed(3)}%`
-}
-
-function percentY(value: number) {
-  return `${(value / 19.2).toFixed(3)}%`
 }

@@ -10,6 +10,10 @@ import { readNewsClipSettings } from "@/lib/server/news-clips/settings"
 import { searchRecentNews } from "@/lib/server/news-clips/search"
 import { readYouTubeDataKey } from "@/lib/server/credentials"
 import {
+  validRenderJobId,
+  writeNewsRenderProgress,
+} from "@/lib/server/news-clips/render-progress"
+import {
   createRemoteSource,
   createUploadedSource,
   downloadApprovedSource,
@@ -79,7 +83,7 @@ export async function POST(request: Request) {
       const subtitle = form.get("subtitle")
       if (!(file instanceof File)) {
         return NextResponse.json(
-          { message: "원본 영상 파일을 선택해 주세요." },
+          { message: "이미지 또는 영상 파일을 선택해 주세요." },
           { status: 400 }
         )
       }
@@ -102,6 +106,10 @@ export async function POST(request: Request) {
         { status: 400 }
       )
     }
+    const jobId = validRenderJobId(body.jobId) ? body.jobId : ""
+    const progress = (percent: number, label: string) =>
+      jobId ? writeNewsRenderProgress(jobId, percent, label) : Promise.resolve()
+    await progress(2, "URL 확인 중")
     const source = await createRemoteSource({
       url: body.url,
       title: typeof body.title === "string" ? body.title : "",
@@ -119,15 +127,37 @@ export async function POST(request: Request) {
           ? (body.searchMetrics as NewsCandidateMetrics)
           : null,
     })
-    return NextResponse.json(
-      (await downloadApprovedSource(source.id)) ?? source
-    )
+    await progress(5, "영상 준비 중")
+    const downloaded = await downloadApprovedSource(source.id, {
+      onProgress: (percent) =>
+        progress(5 + Math.round(percent * 0.88), `영상 받는 중 ${percent}%`),
+    })
+    if (!downloaded?.localFile || downloaded.requiresUpload) {
+      throw new Error("video-download-failed")
+    }
+    await progress(100, "영상 확인 완료")
+    return NextResponse.json(downloaded)
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
+    if (
+      code === "video-unavailable" ||
+      code === "video-download-failed" ||
+      code === "video-downloader-unavailable"
+    ) {
+      const message =
+        code === "video-unavailable"
+          ? "비공개·연령 제한 또는 재생할 수 없는 영상입니다. 다른 공개 URL을 입력해 주세요."
+          : code === "video-downloader-unavailable"
+            ? "YouTube 영상 도구를 실행하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            : "YouTube 영상을 받지 못했습니다. URL을 확인하거나 영상 파일을 올려 주세요."
+      return NextResponse.json({ message }, { status: 422 })
+    }
     const message =
       code === "invalid-url"
         ? "http 또는 https 영상 URL만 사용할 수 있습니다."
-        : "mp4, mov, mkv, webm 영상과 srt, vtt 자막을 확인해 주세요."
+        : code === "image-conversion-failed"
+          ? "이미지를 영상 화면으로 변환하지 못했습니다. 다른 파일을 선택해 주세요."
+          : "jpg, png, webp 이미지 또는 mp4, mov, mkv, webm 영상을 확인해 주세요."
     return NextResponse.json({ message }, { status: 400 })
   }
 }

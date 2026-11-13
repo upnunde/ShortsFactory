@@ -37,8 +37,9 @@ export function clearLegacyAutomaticCaptionBoundaries(
 ) {
   let changed = false
   const next = segments.map((segment) => {
+    const speech = transcriptSegmentSpeechBounds(segment)
     const belongsToRange =
-      segment.end > range.start + 0.01 && segment.start < range.end - 0.01
+      speech.end > range.start + 0.01 && speech.start < range.end - 0.01
     if (
       !belongsToRange ||
       segment.captionBoundaryAfter !== true ||
@@ -61,13 +62,30 @@ export function transcriptRangeIsReviewed(
   segments: TranscriptSegment[],
   range: { start: number; end: number }
 ) {
-  const reviewed = segments.filter(
-    (segment) => segment.end > range.start && segment.start < range.end
-  )
+  const reviewed = segments.filter((segment) => {
+    const speech = transcriptSegmentSpeechBounds(segment)
+    return speech.end > range.start && speech.start < range.end
+  })
   return (
     reviewed.length > 0 &&
     reviewed.every((segment) => segment.captionBoundarySource !== undefined)
   )
+}
+
+/** 표시를 연장한 segment end가 아닌 실제 단어 발화 범위를 반환한다. */
+function transcriptSegmentSpeechBounds(segment: TranscriptSegment) {
+  const words = segment.words.filter(
+    (word) =>
+      word.text.trim() &&
+      Number.isFinite(word.start) &&
+      Number.isFinite(word.end) &&
+      word.end > word.start
+  )
+  if (!words.length) return { start: segment.start, end: segment.end }
+  return {
+    start: Math.min(...words.map((word) => word.start)),
+    end: Math.max(...words.map((word) => word.end)),
+  }
 }
 
 /**

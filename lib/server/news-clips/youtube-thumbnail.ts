@@ -10,6 +10,7 @@ type ApplyYoutubeThumbnailOptions = {
   wait?: (milliseconds: number) => Promise<void>
   maxProcessingChecks?: number
   processingPollMs?: number
+  onProgress?: (percent: number, label: string) => void | Promise<void>
 }
 
 export async function applyYoutubeThumbnail({
@@ -20,6 +21,7 @@ export async function applyYoutubeThumbnail({
   wait = delay,
   maxProcessingChecks = YOUTUBE_PROCESSING_CHECKS,
   processingPollMs = YOUTUBE_PROCESSING_POLL_MS,
+  onProgress,
 }: ApplyYoutubeThumbnailOptions) {
   const processed = await waitForYoutubeProcessing({
     videoId,
@@ -28,9 +30,11 @@ export async function applyYoutubeThumbnail({
     wait,
     maxProcessingChecks,
     processingPollMs,
+    onProgress,
   })
   if (!processed) return false
 
+  await onProgress?.(94, "썸네일 적용 중")
   const url =
     "https://www.googleapis.com/upload/youtube/v3/thumbnails/set" +
     `?videoId=${encodeURIComponent(videoId)}&uploadType=media`
@@ -44,7 +48,10 @@ export async function applyYoutubeThumbnail({
       },
       body: new Uint8Array(thumbnail),
     }).catch(() => null)
-    if (response?.ok) return true
+    if (response?.ok) {
+      await onProgress?.(99, "썸네일 적용 완료")
+      return true
+    }
     if (attempt < YOUTUBE_THUMBNAIL_ATTEMPTS - 1) {
       await wait(processingPollMs)
     }
@@ -59,6 +66,7 @@ async function waitForYoutubeProcessing({
   wait,
   maxProcessingChecks,
   processingPollMs,
+  onProgress,
 }: Omit<ApplyYoutubeThumbnailOptions, "thumbnail"> & {
   fetchImpl: typeof fetch
   wait: (milliseconds: number) => Promise<void>
@@ -69,6 +77,10 @@ async function waitForYoutubeProcessing({
     "https://www.googleapis.com/youtube/v3/videos" +
     `?part=processingDetails&id=${encodeURIComponent(videoId)}`
   for (let check = 0; check < maxProcessingChecks; check += 1) {
+    await onProgress?.(
+      66 + Math.round((check / Math.max(1, maxProcessingChecks - 1)) * 26),
+      "YouTube 영상 처리 중"
+    )
     const response = await fetchImpl(url, {
       headers: { Authorization: `Bearer ${token}` },
     }).catch(() => null)

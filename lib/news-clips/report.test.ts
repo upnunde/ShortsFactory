@@ -4,6 +4,7 @@ import test from "node:test"
 import {
   buildReportScenes,
   appendEndCtaScenes,
+  canonicalReportScript,
   contextualEndCtaText,
   ensureReportEndCta,
   splitEndCtaFromScript,
@@ -13,6 +14,8 @@ import {
   quoteNarrationMatchesTranscript,
   quoteTranscriptAlignment,
   reportCaptionPhrases,
+  reportSceneAudioMode,
+  reportScriptFromScenes,
   reportSubtitles,
   shortBreathReviewTranscript,
   subtitleCuesFromSpeechAlignment,
@@ -54,10 +57,50 @@ test("보도 대본의 모든 문장을 자료 화면으로 기본 배치한다"
   )
   assert.equal(scenes.length, 3)
   assert.equal(scenes[0].visual, "source")
+  assert.equal(scenes[0].part, "lead")
+  assert.equal(scenes[0].audioMode, "tts")
+  assert.equal(scenes[0].visualMode, "source")
   assert.equal(scenes[1].visual, "source")
+  assert.equal(scenes[1].part, "body")
+  assert.equal(scenes[1].audioMode, "tts")
   assert.equal(scenes[2].visual, "source")
   assert.ok(scenes[1].sourceStart >= 10)
   assert.ok(scenes[1].sourceEnd <= 30)
+})
+
+test("보도 대본은 장면 narration에서 한 방향으로 복원한다", () => {
+  const scenes = buildReportScenes(
+    "첫 문장입니다. 두 번째 문장입니다.",
+    transcript,
+    10,
+    30
+  )
+
+  assert.equal(
+    reportScriptFromScenes(scenes),
+    "첫 문장입니다.\n두 번째 문장입니다."
+  )
+  assert.equal(
+    canonicalReportScript("저장 시점이 오래된 대본", scenes),
+    "첫 문장입니다.\n두 번째 문장입니다."
+  )
+  assert.equal(canonicalReportScript("레거시 대본", []), "레거시 대본")
+})
+
+test("보도형 재구성은 레거시 quote 장면도 풀 TTS 자료화면으로 정규화한다", () => {
+  const [scene] = buildReportScenes("첫 문장입니다.", transcript, 10, 30, [
+    {
+      id: "legacy-quote",
+      narration: "예전 직접 발언",
+      visual: "quote",
+      sourceStart: 10,
+      sourceEnd: 15,
+    },
+  ])
+
+  assert.equal(scene.visual, "source")
+  assert.equal(scene.visualMode, "source")
+  assert.equal(reportSceneAudioMode(scene), "tts")
 })
 
 test("문장별 장면에 핵심 원본 식별자를 기본 저장하고 보조 원본 선택을 보존한다", () => {
@@ -164,6 +207,8 @@ test("직접 발언 장면은 TTS 분량이 아닌 원본 구간 길이를 사�
   )
   scenes[0] = {
     ...scenes[0],
+    audioMode: "original",
+    visualMode: "quote",
     visual: "quote",
     sourceStart: 12.25,
     sourceEnd: 18.75,
@@ -248,6 +293,40 @@ test("직접 발언 자막을 원본 자막 타임코드에 맞춘다", () => {
   assert.equal(alignment[0]?.start, 0)
   assert.equal(alignment[0]?.end, 8.601)
   assert.equal(alignment[0]?.boundaryAfter, true)
+})
+
+test("선택 경계에 걸친 문장은 버리지 않고 범위 안의 완전한 단어부터 자막화한다", () => {
+  const scene = {
+    id: "buildup2-quote",
+    narration: "",
+    visual: "quote" as const,
+    sourceStart: 177.79,
+    sourceEnd: 183.11,
+  }
+  const alignment = quoteTranscriptAlignment(scene, [
+    {
+      id: "boundary",
+      text: "범죄자 이재명의 감옥행을 막는 것입니다.",
+      start: 177.09,
+      end: 183.11,
+      speaker: "speaker-1",
+      words: [
+        { text: "범죄자", start: 175.59, end: 177.79 },
+        { text: "이재명의", start: 177.79, end: 179.83 },
+        { text: "감옥행을", start: 179.83, end: 181.47 },
+        { text: "막는", start: 181.47, end: 182.59 },
+        { text: "것입니다.", start: 182.59, end: 183.11 },
+      ],
+    },
+  ])
+
+  assert.equal(alignment[0]?.text, "이재명의")
+  assert.equal(alignment[0]?.start, 0)
+  assert.equal(
+    alignment.some((word) => word.text === "범죄자"),
+    false
+  )
+  assert.equal(alignment.at(-1)?.end, 5.32)
 })
 
 test("겹친 전사 단어 타임스탬프를 섞지 않고 문장 순서를 유지한다", () => {
@@ -447,6 +526,8 @@ test("실제 장면별 오디오 길이에 맞춰 자막 싱크를 다시 계산
   )
   scenes[1] = {
     ...scenes[1],
+    audioMode: "original",
+    visualMode: "quote",
     visual: "quote",
     sourceStart: 20,
     sourceEnd: 28,
@@ -618,6 +699,49 @@ test("편집 문구 병합은 id·장면 순서로 맞춘다", () => {
   assert.equal(merged[1].edited, true)
 })
 
+test("앞 자막이 추가되어 id 순서가 밀려도 원래 문구가 같은 수정본에만 적용한다", () => {
+  const timed = [
+    {
+      id: "caption-1",
+      sceneId: "quote",
+      start: 0,
+      end: 1,
+      text: "새로 복구한 첫 문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "caption-2",
+      sceneId: "quote",
+      start: 1,
+      end: 2,
+      text: "기존 자동 문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const edited = [
+    {
+      // 이전 렌더에서는 같은 id가 두 번째 문장을 가리켰다.
+      id: "caption-1",
+      sceneId: "quote",
+      start: 1,
+      end: 2,
+      text: "사용자가 고친 문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+      edited: true,
+      originalText: "기존 자동 문장",
+      originalEmphasis: [],
+    },
+  ]
+
+  const merged = mergeEditedSubtitleText(timed, edited)
+  assert.equal(merged[0]?.text, "새로 복구한 첫 문장")
+  assert.equal(merged[1]?.text, "사용자가 고친 문장")
+  assert.equal(merged[1]?.start, 1)
+})
+
 test("락된 자막은 문구만 덮고 start/end를 유지한다", () => {
   const timed = [
     {
@@ -686,6 +810,32 @@ test("음성 단어 타임스탬프는 읽기 좋은 자막 칸으로 묶는다"
   assert.ok(retimed[0].text.includes(" "))
   assert.ok(retimed.at(-1)!.end <= 8)
   assert.ok(retimed.every((cue) => cue.id.startsWith("speech-caption-")))
+  assert.ok(retimed.every((cue) => cue.sourceStart === undefined))
+  assert.ok(retimed.every((cue) => cue.sourceEnd === undefined))
+})
+
+test("원본 음성 실측 자막은 소스 영상의 절대 구간을 함께 보관한다", () => {
+  const scene: NewsReportScene = {
+    id: "quote-source-range",
+    narration: "직접발언",
+    audioMode: "original",
+    visual: "quote",
+    sourceStart: 20,
+    sourceEnd: 22,
+  }
+  const [cue] = retimeSubtitleCuesToScenes([], [scene], [
+    {
+      ...scene,
+      start: 5,
+      end: 7,
+      alignment: [{ text: "직접발언", start: 0.25, end: 1.5 }],
+    },
+  ])
+
+  assert.equal(cue?.start, 5.25)
+  assert.equal(cue?.end, 6.5)
+  assert.equal(cue?.sourceStart, 20.25)
+  assert.equal(cue?.sourceEnd, 21.5)
 })
 
 test("원본 전사의 문장 경계는 글자 수와 관계없이 자막 전환으로 유지한다", () => {
@@ -856,6 +1006,175 @@ test("검수 본문은 실제 단어 시작점의 짧은 호흡으로 먼저 고
 
   assert.deepEqual(merged[1], thirdBefore)
   assert.equal(merged[0]?.captionBoundarySource, "manual")
+})
+
+test("짧은 호흡은 두 줄 범위 안에서 문법 덩어리를 보존한다", () => {
+  const cases = [
+    {
+      text: "범죄자 이재명의 모든 죄를 없애기 위한 법입니다.",
+      forbiddenEnds: [/죄를$/u, /없애기$/u, /위한$/u],
+    },
+    {
+      text: "장동혁 대표가 이재명 탈옥법이 나왔다고 분노해 하고 있어.",
+      forbiddenEnds: [/대표가 이재명$/u, /이재명$/u],
+    },
+    {
+      text: "인구 감소 지역 주민에게, 월 15만 원씩 지역 상품권을 주는 농어촌 기본소득 사업이 내년부터 2년간 시범 시행됩니다.",
+      forbiddenEnds: [/15만$/u, /상품권을$/u, /농어촌$/u, /시범$/u],
+    },
+  ]
+
+  for (const { text, forbiddenEnds } of cases) {
+    const words = text.split(/\s+/).map((word, index) => ({
+      text: word,
+      start: index * 0.5,
+      end: index * 0.5 + 0.4,
+    }))
+    const reviewed = shortBreathReviewTranscript(
+      [
+        {
+          id: `natural-${words.length}`,
+          speaker: "speaker-1",
+          start: 0,
+          end: words.length * 0.5,
+          text,
+          words,
+        },
+      ],
+      { start: 0, end: words.length * 0.5 },
+      13
+    )
+    const phrases = reviewed.map((segment) => segment.text)
+
+    assert.equal(phrases.join(" "), text)
+    assert.ok(
+      phrases.every((phrase) =>
+        forbiddenEnds.every((pattern) => !pattern.test(phrase))
+      ),
+      phrases.join(" / ")
+    )
+  }
+})
+
+test("명사형 -고와 목적 관형구를 짧고 자연스러운 호흡으로 나눈다", () => {
+  const cases = [
+    {
+      text: "대형 사고 원인을 밝히기 위해 조사위원회가 현장에 도착했습니다.",
+      expected: [
+        "대형 사고 원인을 밝히기 위해",
+        "조사위원회가 현장에 도착했습니다.",
+      ],
+      forbiddenEnd: /대형 사고$/u,
+    },
+    {
+      text: "감옥에 있어야 할 이재명을 탈옥시키기 위한 법입니다.",
+      expected: [
+        "감옥에 있어야 할 이재명을",
+        "탈옥시키기 위한 법입니다.",
+      ],
+      forbiddenEnd: /탈옥시키기 위한$/u,
+    },
+  ]
+
+  for (const { text, expected, forbiddenEnd } of cases) {
+    const words = text.split(/\s+/).map((word, index) => ({
+      text: word,
+      start: index * 0.45,
+      end: index * 0.45 + 0.38,
+    }))
+    const reviewed = shortBreathReviewTranscript(
+      [
+        {
+          id: `natural-boundary-${words.length}`,
+          speaker: "speaker-1",
+          start: 0,
+          end: words.length * 0.45,
+          text,
+          words,
+        },
+      ],
+      { start: 0, end: words.length * 0.45 },
+      13
+    )
+    const phrases = reviewed.map((segment) => segment.text)
+
+    assert.deepEqual(phrases, expected)
+    assert.ok(phrases.every((phrase) => !forbiddenEnd.test(phrase)))
+    assert.equal(phrases.join(" "), text)
+  }
+})
+
+test("13자 안의 방향·목적·강조어는 자연스러운 연결을 유지한다", () => {
+  const text = "밖으로 나가기 위해 어떠한 노력을 했나"
+  const words = text.split(" ").map((word, index) => ({
+    text: word,
+    start: index * 0.5,
+    end: index * 0.5 + 0.4,
+  }))
+  const reviewed = shortBreathReviewTranscript(
+    [
+      {
+        id: "direction-purpose-emphasis",
+        speaker: "speaker-1",
+        start: 0,
+        end: words.length * 0.5,
+        text,
+        words,
+      },
+    ],
+    { start: 0, end: words.length * 0.5 },
+    13
+  )
+
+  assert.deepEqual(
+    reviewed.map((segment) => segment.text),
+    ["밖으로 나가기 위해", "어떠한 노력을 했나"]
+  )
+})
+
+test("선택 시작 전에 발음이 끝난 표시용 자막 tail은 본문에 포함하지 않는다", () => {
+  const source: TranscriptSegment[] = [
+    {
+      id: "previous-caption",
+      speaker: "speaker-1",
+      text: "목격했습니다.",
+      start: 67.7,
+      end: 71.44,
+      words: [{ text: "목격했습니다.", start: 67.7, end: 70.3 }],
+    },
+    {
+      id: "selected-caption",
+      speaker: "speaker-1",
+      text: "2026년 11월 6일 대한민국 법치주의가 사망했습니다.",
+      start: 70.64,
+      end: 81,
+      words: [
+        { text: "2026년", start: 70.64, end: 72.04 },
+        { text: "11월", start: 72.04, end: 73.44 },
+        { text: "6일", start: 73.44, end: 73.94 },
+        { text: "대한민국", start: 73.94, end: 76.74 },
+        { text: "법치주의가", start: 76.74, end: 78.7 },
+        { text: "사망했습니다.", start: 78.7, end: 81 },
+      ],
+    },
+  ]
+  const range = { start: 70.3, end: 81 }
+  const reviewed = shortBreathReviewTranscript(source, range, 10)
+  const scene = {
+    id: "selected-quote",
+    narration: "",
+    audioMode: "original" as const,
+    visual: "quote" as const,
+    sourceStart: range.start,
+    sourceEnd: range.end,
+  }
+  const aligned = quoteTranscriptAlignment(scene, reviewed)
+
+  assert.ok(reviewed.some((segment) => segment.text.includes("2026년")))
+  // 선택 범위 밖 원문은 보존하되 본문 정렬에는 들어오지 않아야 한다.
+  assert.ok(reviewed.some((segment) => segment.text === "목격했습니다."))
+  assert.equal(aligned[0]?.text, "2026년")
+  assert.ok(aligned.every((unit) => unit.text !== "목격했습니다."))
 })
 
 test("경계 단어는 앞뒤 자막에 중복되지 않고 수정 문구만 렌더한다", () => {
@@ -1145,6 +1464,32 @@ test("원본 자막은 부사와 뒤에 이어지는 목적어 사이를 가르�
     cues.map((cue) => cue.text).join(" "),
     "그 장면을 찍으려고 위법하게 촬영을 계속하고 있었어요."
   )
+})
+
+test("짧은 호흡이어도 조사와 의존 서술어 사이를 가르지 않는다", () => {
+  const words =
+    "오늘 우리는 이재명 맞서 대한민국을 지키는 것은 이재명입니다.".split(" ")
+  const cues = subtitleCuesFromSpeechAlignment(
+    {
+      id: "dependent-predicate-boundary",
+      narration: "",
+      visual: "quote",
+      sourceStart: 0,
+      sourceEnd: 8,
+      start: 0,
+      end: 8,
+      alignment: words.map((text, index) => ({
+        text,
+        start: index * 0.45,
+        end: index * 0.45 + 0.38,
+      })),
+    },
+    { maxCharacters: 18 }
+  )
+
+  assert.ok(cues.every((cue) => !/이재명$/u.test(cue.text)))
+  assert.ok(cues.some((cue) => /이재명 맞서/.test(cue.text)))
+  assert.equal(cues.map((cue) => cue.text).join(" "), words.join(" "))
 })
 
 test("장면 정보가 없는 기존 자막도 문장 순서로 장면 싱크를 복원한다", () => {

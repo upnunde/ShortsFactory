@@ -42,16 +42,69 @@ export function snapSourceRangeToSpeech(
 }
 
 /**
+ * 사용자가 확정한 범위 밖으로 넓히지 않고 실제 단어가 있는 양끝만 남긴다.
+ * ASR segment의 표시 start/end와 단어 시간이 어긋난 오래된 프로젝트에서
+ * 첫 단어 중간 영상이나 마지막 발화 뒤 무자막 꼬리가 붙는 현상을 복구한다.
+ */
+export function tightenLockedSourceRangeToSpeech(
+  start: number,
+  end: number,
+  transcript: TranscriptSegment[],
+  options: { maxNaturalPaddingSeconds?: number } = {}
+) {
+  const spanStart = Math.max(0, Math.min(start, end))
+  const spanEnd = Math.max(spanStart + 0.12, end)
+  const maxNaturalPadding = Math.max(0, options.maxNaturalPaddingSeconds ?? 0.5)
+  const words = collectWords(transcript).filter(
+    (word) =>
+      word.start >= spanStart - 0.01 &&
+      word.end <= spanEnd + 0.01 &&
+      word.end > word.start
+  )
+  if (!words.length) {
+    return { start: round(spanStart), end: round(spanEnd) }
+  }
+
+  const first = words[0]!
+  const last = words.at(-1)!
+  const tightenedStart =
+    first.start - spanStart > maxNaturalPadding ? first.start : spanStart
+  const tightenedEnd =
+    spanEnd - last.end > maxNaturalPadding ? last.end : spanEnd
+
+  return {
+    start: round(tightenedStart),
+    end: round(Math.max(tightenedStart + 0.12, tightenedEnd)),
+  }
+}
+
+/**
  * 빌드업형 원본 발언은 목표 길이보다 문장 완결을 우선한다.
- * 선택 끝이 발화 중간이면 시간 상한 없이 첫 완결 문장까지 늘린다.
+ * 자동 구간은 완결 문장까지 늘리고, 사용자가 확정한 구간은
+ * minimumStart·maximumEnd 밖으로 확장하지 않는다.
  */
 export function snapSourceRangeToCompleteUtterance(
   start: number,
   end: number,
-  transcript: TranscriptSegment[]
+  transcript: TranscriptSegment[],
+  options: { minimumStart?: number; maximumEnd?: number } = {}
 ) {
   const spanStart = Math.max(0, Math.min(start, end))
   const spanEnd = Math.max(spanStart + 0.12, end)
+  const requestedMinimumStart = options.minimumStart
+  const minimumStart =
+    typeof requestedMinimumStart === "number" &&
+    Number.isFinite(requestedMinimumStart)
+      ? Math.max(0, requestedMinimumStart)
+      : Number.NEGATIVE_INFINITY
+  const requestedMaximumEnd = options.maximumEnd
+  const maximumEnd =
+    typeof requestedMaximumEnd === "number" &&
+    Number.isFinite(requestedMaximumEnd)
+      ? Math.max(0, requestedMaximumEnd)
+      : Number.POSITIVE_INFINITY
+  const boundedEnd = (rangeStart: number, proposedEnd: number) =>
+    Math.min(maximumEnd, Math.max(rangeStart + 0.12, proposedEnd))
   const segments = transcript
     .filter(
       (segment) =>
@@ -62,10 +115,15 @@ export function snapSourceRangeToCompleteUtterance(
     .sort((left, right) => left.start - right.start || left.end - right.end)
   const words = collectWords(segments)
   if (!segments.length && !words.length) {
-    return { start: round(spanStart), end: round(spanEnd) }
+    const safeStart = Math.max(spanStart, minimumStart)
+    return {
+      start: round(safeStart),
+      end: round(boundedEnd(safeStart, spanEnd)),
+    }
   }
 
-  const snappedStart = completeUtteranceStart(spanStart, words, segments)
+  const naturalStart = completeUtteranceStart(spanStart, words, segments)
+  const snappedStart = Math.max(naturalStart, minimumStart)
   const firstEndingSegment = segments.findIndex(
     (segment) => segment.end >= spanEnd - 0.02
   )
@@ -73,7 +131,7 @@ export function snapSourceRangeToCompleteUtterance(
     const lastEnd = segments.at(-1)?.end ?? spanEnd
     return {
       start: round(snappedStart),
-      end: round(Math.max(snappedStart + 0.12, spanEnd, lastEnd)),
+      end: round(boundedEnd(snappedStart, Math.max(spanEnd, lastEnd))),
     }
   }
 
@@ -82,7 +140,7 @@ export function snapSourceRangeToCompleteUtterance(
     if (isUtteranceEnd(segment.text)) {
       return {
         start: round(snappedStart),
-        end: round(Math.max(snappedStart + 0.12, spanEnd, segment.end)),
+        end: round(boundedEnd(snappedStart, Math.max(spanEnd, segment.end))),
       }
     }
   }
@@ -90,7 +148,7 @@ export function snapSourceRangeToCompleteUtterance(
   const lastEnd = segments.at(-1)?.end ?? spanEnd
   return {
     start: round(snappedStart),
-    end: round(Math.max(snappedStart + 0.12, spanEnd, lastEnd)),
+    end: round(boundedEnd(snappedStart, Math.max(spanEnd, lastEnd))),
   }
 }
 
@@ -202,7 +260,19 @@ function completeUtteranceStart(
         item.start >= containing.start &&
         item.end <= containing.end + 0.04
     )
-    return nextWord?.start ?? containing.start
+    if (nextWord) return nextWord.start
+    // 검수 자막 segment의 표시 끝은 다음 자막 시작까지 늘어날 수 있다.
+    // 실제 단어가 이미 끝난 빈 tail에서는 이전 문장 시작으로 되감지 않는다.
+    const containingWords = containing.words.filter(
+      (item) => item.text.trim() && item.end > item.start
+    )
+    if (
+      containingWords.length > 0 &&
+      containingWords.every((item) => item.end < time - 0.04)
+    ) {
+      return time
+    }
+    return containing.start
   }
   return time
 }

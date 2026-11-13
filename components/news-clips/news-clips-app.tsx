@@ -10,9 +10,10 @@ import {
   Card,
   Input,
   Label,
+  ListBox,
   Modal,
+  Select,
   Separator,
-  Switch,
   TextField,
 } from "@heroui/react"
 import {
@@ -20,18 +21,22 @@ import {
   ArrowLeftRight,
   Check,
   History,
-  Home,
-  Plus,
   Settings,
   Trash2,
 } from "lucide-react"
 import { NewsClipSettingsPanel } from "@/components/news-clips/settings-panel"
 import { NewsHistoryPanel } from "@/components/news-clips/history-panel"
-import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label"
 import { NewsClipSourceStep as SourceStep } from "@/components/news-clips/source-step"
 import { NewsClipAnglesStep as AnglesStep } from "@/components/news-clips/angles-step"
 import { NewsClipReviewStep as ReviewStep } from "@/components/news-clips/review-step"
 import {
+  operationProgressPercent,
+  startNewsTaskProgressPolling,
+  type NewsOperationProgressMap,
+  type UpdateNewsOperationProgress,
+} from "@/components/news-clips/task-progress"
+import {
+  angleHasLockedRange,
   normalizeAngleOptions,
   type NewsAngleOption,
 } from "@/lib/news-clips/angles"
@@ -43,14 +48,15 @@ import {
 import type { NewsHistorySnapshot } from "@/lib/news-clips/history"
 import { issueTokens } from "@/lib/news-clips/discovery"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
+import { sourceCreditInputText } from "@/lib/news-clips/source-credit"
 import { normalizeFinalPlaybackRate } from "@/lib/news-clips/final-playback"
+import { normalizeNewsMediaMotion } from "@/lib/news-clips/video-fit"
 import {
-  automaticSubtitleLineCharacterLimit,
   fitTitleToLineLayouts,
   normalizeSubtitleCues,
   splitIntroTitleLines,
+  subtitleLineCharacterLimit,
 } from "@/lib/news-clips/text-layout"
-import { serializeTranscript } from "@/lib/news-clips/transcript"
 import {
   buildBuildup2Scenes,
   buildup2HighlightBounds,
@@ -58,9 +64,12 @@ import {
 } from "@/lib/news-clips/buildup"
 import {
   partitionSubtitlesByPart,
+  reportScenePart,
   splitScenesByClipPart,
 } from "@/lib/news-clips/clip-parts"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
+import { preservePreviewSubtitleEdits } from "@/lib/news-clips/preview-subtitles"
+import { projectPatchInvalidatesSubtitleTimeline } from "@/lib/news-clips/project-edit"
 import { restoreLockedEditorialSnapshot } from "@/lib/news-clips/restore-locked-project"
 import {
   NEWS_INTRO_GAP_SECONDS,
@@ -91,6 +100,7 @@ import {
   type NewsPreviewPart,
   type NewsReportScene,
   type NewsSource,
+  type NewsSourceSelectionMode,
   type NewsSourceSearchState,
 } from "@/lib/news-clips/types"
 import { nextKoreaUploadSlot } from "@/lib/youtube-metadata"
@@ -137,12 +147,39 @@ export function NewsClipsApp({
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState("")
   const [previewProgress, setPreviewProgress] = useState<number | null>(null)
+  const [operationProgress, setOperationProgress] =
+    useState<NewsOperationProgressMap>({})
   const [note, setNote] = useState("")
-  const [autoMode, setAutoMode] = useState(false)
-  const autoAbortRef = useRef<AbortController | null>(null)
   const angleAbortRef = useRef<AbortController | null>(null)
   const previewAbortRef = useRef<AbortController | null>(null)
   const previewJobIdRef = useRef<string | null>(null)
+
+  const updateOperationProgress: UpdateNewsOperationProgress = (
+    key,
+    runId,
+    percent
+  ) => {
+    setOperationProgress((current) => {
+      const active = current[key]
+      if (percent === null) {
+        if (!active || active.runId !== runId) return current
+        const next = { ...current }
+        delete next[key]
+        return next
+      }
+      if (active && active.runId !== runId && percent > 1) return current
+      return {
+        ...current,
+        [key]: {
+          runId,
+          percent: Math.max(
+            active?.percent ?? 0,
+            Math.min(100, Math.round(percent))
+          ),
+        },
+      }
+    })
+  }
 
   useEffect(
     () => () => {
@@ -195,15 +232,21 @@ export function NewsClipsApp({
               : NEWS_CLIP_STEPS.some((item) => item.id === saved.step)
                 ? (saved.step as NewsClipStep)
                 : "issue"
-          const migratedStep = visibleWorkflowStep(storedStep)
-          if (migratedProject.selectedIssue && sourceMatchesIssue) {
+          const migratedStep = visibleWorkflowStep(
+            storedStep,
+            migratedProject.productionMode
+          )
+          if (sourceMatchesIssue) {
             savedStep = migratedStep
             const storedFurthest = NEWS_CLIP_STEPS.some(
               (item) => item.id === saved.furthestStep
             )
               ? (saved.furthestStep as NewsClipStep)
               : migratedStep
-            savedFurthestStep = visibleWorkflowStep(storedFurthest)
+            savedFurthestStep = visibleWorkflowStep(
+              storedFurthest,
+              migratedProject.productionMode
+            )
             savedTranscript = saved.transcriptDraft ?? ""
           } else if (migratedProject.selectedIssue) {
             savedStep = "source"
@@ -344,7 +387,10 @@ export function NewsClipsApp({
   }
 
   async function saveCurrentHistory() {
-    setBusy("history-save")
+    const progressKey = "history-save"
+    const runId = crypto.randomUUID()
+    updateOperationProgress(progressKey, runId, 10)
+    setBusy(progressKey)
     setNote("")
     try {
       const saved = await persistHistory(
@@ -353,11 +399,13 @@ export function NewsClipsApp({
         furthestStep,
         step === "final" && Boolean(project.outputUrl)
       )
+      updateOperationProgress(progressKey, runId, 100)
       setNote(saved ? "저장했습니다." : "저장하지 못했습니다.")
     } catch {
       setNote("저장하지 못했습니다.")
     } finally {
       setBusy("")
+      updateOperationProgress(progressKey, runId, null)
     }
   }
 
@@ -374,9 +422,14 @@ export function NewsClipsApp({
     const snapshot = body.snapshot
     const restored = normalizeSavedNewsProject(snapshot.project, profile!.id)
     setProject(restored)
-    const restoredStep = visibleWorkflowStep(snapshot.step)
+    const restoredStep = visibleWorkflowStep(
+      snapshot.step,
+      restored.productionMode
+    )
     setStep(restoredStep)
-    setFurthestStep(visibleWorkflowStep(snapshot.furthestStep))
+    setFurthestStep(
+      visibleWorkflowStep(snapshot.furthestStep, restored.productionMode)
+    )
     setTranscriptDraft(snapshot.transcriptDraft ?? "")
     setIssueSearch(normalizeNewsIssueSearchState(snapshot.issueSearch))
     setSourceSearch(normalizeNewsSourceSearchState(snapshot.sourceSearch))
@@ -418,11 +471,27 @@ export function NewsClipsApp({
     setProject((current) => {
       const resolved = typeof patch === "function" ? patch(current) : patch
       const keys = Object.keys(resolved)
+      const youtubeMetadataOnly =
+        keys.length > 0 &&
+        keys.every((key) =>
+          ["youtubeScheduledAt", "youtubeVideoId", "youtubeUploadUrl"].includes(
+            key
+          )
+        )
+      if (youtubeMetadataOnly) {
+        return {
+          ...current,
+          ...resolved,
+          updatedAt: new Date().toISOString(),
+        }
+      }
       const subtitleOnly =
         keys.length > 0 &&
         keys.every(
           (key) => key === "subtitles" || key === "subtitleTimingsLocked"
         )
+      const invalidatesSubtitleTimeline =
+        projectPatchInvalidatesSubtitleTimeline(keys)
       // 초안 미디어는 2번 재생성·다시 만들기(setProject)로만 교체한다.
       const replacesPreviewMedia =
         "previewUrl" in resolved ||
@@ -476,7 +545,9 @@ export function NewsClipsApp({
               thumbnailUrl: "",
               youtubeVideoId: "",
               youtubeUploadUrl: "",
-              subtitleTimingsLocked: false,
+              subtitleTimingsLocked: invalidatesSubtitleTimeline
+                ? false
+                : current.subtitleTimingsLocked,
             }),
         ...resolved,
       }
@@ -609,16 +680,26 @@ export function NewsClipsApp({
     )
     const { body: bodyScript, cta: endCtaText } =
       splitEndCtaFromScript(completeReportScript)
-    const highlightBounds = buildup2HighlightBounds(
+    const detectedHighlightBounds = buildup2HighlightBounds(
       reportScenes,
       candidate.sourceStart,
       candidate.sourceEnd
     )
+    // 2번에서 사용자가 확정한 구간은 전체 내용·검수 자막·렌더의
+    // 단일 기준이다. 서버의 이전 자막 tail이 남아 있어도 이 범위를 넘지 않는다.
+    const lockedHighlightBounds =
+      isBuildup2 && selectedAngle && angleHasLockedRange(selectedAngle)
+        ? {
+            start: Math.min(selectedAngle.sourceStart, selectedAngle.sourceEnd),
+            end: Math.max(selectedAngle.sourceStart, selectedAngle.sourceEnd),
+          }
+        : null
+    const highlightBounds = lockedHighlightBounds ?? detectedHighlightBounds
     const reviewTranscript = isBuildup2
       ? shortBreathReviewTranscript(
           transcript,
           highlightBounds,
-          automaticSubtitleLineCharacterLimit(settings.bodySubtitleText)
+          subtitleLineCharacterLimit(settings.bodySubtitleText)
         )
       : transcript
     const bodyScenes = isBuildup2
@@ -628,7 +709,13 @@ export function NewsClipsApp({
           highlightBounds.end,
           reviewTranscript,
           resolvedSource.id,
-          reportScenes
+          reportScenes,
+          lockedHighlightBounds
+            ? {
+                startFloor: lockedHighlightBounds.start,
+                endCeiling: lockedHighlightBounds.end,
+              }
+            : undefined
         )
       : buildReportScenes(
           bodyScript || completeReportScript,
@@ -655,6 +742,8 @@ export function NewsClipsApp({
         titleOptions: candidate.titleOptions,
         reportScript: completeReportScript,
         reportScenes: baseScenes,
+        removedRanges,
+        keepRanges,
         subtitles: [],
       },
       settings,
@@ -684,6 +773,9 @@ export function NewsClipsApp({
       title,
       titleOptions: candidate.titleOptions,
       reportScript: completeReportScript,
+      sourceCredit:
+        (base.sourceCredit ?? "").trim() ||
+        sourceCreditInputText(resolvedSource),
       reportScenes: normalizedReportScenes,
       removedRanges,
       keepRanges:
@@ -716,6 +808,7 @@ export function NewsClipsApp({
       titleVolume: settings.titleVolume,
       sourceVolume: settings.sourceVolume,
       quoteVolume: settings.quoteVolume,
+      introSourceId: "",
       introStillTimeSeconds: null,
       titleCardDurationSeconds:
         settings.titleCardSeconds + NEWS_INTRO_GAP_SECONDS,
@@ -742,8 +835,15 @@ export function NewsClipsApp({
     } satisfies NewsClipProject
   }
 
-  function setProductionMode(mode: NewsClipProductionMode) {
-    if (project.productionMode === mode) return
+  function setProductionMode(
+    mode: NewsClipProductionMode,
+    sourceSelectionMode: NewsSourceSelectionMode
+  ) {
+    if (
+      project.productionMode === mode &&
+      project.sourceSelectionMode === sourceSelectionMode
+    )
+      return
     if (
       hasSavableProgress(project) &&
       !window.confirm(
@@ -753,7 +853,7 @@ export function NewsClipsApp({
       return
     }
     const next = resetNewsClipProjectProgress(
-      { ...project, productionMode: mode },
+      { ...project, productionMode: mode, sourceSelectionMode },
       null
     )
     setProject(next)
@@ -768,6 +868,7 @@ export function NewsClipsApp({
     setProject(issueProject)
     setStep("issue")
     const busyBase = `select-issue:${selectedIssue.id}`
+    let sourceReady = false
     setBusy(`${busyBase}:video`)
     setNote("")
     try {
@@ -777,6 +878,8 @@ export function NewsClipsApp({
         selectedIssue.articles[0]?.url?.trim() ||
         ""
       let stored: NewsSource
+      const supportingSources: NewsSource[] = []
+      let supportingCandidates: NewsSource[] = []
       if (isDirect && directUrl) {
         const existing =
           project.source?.originalUrl === directUrl && project.source.localFile
@@ -828,32 +931,48 @@ export function NewsClipsApp({
         if (!sourceResponse.ok || !sourceBody.results?.length) {
           throw new Error(sourceBody.message || "관련 원본을 찾지 못했습니다.")
         }
-        const preferredSource = sourceBody.results[0]!
-        setSourceSearch({
-          issueId: selectedIssue.id,
-          results: sourceBody.results,
-          message: `원본으로 ‘${preferredSource.title}’을(를) 사용합니다.`,
-          youtubeDataMissing: sourceBody.configured === false,
-          status: "complete",
-        })
-        stored = await storeAutomaticSource(
-          preferredSource,
-          new AbortController().signal
+        const storedSources = await storeAutomaticSourceSet(
+          sourceBody.results,
+          new AbortController().signal,
+          1
         )
-        if (!stored.localFile || stored.requiresUpload) {
+        stored = storedSources[0]!
+        if (!stored?.localFile || stored.requiresUpload) {
           throw new Error(
             "원본 영상을 받지 못했습니다. URL이나 파일로 직접 넣어 주세요."
           )
         }
+        setSourceSearch({
+          issueId: selectedIssue.id,
+          results: sourceBody.results,
+          message: `원본으로 ‘${stored.title}’을(를) 사용합니다.`,
+          youtubeDataMissing: sourceBody.configured === false,
+          status: "complete",
+        })
+        supportingCandidates = sourceBody.results
       }
       const sourceProject: NewsClipProject = {
         ...issueProject,
         source: stored,
-        supportingSources: [],
+        supportingSources,
         sourceIssueId: selectedIssue.id,
       }
       setProject(sourceProject)
+      if (
+        issueProject.productionMode === "report" &&
+        supportingCandidates.length > 0
+      ) {
+        void loadSupportingSourcesInBackground({
+          candidates: supportingCandidates,
+          primarySource: stored,
+          issueId: selectedIssue.id,
+          maximum: 2,
+        })
+      }
+      sourceReady = true
+      advanceStep("angles")
       setBusy(`${busyBase}:script`)
+      setNote("영상 확인을 마쳤습니다. 핵심 내용을 정리하고 있습니다.")
       await loadAnglesForSource(sourceProject, stored, selectedIssue, isDirect)
     } catch (error) {
       setNote(
@@ -861,7 +980,7 @@ export function NewsClipsApp({
           ? error.message
           : "이슈 원본을 준비하지 못했습니다."
       )
-      setStep("issue")
+      if (!sourceReady) setStep("issue")
     } finally {
       setBusy("")
     }
@@ -983,11 +1102,11 @@ export function NewsClipsApp({
           outputDurationSeconds:
             body.outputDurationSeconds ?? current.outputDurationSeconds,
           // 4번에서 확정한 문구·줄바꿈·시간은 렌더 응답으로 다시 쓰지 않는다.
-          subtitles: draft.subtitleTimingsLocked
-            ? current.subtitles
-            : Array.isArray(body.subtitles)
-              ? body.subtitles
-              : [],
+          subtitles: preservePreviewSubtitleEdits(
+            current.subtitles,
+            Array.isArray(body.subtitles) ? body.subtitles : undefined,
+            draft.subtitleTimingsLocked
+          ),
           transcript: Array.isArray(body.transcript)
             ? body.transcript
             : current.transcript,
@@ -1054,6 +1173,11 @@ export function NewsClipsApp({
           : target === "script"
             ? "rewrite-script"
             : "reselect"
+    const runId = crypto.randomUUID()
+    updateOperationProgress(busyKey, runId, 1)
+    const stopProgressPolling = startNewsTaskProgressPolling(runId, (percent) =>
+      updateOperationProgress(busyKey, runId, percent)
+    )
     setBusy(busyKey)
     setNote(
       target === "title"
@@ -1087,6 +1211,7 @@ export function NewsClipsApp({
           previousTitle: project.title,
           previousTitles: project.titleOptions,
           previousScript: project.reportScript,
+          jobId: runId,
           ...(selectedAngle
             ? {
                 angleTitle: selectedAngle.title,
@@ -1094,6 +1219,7 @@ export function NewsClipsApp({
                 angleKeywords: selectedAngle.keywords,
                 angleSourceStart: selectedAngle.sourceStart,
                 angleSourceEnd: selectedAngle.sourceEnd,
+                angleSourceRanges: selectedAngle.ranges ?? [],
               }
             : {}),
         }),
@@ -1265,10 +1391,13 @@ export function NewsClipsApp({
         })
         setNote("제목, 본문과 화면 연출을 다시 작성했습니다.")
       }
+      updateOperationProgress(busyKey, runId, 100)
     } catch {
       setNote("보도 대본을 다시 작성하지 못했습니다.")
     } finally {
       setBusy("")
+      stopProgressPolling()
+      updateOperationProgress(busyKey, runId, null)
     }
   }
 
@@ -1305,29 +1434,46 @@ export function NewsClipsApp({
     )
   }
 
-  function toggleAutoMode() {
-    if (autoMode) {
-      autoAbortRef.current?.abort()
-      autoAbortRef.current = null
-      setAutoMode(false)
-      if (busy.startsWith("auto:")) setBusy("")
-      setNote("자동생성 모드를 껐습니다.")
-      return
+  async function prepareReportVisualAssets(draft: NewsClipProject) {
+    if (draft.productionMode !== "report") {
+      setProject(draft)
+      return true
     }
-    setAutoMode(true)
-    setNote(
-      "자동생성 모드를 켰습니다. 이슈 자동 검색을 누르면 최종 영상까지 제작합니다."
-    )
+    const progressKey = "visual-assets"
+    const runId = crypto.randomUUID()
+    updateOperationProgress(progressKey, runId, 1)
+    setBusy(progressKey)
+    setNote("대본에 맞는 공개 이미지와 관련 영상을 배치하고 있습니다.")
+    try {
+      const result = await attachPublicVisualAssets(draft)
+      updateOperationProgress(progressKey, runId, 100)
+      setProject(result.project)
+      setNote(result.message)
+      return true
+    } catch {
+      setProject(draft)
+      setNote("공개 자료를 찾지 못해 기존 원본 화면으로 계속 진행합니다.")
+      return true
+    } finally {
+      setBusy("")
+      updateOperationProgress(progressKey, runId, null)
+    }
   }
 
   async function runYoutubeUrl(url: string) {
-    setBusy("url-source:video")
+    const progressKey = "url-source:video"
+    const runId = crypto.randomUUID()
+    updateOperationProgress(progressKey, runId, 1)
+    const stopProgressPolling = startNewsTaskProgressPolling(runId, (percent) =>
+      updateOperationProgress(progressKey, runId, percent)
+    )
+    setBusy(progressKey)
     setNote("")
     try {
       const sourceResponse = await fetch("/api/news-clips/source", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url, kind: "youtube" }),
+        body: JSON.stringify({ url, kind: "youtube", jobId: runId }),
       })
       const source = (await sourceResponse.json()) as NewsSource & {
         message?: string
@@ -1336,6 +1482,7 @@ export function NewsClipsApp({
         throw new Error(source.message || "YouTube 영상을 가져오지 못했습니다.")
       }
 
+      updateOperationProgress(progressKey, runId, 100)
       await finishDirectSource(source, url, "URL")
     } catch (error) {
       setNote(
@@ -1345,6 +1492,8 @@ export function NewsClipsApp({
       )
     } finally {
       setBusy("")
+      stopProgressPolling()
+      updateOperationProgress(progressKey, runId, null)
     }
   }
 
@@ -1383,6 +1532,24 @@ export function NewsClipsApp({
     sourceLabel: "URL" | "파일"
   ) {
     const selectedIssue = directSourceIssue(source)
+    const controller = new AbortController()
+    let relatedResults: NewsSource[] = []
+    if (project.productionMode === "report" && selectedIssue.searchQuery) {
+      try {
+        const response = await fetch(
+          `/api/news-clips/source?profileId=${encodeURIComponent(activeProfileId)}&query=${encodeURIComponent(selectedIssue.searchQuery)}&topic=${encodeURIComponent(selectedIssue.title)}&keywords=${encodeURIComponent(selectedIssue.keywords.join(","))}`,
+          { signal: controller.signal }
+        )
+        const body = (await response.json()) as { results?: NewsSource[] }
+        if (response.ok && body.results?.length) {
+          relatedResults = body.results.filter(
+            (candidate) => candidate.originalUrl !== source.originalUrl
+          )
+        }
+      } catch {
+        // 직접 지정한 핵심 원본만으로도 제작은 계속할 수 있다.
+      }
+    }
     const sourceProject: NewsClipProject = {
       ...resetNewsClipProjectProgress(project, selectedIssue),
       source,
@@ -1396,14 +1563,104 @@ export function NewsClipsApp({
     })
     setSourceSearch({
       issueId: selectedIssue.id,
-      results: [source],
+      results: [source, ...relatedResults],
       message: `입력한 ${sourceLabel} 영상을 핵심 원본으로 사용합니다.`,
       youtubeDataMissing: false,
       status: "complete",
     })
     setProject(sourceProject)
+    advanceStep("angles")
+    if (relatedResults.length > 0) {
+      void loadSupportingSourcesInBackground({
+        candidates: relatedResults,
+        primarySource: source,
+        issueId: selectedIssue.id,
+        maximum: 2,
+      })
+    }
     setBusy(sourceLabel === "파일" ? "file-source:script" : "url-source:script")
+    setNote("영상 확인을 마쳤습니다. 핵심 내용을 정리하고 있습니다.")
     await loadAnglesForSource(sourceProject, source, selectedIssue, true)
+  }
+
+  async function loadSupportingSourcesInBackground({
+    candidates,
+    primarySource,
+    issueId,
+    maximum,
+  }: {
+    candidates: NewsSource[]
+    primarySource: NewsSource
+    issueId: string
+    maximum: number
+  }) {
+    const alternatives = candidates.filter(
+      (candidate) => candidate.originalUrl !== primarySource.originalUrl
+    )
+    if (!alternatives.length) return
+    try {
+      const supportingSources = await storeAutomaticSourceSet(
+        alternatives,
+        new AbortController().signal,
+        maximum
+      )
+      if (!supportingSources.length) return
+      setProject((current) => {
+        if (
+          current.sourceIssueId !== issueId ||
+          current.source?.id !== primarySource.id
+        ) {
+          return current
+        }
+        const knownUrls = new Set(
+          current.supportingSources.map((source) => source.originalUrl)
+        )
+        const additions = supportingSources.filter(
+          (source) => !knownUrls.has(source.originalUrl)
+        )
+        if (!additions.length) return current
+        return {
+          ...current,
+          supportingSources: [...current.supportingSources, ...additions],
+          updatedAt: new Date().toISOString(),
+        }
+      })
+      setSourceSearch((current) =>
+        current.issueId === issueId
+          ? {
+              ...current,
+              message: `핵심 원본과 관련 자료 ${supportingSources.length}개를 준비했습니다.`,
+            }
+          : current
+      )
+    } catch {
+      // 보조 자료를 받지 못해도 핵심 원본 분석과 다음 단계는 계속한다.
+    }
+  }
+
+  async function retryAngles() {
+    if (!project.source) {
+      openStep("issue")
+      return
+    }
+    setBusy("angles")
+    setNote("")
+    try {
+      await loadAnglesForSource(
+        project,
+        project.source,
+        project.selectedIssue,
+        project.selectedIssue?.directSource === true
+      )
+    } catch (error) {
+      setNote(
+        error instanceof Error
+          ? error.message
+          : "핵심 내용을 다시 분석하지 못했습니다."
+      )
+    } finally {
+      setBusy("")
+    }
   }
 
   async function loadAnglesForSource(
@@ -1419,6 +1676,7 @@ export function NewsClipsApp({
         sourceId: source.id,
         profileId: activeProfileId,
         productionMode: sourceProject.productionMode,
+        sourceSelectionMode: sourceProject.sourceSelectionMode,
         issueTitle: selectedIssue?.title ?? "",
         directSource,
       }),
@@ -1429,6 +1687,7 @@ export function NewsClipsApp({
       detectedSilences?: NewsClipProject["detectedSilences"]
       sourceChannel?: string
       sourceTitle?: string
+      sourceOverview?: string
       message?: string
     }
     if (!response.ok || !body.angles?.length) {
@@ -1439,14 +1698,20 @@ export function NewsClipsApp({
       channel: body.sourceChannel?.trim() || source.channel,
       title: body.sourceTitle?.trim() || source.title,
     }
-    setProject({
+    setProject((current) => ({
       ...sourceProject,
+      supportingSources:
+        current.source?.id === source.id &&
+        current.sourceIssueId === sourceProject.sourceIssueId
+          ? current.supportingSources
+          : sourceProject.supportingSources,
       source: nextSource,
       transcript: body.transcript ?? [],
       detectedSilences: body.detectedSilences ?? [],
       angleOptions: normalizeAngleOptions(body.angles),
       selectedAngleId: "",
-    })
+      sourceOverview: body.sourceOverview?.trim() ?? "",
+    }))
     setTranscriptDraft("")
     advanceStep("angles")
     setNote("")
@@ -1460,8 +1725,14 @@ export function NewsClipsApp({
     const signal = controller.signal
     const selectedIssue = project.selectedIssue
     const directSource = selectedIssue?.directSource === true
+    const progressKey = `select-angle:${angle.id}:script`
+    const runId = crypto.randomUUID()
+    updateOperationProgress(progressKey, runId, 1)
+    const stopProgressPolling = startNewsTaskProgressPolling(runId, (percent) =>
+      updateOperationProgress(progressKey, runId, percent)
+    )
     setProject((current) => ({ ...current, selectedAngleId: angle.id }))
-    setBusy(`select-angle:${angle.id}:script`)
+    setBusy(progressKey)
     setNote("")
     try {
       const analyzeResponse = await fetch("/api/news-clips/analyze", {
@@ -1475,7 +1746,9 @@ export function NewsClipsApp({
           issueReason: selectedIssue?.recommendationReason ?? "",
           issueArticleTitles:
             selectedIssue?.articles.map((article) => article.title) ?? [],
-          supportingSourceIds: [],
+          supportingSourceIds: project.supportingSources.map(
+            (source) => source.id
+          ),
           productionMode: project.productionMode,
           directSource,
           angleTitle: angle.title,
@@ -1483,7 +1756,8 @@ export function NewsClipsApp({
           angleKeywords: angle.keywords,
           angleSourceStart: angle.sourceStart,
           angleSourceEnd: angle.sourceEnd,
-          transcript: serializeTranscript(project.transcript),
+          angleSourceRanges: angle.ranges ?? [],
+          jobId: runId,
         }),
         signal,
       })
@@ -1538,6 +1812,7 @@ export function NewsClipsApp({
         subtitleTimingsLocked: false,
       }
       setProject(nextProject)
+      updateOperationProgress(progressKey, runId, 100)
       if (signal.aborted) return
       advanceStep("script")
     } catch (error) {
@@ -1550,6 +1825,8 @@ export function NewsClipsApp({
         angleAbortRef.current = null
         setBusy("")
       }
+      stopProgressPolling()
+      updateOperationProgress(progressKey, runId, null)
     }
   }
 
@@ -1563,301 +1840,110 @@ export function NewsClipsApp({
     setFurthestStep("angles")
   }
 
-  async function runAutomaticGeneration(query = "") {
-    const controller = new AbortController()
-    autoAbortRef.current?.abort()
-    autoAbortRef.current = controller
-    const signal = controller.signal
-    const ensureRunning = () => {
-      if (signal.aborted) throw new DOMException("Aborted", "AbortError")
-    }
-    try {
-      if (showSettings) {
-        router.push(
-          `/studio/news-clips?channel=${encodeURIComponent(activeProfileId)}`
-        )
-      }
-      setBusy("auto:issues")
-      setNote("자동생성 · 채널 방향과 화제성을 함께 비교하고 있습니다.")
-      const issueResponse = await fetch(
-        `/api/news-clips/issues?profileId=${encodeURIComponent(activeProfileId)}&query=${encodeURIComponent(query)}&limit=12`,
-        { signal }
-      )
-      const issueBody = (await issueResponse.json()) as {
-        issues?: RecommendedNewsIssue[]
-        message?: string
-      }
-      if (!issueResponse.ok || !issueBody.issues?.length) {
-        throw new Error(issueBody.message || "추천 이슈를 찾지 못했습니다.")
-      }
-      ensureRunning()
-      const selectedIssue = [...issueBody.issues].sort(
-        (left, right) =>
-          automaticIssueScore(right) - automaticIssueScore(left) ||
-          right.score - left.score ||
-          right.trendScore - left.trendScore
-      )[0]
-      const issueProject = resetNewsClipProjectProgress(project, selectedIssue)
-      setIssueSearch({
-        query,
-        issues: issueBody.issues,
-        dismissedIssueKeys: [],
-      })
-      setProject(issueProject)
-      setBusy("auto:sources")
-      setNote(`자동생성 · ‘${selectedIssue.title}’ 관련 원본을 찾고 있습니다.`)
-
-      const sourceResponse = await fetch(
-        `/api/news-clips/source?profileId=${encodeURIComponent(activeProfileId)}&query=${encodeURIComponent(selectedIssue.searchQuery)}&topic=${encodeURIComponent(selectedIssue.title)}&keywords=${encodeURIComponent(selectedIssue.keywords.join(","))}`,
-        { signal }
-      )
-      const sourceBody = (await sourceResponse.json()) as {
-        results?: NewsSource[]
-        configured?: boolean
-        message?: string
-      }
-      if (!sourceResponse.ok || !sourceBody.results?.length) {
-        throw new Error(sourceBody.message || "관련 원본을 찾지 못했습니다.")
-      }
-      setSourceSearch({
-        issueId: selectedIssue.id,
-        results: sourceBody.results,
-        message: "자동생성 모드가 원본을 선택했습니다.",
-        youtubeDataMissing: sourceBody.configured === false,
-        status: "complete",
-      })
-
-      let primarySource: NewsSource | null = null
-      for (const candidate of sourceBody.results) {
-        ensureRunning()
-        try {
-          const stored = await storeAutomaticSource(candidate, signal)
-          if (stored.localFile && !stored.requiresUpload) {
-            primarySource = stored
-            break
-          }
-        } catch (error) {
-          if (error instanceof DOMException && error.name === "AbortError")
-            throw error
-        }
-      }
-      if (!primarySource) {
-        throw new Error(
-          "자동으로 저장 가능한 원본이 없습니다. 다른 이슈를 선택하거나 원본 파일을 추가해 주세요."
-        )
-      }
-      const sourceProject: NewsClipProject = {
-        ...issueProject,
-        source: primarySource,
-        supportingSources: [],
-        sourceIssueId: selectedIssue.id,
-      }
-      setProject(sourceProject)
-      setBusy("auto:script")
-      setNote("자동생성 · 원본 핵심 각도를 고르고 대본을 만들고 있습니다.")
-      const anglesResponse = await fetch("/api/news-clips/angles", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sourceId: primarySource.id,
-          profileId: activeProfileId,
-          productionMode: sourceProject.productionMode,
-          issueTitle: selectedIssue.title,
-          directSource: false,
-        }),
-        signal,
-      })
-      const anglesBody = (await anglesResponse.json()) as {
-        transcript?: NewsClipProject["transcript"]
-        angles?: NewsAngleOption[]
-        detectedSilences?: NewsClipProject["detectedSilences"]
-        sourceChannel?: string
-        sourceTitle?: string
-        message?: string
-      }
-      if (!anglesResponse.ok || !anglesBody.angles?.length) {
-        throw new Error(anglesBody.message || "핵심 각도를 만들지 못했습니다.")
-      }
-      ensureRunning()
-      const autoAngles = normalizeAngleOptions(anglesBody.angles)
-      const autoAngle = autoAngles[0]!
-      const angledSource: NewsSource = {
-        ...primarySource,
-        channel: anglesBody.sourceChannel?.trim() || primarySource.channel,
-        title: anglesBody.sourceTitle?.trim() || primarySource.title,
-      }
-      const analyzeResponse = await fetch("/api/news-clips/analyze", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sourceId: angledSource.id,
-          profileId: activeProfileId,
-          issueTitle: selectedIssue.title,
-          issueKeywords: selectedIssue.keywords,
-          issueReason: selectedIssue.recommendationReason,
-          issueArticleTitles: selectedIssue.articles.map(
-            (article) => article.title
-          ),
-          supportingSourceIds: [],
-          productionMode: sourceProject.productionMode,
-          angleTitle: autoAngle.title,
-          angleSummary: autoAngle.summary,
-          angleKeywords: autoAngle.keywords,
-          angleSourceStart: autoAngle.sourceStart,
-          angleSourceEnd: autoAngle.sourceEnd,
-        }),
-        signal,
-      })
-      const analysis = (await analyzeResponse.json()) as {
-        transcript?: NewsClipProject["transcript"]
-        candidates?: NewsClipCandidate[]
-        selectedCandidate?: NewsClipCandidate
-        detectedSilences?: NewsClipProject["detectedSilences"]
-        removedRanges?: NewsClipProject["removedRanges"]
-        keepRanges?: NewsClipProject["keepRanges"]
-        reportScript?: string
-        reportScenes?: NewsReportScene[]
-        sourceChannel?: string
-        sourceTitle?: string
-        message?: string
-      }
-      if (
-        !analyzeResponse.ok ||
-        !analysis.transcript ||
-        !analysis.candidates ||
-        !analysis.selectedCandidate
-      ) {
-        throw new Error(analysis.message || "자동 대본을 만들지 못했습니다.")
-      }
-      ensureRunning()
-      const draft = prepareAutomaticDraft(
-        {
-          ...sourceProject,
-          source: angledSource,
-          angleOptions: autoAngles,
-          selectedAngleId: autoAngle.id,
-          transcript: anglesBody.transcript ?? [],
-          detectedSilences: anglesBody.detectedSilences ?? [],
-        },
-        angledSource,
-        analysis.transcript,
-        analysis.candidates,
-        analysis.selectedCandidate,
-        analysis.detectedSilences ?? anglesBody.detectedSilences ?? [],
-        analysis.reportScript ?? "",
-        analysis.reportScenes ?? [],
-        analysis.removedRanges ?? [],
-        analysis.keepRanges ?? [],
-        {
-          channel: analysis.sourceChannel,
-          title: analysis.sourceTitle,
-        }
-      )
-      setProject({
-        ...draft,
-        angleOptions: autoAngles,
-        selectedAngleId: autoAngle.id,
-      })
-      setBusy("auto:preview")
-      setNote("자동생성 · 360×640 저해상도 초안을 렌더링하고 있습니다.")
-      const previewProject = await renderAutomaticProject(
-        "/api/news-clips/preview",
-        draft,
-        settings,
-        signal
-      )
-      ensureRunning()
-      setProject(previewProject)
-      setBusy("auto:final")
-      setNote("자동생성 · 720×1280 최종 영상을 렌더링하고 있습니다.")
-      let finalProject = await renderAutomaticProject(
-        "/api/news-clips/render",
-        previewProject,
-        settings,
-        signal
-      )
-      ensureRunning()
-      if (settings.youtubeAutoUpload) {
-        setNote("자동생성 · YouTube에 예약 업로드하고 있습니다.")
-        finalProject = await uploadAutomaticNewsClip(finalProject, signal)
-        ensureRunning()
-      }
-      setProject(finalProject)
-      setStep("final")
-      setFurthestStep("final")
-      const saved = await persistHistory(finalProject, "final", "final", true)
-      setNote(
-        saved
-          ? `자동생성 완료 · 적합도 ${selectedIssue.score}점 · 화제성 ${selectedIssue.trendScore}점`
-          : "영상은 완성했지만 저장하지 못했습니다."
-      )
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return
-      setNote(
-        error instanceof Error
-          ? `자동생성 중단 · ${error.message}`
-          : "자동생성을 완료하지 못했습니다."
-      )
-    } finally {
-      if (autoAbortRef.current === controller) {
-        autoAbortRef.current = null
-        setBusy("")
-      }
-    }
+  const historySaveProps = {
+    busy: busy === "history-save",
+    disabled: busy !== "" || !hasSavableProgress(project),
+    progress: operationProgressPercent(operationProgress, "history-save"),
+    onSave: () => {
+      void saveCurrentHistory()
+    },
   }
 
   return (
     <div className="flex h-svh bg-background text-foreground">
       <aside className="sticky top-0 flex h-svh w-60 shrink-0 flex-col border-r border-separator bg-surface">
-        <div className="flex flex-col gap-1 p-3">
-          <Button
-            variant="ghost"
-            fullWidth
-            className="justify-start"
-            isDisabled={busy.startsWith("auto:")}
-            onPress={() => router.push("/")}
+        <div className="flex h-16 shrink-0 items-center px-3">
+          <button
+            type="button"
+            aria-label="ShortsFactory 홈"
+            className="flex h-[25px] w-full items-center justify-start overflow-hidden"
+            disabled={busy.startsWith("auto:")}
+            onClick={() => router.push("/")}
           >
-            <span className="grid w-full grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 text-left text-sm font-normal">
-              <Home className="size-4 justify-self-center" />
-              <span className="truncate">홈</span>
-            </span>
-          </Button>
-          <div className="flex items-center gap-2 py-2 pr-0 pl-3">
-            <Avatar className="size-10 shrink-0">
-              {profile.avatarUrl ? (
-                <Avatar.Image
-                  src={profile.avatarUrl}
-                  alt={`${profile.name} 채널 프로필`}
-                  referrerPolicy="no-referrer"
-                />
-              ) : null}
-              <Avatar.Fallback className="text-sm font-semibold">
-                {profile.name.trim().slice(0, 1) || "N"}
-              </Avatar.Fallback>
-            </Avatar>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs tracking-wide text-muted">채널명</p>
-              <h1 className="mt-1 truncate text-sm font-medium">
-                {profile.name}
-              </h1>
-            </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              isIconOnly
-              aria-label="뉴스 채널 변경"
-              className="shrink-0"
-              onPress={() => router.push("/studio/news-clips")}
-            >
-              <ArrowLeftRight className="size-4" />
-            </Button>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/shortsfactory-logo.svg?v=5"
+              alt="ShortsFactory"
+              className="h-[25px] w-auto max-w-full object-contain"
+            />
+          </button>
+        </div>
+        <Separator />
+        <div className="flex shrink-0 items-center gap-2 px-3 py-3">
+          <Avatar className="size-10 shrink-0">
+            {profile.avatarUrl ? (
+              <Avatar.Image
+                src={profile.avatarUrl}
+                alt={`${profile.name} 채널 프로필`}
+                referrerPolicy="no-referrer"
+              />
+            ) : null}
+            <Avatar.Fallback className="text-sm font-semibold">
+              {profile.name.trim().slice(0, 1) || "N"}
+            </Avatar.Fallback>
+          </Avatar>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs tracking-wide text-muted">채널명</p>
+            <h1 className="mt-1 truncate text-sm font-medium">
+              {profile.name}
+            </h1>
           </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            isIconOnly
+            aria-label="뉴스 채널 변경"
+            className="shrink-0"
+            isDisabled={busy.startsWith("auto:")}
+            onPress={() => router.push("/studio/news-clips")}
+          >
+            <ArrowLeftRight className="size-4" />
+          </Button>
         </div>
         <Separator />
         <nav className="flex flex-1 flex-col gap-1 p-3">
-          {VISIBLE_NEWS_CLIP_STEPS.map((item, index) => {
+          <Select
+            aria-label="제작 형식"
+            className="mb-2 w-full"
+            isDisabled={busy.startsWith("auto:")}
+            selectedKey={productionFormatKey(
+              project.productionMode,
+              project.sourceSelectionMode
+            )}
+            onSelectionChange={(key) => {
+              if (key == null || busy.startsWith("auto:")) return
+              const modeId = String(key)
+              setProductionMode(
+                modeId === "report" ? "report" : "buildup2",
+                modeId === "video-summary" ? "video-summary" : "single-range"
+              )
+            }}
+          >
+            <Select.Trigger className="w-full !border !border-solid !border-separator-tertiary !bg-transparent shadow-none outline-none ring-0 hover:!bg-transparent focus:!border-separator-tertiary focus:!bg-transparent focus:!shadow-none focus:!outline-none focus:!ring-0 focus-visible:!border-separator-tertiary focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:!outline-none focus-visible:!ring-0 data-[hovered=true]:!bg-transparent data-[focus=true]:!border-separator-tertiary data-[focus=true]:!bg-transparent data-[focus=true]:!shadow-none data-[focus-visible=true]:!border-separator-tertiary data-[focus-visible=true]:!bg-transparent data-[focus-visible=true]:!shadow-none data-[focus-visible=true]:!outline-none data-[focus-visible=true]:!ring-0 data-[open=true]:!border-separator-tertiary data-[open=true]:!bg-transparent data-[pressed=true]:!border-separator-tertiary data-[pressed=true]:!bg-transparent">
+              <Select.Value />
+              <Select.Indicator />
+            </Select.Trigger>
+            <Select.Popover>
+              <ListBox>
+                <ListBox.Item id="single-range" textValue="원본 구간형">
+                  원본 구간형
+                </ListBox.Item>
+                <ListBox.Item id="video-summary" textValue="영상 요약형">
+                  영상 요약형
+                </ListBox.Item>
+                <ListBox.Item id="report" textValue="보도형">
+                  보도형
+                </ListBox.Item>
+              </ListBox>
+            </Select.Popover>
+          </Select>
+          {visibleNewsClipSteps(project.productionMode).map((item, index) => {
             const completed = stepIndex(item.id) < stepIndex(furthestStep)
-            const activeStep = visibleWorkflowStep(step)
+            const activeStep = visibleWorkflowStep(step, project.productionMode)
+            const stepLabel =
+              item.id === "issue" && project.productionMode === "report"
+                ? "이슈·자료 선택"
+                : item.label
             return (
               <Button
                 key={item.id}
@@ -1868,14 +1954,13 @@ export function NewsClipsApp({
                 }
                 fullWidth
                 className="justify-start px-4"
-                isDisabled={busy.startsWith("auto:")}
                 onPress={() => openStep(item.id)}
               >
                 <span className="grid w-full grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 text-left text-[14px] font-medium">
                   <span className="justify-self-center text-center leading-none text-muted tabular-nums">
                     {index + 1}
                   </span>
-                  <span className="truncate">{item.label}</span>
+                  <span className="truncate">{stepLabel}</span>
                   {completed ? (
                     <Check className="size-3.5 text-muted" />
                   ) : (
@@ -1887,18 +1972,6 @@ export function NewsClipsApp({
           })}
         </nav>
         <div className="flex flex-col gap-1 p-3">
-          <Button
-            variant="ghost"
-            fullWidth
-            className="justify-start"
-            isDisabled={busy.startsWith("auto:")}
-            onPress={newProject}
-          >
-            <span className="grid w-full grid-cols-[1rem_minmax(0,1fr)] items-center gap-2 text-left text-sm font-normal">
-              <Plus className="size-4 justify-self-center" />
-              <span className="truncate">새 영상 만들기</span>
-            </span>
-          </Button>
           <Button
             variant={showHistory ? "secondary" : "ghost"}
             fullWidth
@@ -1934,187 +2007,150 @@ export function NewsClipsApp({
         </div>
       </aside>
 
-      <div className="h-svh min-h-0 flex-1 overflow-y-auto">
-        <main className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-6">
-          <div className="sticky top-0 z-30 -mx-6 -mt-6 flex min-h-14 items-center justify-end gap-3 border-b border-separator bg-background/95 px-6 py-3 backdrop-blur">
-            {busy.startsWith("auto:") ? (
-              <span className="text-xs text-muted">
-                {automaticModeStatus(busy)} · OFF로 중지
-              </span>
-            ) : null}
-            {project.productionMode === "report" ? (
-              <Switch
-                isSelected={autoMode}
-                isDisabled={busy !== "" && !busy.startsWith("auto:")}
-                onChange={toggleAutoMode}
-                aria-label="자동생성 모드"
-              >
-                <Switch.Content>
-                  <Switch.Control>
-                    <Switch.Thumb />
-                  </Switch.Control>
-                  자동생성
-                </Switch.Content>
-              </Switch>
-            ) : (
-              <span className="rounded-full bg-default px-3 py-1.5 text-xs font-medium">
-                빌드업형
-              </span>
-            )}
-            <Button
-              size="sm"
-              variant="outline"
-              isDisabled={
-                busy === "history-save"
-                  ? false
-                  : busy !== "" || !hasSavableProgress(project)
+      <main className="flex h-svh min-h-0 w-full flex-1 flex-col overflow-hidden">
+        {showHistory ? (
+          <NewsHistoryPanel
+            profileId={profile.id}
+            currentId={project.id}
+            onOpen={openHistory}
+          />
+        ) : showSettings ? (
+          <NewsClipSettingsPanel
+            key={profile.id}
+            profileId={profile.id}
+            previewTitle={project.title}
+            previewSubtitle={project.subtitles[0]?.text ?? ""}
+            initialTab={settingsTab}
+            accountNotice={accountNotice}
+            youtubeChannelId={profile.youtubeChannelId}
+            onPreviewChange={applySettingsPreview}
+            onClose={() =>
+              router.push(
+                `/studio/news-clips?channel=${encodeURIComponent(profile.id)}`
+              )
+            }
+            onSaved={applySettingsPreview}
+          />
+        ) : step === "angles" ? (
+          <AnglesStep
+            angles={project.angleOptions}
+            transcript={project.transcript}
+            selectedAngleId={project.selectedAngleId}
+            sourceSelectionMode={project.sourceSelectionMode}
+            sourceOverview={project.sourceOverview}
+            sourceId={project.source?.id ?? ""}
+            sourceDuration={project.source?.durationSeconds ?? 0}
+            sourceTitle={project.source?.title}
+            busy={busy}
+            note={note}
+            onRetry={() => void retryAngles()}
+            onChoose={(angle) => void runSelectedAngle(angle)}
+            onCancelSelection={cancelSelectedAngle}
+            progress={operationProgressPercent(operationProgress, busy)}
+            historySave={historySaveProps}
+          />
+        ) : step === "issue" || step === "source" ? (
+          <SourceStep
+            mode="issue"
+            profileId={profile.id}
+            productionMode={project.productionMode}
+            sourceSelectionMode={project.sourceSelectionMode}
+            selectedIssue={project.selectedIssue}
+            source={project.source}
+            transcript={transcriptDraft}
+            issueSearch={issueSearch}
+            sourceSearch={sourceSearch}
+            note={note}
+            busy={busy}
+            progress={operationProgressPercent(operationProgress, busy)}
+            historySave={historySaveProps}
+            onNewProject={newProject}
+            onYoutubeUrl={(url) => void runYoutubeUrl(url)}
+            onVideoFile={(file) => void runVideoFile(file)}
+            onTranscript={setTranscriptDraft}
+            onIssueSearch={(patch) =>
+              setIssueSearch((current) => ({ ...current, ...patch }))
+            }
+            onSourceSearch={(patch) =>
+              setSourceSearch((current) => ({ ...current, ...patch }))
+            }
+            onSource={(source) =>
+              updateProject({
+                source,
+                sourceIssueId: project.selectedIssue?.id ?? "",
+                supportingSources: [],
+              })
+            }
+            onIssueSelected={(selectedIssue) => {
+              void runSelectedIssue(selectedIssue)
+            }}
+            onIssueStepRequested={() => openStep("issue")}
+            onNote={setNote}
+            onBusy={setBusy}
+            onAnalyzed={async (source) => {
+              const sourceProject: NewsClipProject = {
+                ...project,
+                source,
+                supportingSources: [],
+                sourceIssueId: project.selectedIssue?.id ?? "",
               }
-              onPress={() => void saveCurrentHistory()}
-            >
-              <LoadingButtonLabel
-                loading={busy === "history-save"}
-                label="저장"
-                loadingLabel="저장 중"
-              />
-            </Button>
-          </div>
-          {showHistory ? (
-            <NewsHistoryPanel
-              profileId={profile.id}
-              currentId={project.id}
-              onOpen={openHistory}
-            />
-          ) : showSettings ? (
-            <NewsClipSettingsPanel
-              key={profile.id}
-              profileId={profile.id}
-              previewTitle={project.title}
-              previewSubtitle={project.subtitles[0]?.text ?? ""}
-              initialTab={settingsTab}
-              accountNotice={accountNotice}
-              youtubeChannelId={profile.youtubeChannelId}
-              onPreviewChange={applySettingsPreview}
-              onClose={() =>
-                router.push(
-                  `/studio/news-clips?channel=${encodeURIComponent(profile.id)}`
+              setProject(sourceProject)
+              setBusy("analyze")
+              try {
+                await loadAnglesForSource(
+                  sourceProject,
+                  source,
+                  project.selectedIssue,
+                  project.selectedIssue?.directSource === true
                 )
+              } catch (error) {
+                setNote(
+                  error instanceof Error
+                    ? error.message
+                    : "핵심 각도를 만들지 못했습니다."
+                )
+              } finally {
+                setBusy("")
               }
-              onSaved={applySettingsPreview}
-            />
-          ) : step === "angles" ? (
-            <AnglesStep
-              angles={project.angleOptions}
-              transcript={project.transcript}
-              selectedAngleId={project.selectedAngleId}
-              sourceTitle={project.source?.title}
-              busy={busy}
-              note={note}
-              onBack={() => openStep("issue")}
-              onChoose={(angle) => void runSelectedAngle(angle)}
-              onCancelSelection={cancelSelectedAngle}
-            />
-          ) : step === "issue" || step === "source" ? (
-            <SourceStep
-              mode="issue"
-              profileId={profile.id}
-              productionMode={project.productionMode}
-              selectedIssue={project.selectedIssue}
-              source={project.source}
-              transcript={transcriptDraft}
-              issueSearch={issueSearch}
-              sourceSearch={sourceSearch}
-              note={note}
-              busy={busy}
-              autoMode={autoMode}
-              onProductionMode={setProductionMode}
-              onAutomaticGeneration={(query) =>
-                void runAutomaticGeneration(query)
-              }
-              onYoutubeUrl={(url) => void runYoutubeUrl(url)}
-              onVideoFile={(file) => void runVideoFile(file)}
-              onTranscript={setTranscriptDraft}
-              onIssueSearch={(patch) =>
-                setIssueSearch((current) => ({ ...current, ...patch }))
-              }
-              onSourceSearch={(patch) =>
-                setSourceSearch((current) => ({ ...current, ...patch }))
-              }
-              onSource={(source) =>
-                updateProject({
-                  source,
-                  sourceIssueId: project.selectedIssue?.id ?? "",
-                  supportingSources: [],
-                })
-              }
-              onIssueSelected={(selectedIssue) => {
-                void runSelectedIssue(selectedIssue)
-              }}
-              onIssueStepRequested={() => openStep("issue")}
-              onNote={setNote}
-              onBusy={setBusy}
-              onAnalyzed={async (source) => {
-                const sourceProject: NewsClipProject = {
-                  ...project,
-                  source,
-                  supportingSources: [],
-                  sourceIssueId: project.selectedIssue?.id ?? "",
-                }
-                setProject(sourceProject)
-                setBusy("analyze")
-                try {
-                  await loadAnglesForSource(
-                    sourceProject,
-                    source,
-                    project.selectedIssue,
-                    project.selectedIssue?.directSource === true
-                  )
-                } catch (error) {
-                  setNote(
-                    error instanceof Error
-                      ? error.message
-                      : "핵심 각도를 만들지 못했습니다."
-                  )
-                } finally {
-                  setBusy("")
-                }
-              }}
-            />
-          ) : (
-            <ReviewStep
-              mode={
-                step as Exclude<NewsClipStep, "issue" | "source" | "angles">
-              }
-              project={project}
-              settings={settings}
-              note={note}
-              busy={busy}
-              previewProgress={previewProgress}
-              onBack={() => openStep(previousReviewStep(step))}
-              onNext={() => advanceStep(nextReviewStep(step))}
-              onProject={updateProject}
-              onSettings={(patch) => void updateTtsSettings(patch)}
-              onBusy={setBusy}
-              onNote={setNote}
-              onPreview={(force, draft, part) =>
-                generatePreview(draft ?? project, force, {
-                  part,
-                  busyKey:
-                    part && part !== "all" ? `preview:${part}` : "preview",
-                  note:
-                    part && part !== "all"
-                      ? "선택한 구간의 미리보기를 만드는 중입니다."
-                      : undefined,
-                })
-              }
-              onCancelPreview={cancelPreview}
-              onReselect={(target) => reselectCandidate(target)}
-              onFinalized={(finalizedProject) =>
-                persistHistory(finalizedProject, "final", "final", true)
-              }
-            />
-          )}
-        </main>
-      </div>
+            }}
+          />
+        ) : (
+          <ReviewStep
+            mode={step as Exclude<NewsClipStep, "issue" | "source" | "angles">}
+            project={project}
+            settings={settings}
+            note={note}
+            busy={busy}
+            previewProgress={previewProgress}
+            operationProgress={operationProgress}
+            onOperationProgress={updateOperationProgress}
+            historySave={historySaveProps}
+            onNext={() =>
+              advanceStep(nextReviewStep(step, project.productionMode))
+            }
+            onPrepareVisualAssets={prepareReportVisualAssets}
+            onProject={updateProject}
+            onSettings={(patch) => void updateTtsSettings(patch)}
+            onBusy={setBusy}
+            onNote={setNote}
+            onPreview={(force, draft, part) =>
+              generatePreview(draft ?? project, force, {
+                part,
+                busyKey: part && part !== "all" ? `preview:${part}` : "preview",
+                note:
+                  part && part !== "all"
+                    ? "선택한 구간의 미리보기를 만드는 중입니다."
+                    : undefined,
+              })
+            }
+            onCancelPreview={cancelPreview}
+            onReselect={(target) => reselectCandidate(target)}
+            onFinalized={(finalizedProject) =>
+              persistHistory(finalizedProject, "final", "final", true)
+            }
+          />
+        )}
+      </main>
     </div>
   )
 }
@@ -2126,10 +2162,6 @@ function newsSettingsTab(value: string | null) {
     value === "accounts"
     ? value
     : "search"
-}
-
-function automaticIssueScore(issue: RecommendedNewsIssue) {
-  return issue.score + (issue.trendScore ?? 0)
 }
 
 function directSourceIssue(source: NewsSource): RecommendedNewsIssue {
@@ -2161,12 +2193,143 @@ function directSourceIssue(source: NewsSource): RecommendedNewsIssue {
   }
 }
 
-function automaticModeStatus(busy: string) {
-  if (busy === "auto:sources") return "원본 자료 선택 중"
-  if (busy === "auto:script") return "대본·연출 생성 중"
-  if (busy === "auto:preview") return "저해상도 초안 생성 중"
-  if (busy === "auto:final") return "최종 영상 생성 중"
-  return "이슈 자동 검색 중"
+async function attachPublicVisualAssets(
+  draft: NewsClipProject,
+  signal?: AbortSignal
+) {
+  if (draft.productionMode !== "report") {
+    return { project: draft, message: "" }
+  }
+  const knownSources = [draft.source, ...draft.supportingSources].filter(
+    (source): source is NewsSource => Boolean(source)
+  )
+  const knownById = new Map(knownSources.map((source) => [source.id, source]))
+  if (
+    draft.reportScenes.some(
+      (scene) =>
+        knownById.get(scene.sourceId || "")?.provider === "wikimedia_commons"
+    )
+  ) {
+    return { project: draft, message: "공개 이미지 배치를 유지했습니다." }
+  }
+
+  const issueTerms = [
+    ...(draft.selectedIssue?.keywords ?? []),
+    ...issueTokens(draft.selectedIssue?.title ?? ""),
+  ]
+  const queries = draft.reportScenes
+    .filter((scene) => {
+      if (isEndCtaScene(scene)) return false
+      // 서두·마무리는 원본 화면을 유지하고, 본문만 공개 자료로 채운다.
+      const part = reportScenePart(scene, draft.productionMode)
+      if (part === "lead" || part === "outro") return false
+      const currentSource = knownById.get(scene.sourceId || "")
+      return (
+        !currentSource ||
+        currentSource.id === draft.source?.id ||
+        currentSource.provider === "wikimedia_commons"
+      )
+    })
+    .slice(0, 4)
+    .map((scene) => ({
+      sceneId: scene.id,
+      query: [
+        ...issueTerms.slice(0, 3),
+        ...issueTokens(scene.narration).slice(0, 4),
+      ]
+        .filter(Boolean)
+        .join(" "),
+    }))
+    .filter((item) => item.query)
+  if (!queries.length) {
+    return {
+      project: draft,
+      message: "검색할 장면 핵심어가 없어 기존 원본 화면으로 구성했습니다.",
+    }
+  }
+
+  const response = await fetch("/api/news-clips/visual-assets", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ queries }),
+    signal,
+  })
+  const body = (await response.json()) as {
+    sources?: NewsSource[]
+    assignments?: Array<{ sceneId: string; sourceId: string }>
+    message?: string
+  }
+  if (!response.ok) {
+    throw new Error(body.message || "공개 자료를 찾지 못했습니다.")
+  }
+
+  const returnedSources = Array.isArray(body.sources) ? body.sources : []
+  const returnedById = new Map(
+    returnedSources.map((source) => [source.id, source])
+  )
+  const assignmentByScene = new Map(
+    (body.assignments ?? []).map((item) => [item.sceneId, item.sourceId])
+  )
+  const acceptedSourceIds = new Set<string>()
+  const reportScenes = draft.reportScenes.map((scene) => {
+    const sourceId = assignmentByScene.get(scene.id)
+    const publicSource = sourceId ? returnedById.get(sourceId) : undefined
+    if (!publicSource) return scene
+    const currentSource = knownById.get(scene.sourceId || "")
+    // 이미 선택된 보조 영상은 공개 이미지 자동 배치가 덮지 않는다.
+    if (
+      currentSource &&
+      currentSource.id !== draft.source?.id &&
+      currentSource.provider !== "wikimedia_commons"
+    ) {
+      return scene
+    }
+    acceptedSourceIds.add(publicSource.id)
+    return {
+      ...scene,
+      visual: "source" as const,
+      visualMode: "supporting" as const,
+      sourceId: publicSource.id,
+      sourceStart: 0,
+      sourceEnd: Math.max(0.5, publicSource.durationSeconds || 12),
+      // 공개 자료도 확대 없이 넣고, 확대·위치는 사용자가 따로 맞춘다.
+      crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
+    }
+  })
+  const acceptedSources = returnedSources.filter((source) =>
+    acceptedSourceIds.has(source.id)
+  )
+  const mergedSources = [...draft.supportingSources]
+  const mergedIds = new Set(mergedSources.map((source) => source.id))
+  for (const source of acceptedSources) {
+    if (!mergedIds.has(source.id)) {
+      mergedSources.push(source)
+      mergedIds.add(source.id)
+    }
+  }
+  const visualChanged = acceptedSources.length > 0
+  const project: NewsClipProject = {
+    ...draft,
+    supportingSources: mergedSources,
+    reportScenes,
+    ...(visualChanged
+      ? {
+          editorialRevision: draft.editorialRevision + 1,
+          previewRevision: 0,
+          finalRevision: 0,
+          renderSignature: "",
+          outputUrl: "",
+        }
+      : {}),
+    updatedAt: new Date().toISOString(),
+  }
+  return {
+    project,
+    message: visualChanged
+      ? `대본에 맞는 공개 이미지 ${acceptedSources.length}개를 배치했습니다.`
+      : body.message ||
+        "적합한 공개 이미지를 찾지 못해 기존 원본 화면으로 구성했습니다.",
+  }
 }
 
 async function storeAutomaticSource(source: NewsSource, signal: AbortSignal) {
@@ -2194,79 +2357,38 @@ async function storeAutomaticSource(source: NewsSource, signal: AbortSignal) {
   return body
 }
 
-async function renderAutomaticProject(
-  endpoint: "/api/news-clips/preview" | "/api/news-clips/render",
-  project: NewsClipProject,
-  settings: NewsClipSettings,
-  signal: AbortSignal
+/**
+ * 검색 순서(주제 관련도 순)를 유지하며 실제로 저장 가능한 자료만 고른다.
+ * 호출부가 첫 항목을 핵심 원본으로 쓰거나 전체를 보조 자료로 쓸 수 있다.
+ */
+async function storeAutomaticSourceSet(
+  candidates: NewsSource[],
+  signal: AbortSignal,
+  maxCount: number
 ) {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ project, settings, force: true }),
-    signal,
-  })
-  const body = (await response.json()) as {
-    message?: string
-    previewUrl?: string
-    previewIntroUrl?: string
-    previewLeadUrl?: string
-    previewBodyUrl?: string
-    previewOutroUrl?: string
-    outputUrl?: string
-    thumbnailUrl?: string
-    signature?: string
-    titleCardDurationSeconds?: number
-    outputDurationSeconds?: number
-    finalPlaybackRate?: number
-    subtitles?: NewsClipProject["subtitles"]
-    reportScenes?: NewsClipProject["reportScenes"]
-  }
-  if (!response.ok) {
-    throw new Error(
-      body.message ||
-        (endpoint.endsWith("preview")
-          ? "저해상도 초안을 만들지 못했습니다."
-          : "최종 영상을 만들지 못했습니다.")
-    )
-  }
-  const partUrls = {
-    previewIntroUrl: body.previewIntroUrl ?? "",
-    previewLeadUrl: body.previewLeadUrl ?? "",
-    previewBodyUrl: body.previewBodyUrl ?? "",
-    previewOutroUrl: body.previewOutroUrl ?? "",
-  }
-  const common = {
-    ...project,
-    ...partUrls,
-    renderSettingsKey: newsRenderSettingsKey(settings),
-    titleCardDurationSeconds:
-      body.titleCardDurationSeconds ?? project.titleCardDurationSeconds,
-    outputDurationSeconds:
-      body.outputDurationSeconds ?? project.outputDurationSeconds,
-    finalPlaybackRate: endpoint.endsWith("render")
-      ? normalizeFinalPlaybackRate(body.finalPlaybackRate)
-      : project.finalPlaybackRate,
-    subtitles: body.subtitles ?? project.subtitles,
-    reportScenes: body.reportScenes ?? project.reportScenes,
-  }
-  return endpoint.endsWith("preview")
-    ? {
-        ...common,
-        previewUrl: body.previewUrl ?? "",
-        previewSignature: body.signature ?? "",
-        previewRevision: project.editorialRevision,
-        finalRevision: 0,
-        subtitleTimingsLocked: true,
+  const stored: NewsSource[] = []
+  const seenUrls = new Set<string>()
+  const targetCount = Math.max(1, maxCount)
+
+  for (const candidate of candidates) {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError")
+    const sourceKey = candidate.originalUrl.trim() || candidate.id
+    if (!sourceKey || seenUrls.has(sourceKey)) continue
+    seenUrls.add(sourceKey)
+    try {
+      const source = await storeAutomaticSource(candidate, signal)
+      if (!source.localFile || source.requiresUpload) continue
+      stored.push(source)
+      if (stored.length >= targetCount) break
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw error
       }
-    : {
-        ...common,
-        outputUrl: body.outputUrl ?? "",
-        thumbnailUrl: body.thumbnailUrl ?? "",
-        renderSignature: body.signature ?? "",
-        finalRevision: project.editorialRevision,
-        subtitleTimingsLocked: true,
-      }
+      // 일부 후보를 저장하지 못해도 다음 관련 후보로 계속 시도한다.
+    }
+  }
+
+  return stored
 }
 
 function balanceProjectSubtitles(
@@ -2323,6 +2445,7 @@ function resetAngleSelection(project: NewsClipProject): NewsClipProject {
     keepRanges: [],
     subtitles: [],
     subtitleTimingsLocked: false,
+    introSourceId: "",
     introStillTimeSeconds: null,
     titleCardDurationSeconds: 0,
     outputDurationSeconds: 0,
@@ -2339,34 +2462,6 @@ function resetAngleSelection(project: NewsClipProject): NewsClipProject {
     youtubeVideoId: "",
     youtubeUploadUrl: "",
     metadata: { youtubeTitle: "", description: "", tags: [] },
-  }
-}
-
-async function uploadAutomaticNewsClip(
-  project: NewsClipProject,
-  signal: AbortSignal
-) {
-  const response = await fetch("/api/news-clips/upload/youtube", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      project,
-      scheduledAt: nextKoreaUploadSlot(),
-    }),
-    signal,
-  })
-  const body = (await response.json()) as {
-    message?: string
-    videoId?: string
-    url?: string
-  }
-  if (!response.ok || !body.videoId || !body.url) {
-    throw new Error(body.message || "YouTube에 업로드하지 못했습니다.")
-  }
-  return {
-    ...project,
-    youtubeVideoId: body.videoId,
-    youtubeUploadUrl: body.url,
   }
 }
 
@@ -2710,6 +2805,10 @@ function normalizeSavedNewsProject(
   const isBuildup2 =
     saved.productionMode === "buildup2" ||
     (saved.productionMode as string) === "buildup"
+  const sourceSelectionMode: NewsSourceSelectionMode =
+    isBuildup2 && saved.sourceSelectionMode === "video-summary"
+      ? "video-summary"
+      : "single-range"
   const lockedSnapshot = restoreLockedEditorialSnapshot(saved)
   const lockSavedTimeline = lockedSnapshot !== null
   const savedReportScenes = Array.isArray(saved.reportScenes)
@@ -2863,6 +2962,9 @@ function normalizeSavedNewsProject(
     ...saved,
     profileId,
     productionMode: isBuildup2 ? "buildup2" : "report",
+    sourceSelectionMode,
+    sourceOverview:
+      typeof saved.sourceOverview === "string" ? saved.sourceOverview : "",
     editorialRevision: Number.isFinite(saved.editorialRevision)
       ? Math.max(1, Math.floor(saved.editorialRevision))
       : 1,
@@ -2883,6 +2985,10 @@ function normalizeSavedNewsProject(
       typeof saved.supplementalContext === "string"
         ? saved.supplementalContext.slice(0, 5000)
         : "",
+    sourceCredit:
+      typeof saved.sourceCredit === "string"
+        ? saved.sourceCredit.slice(0, 120)
+        : sourceCreditInputText(saved.source),
     reportScenes,
     subtitles: Array.isArray(subtitles) ? subtitles : [],
     subtitleTimingsLocked:
@@ -2899,6 +3005,9 @@ function normalizeSavedNewsProject(
       Number.isFinite(saved.introStillTimeSeconds)
         ? saved.introStillTimeSeconds
         : null,
+    introSourceId:
+      typeof saved.introSourceId === "string" ? saved.introSourceId : "",
+    introMotion: normalizeNewsMediaMotion(saved.introMotion, "zoom-in"),
     introStillZoom: Number.isFinite(saved.introStillZoom)
       ? saved.introStillZoom
       : 1,
@@ -2920,6 +3029,11 @@ function normalizeSavedNewsProject(
       typeof saved.renderSettingsKey === "string"
         ? saved.renderSettingsKey
         : "",
+    youtubeScheduledAt:
+      typeof saved.youtubeScheduledAt === "string" &&
+      saved.youtubeScheduledAt.trim()
+        ? saved.youtubeScheduledAt
+        : nextKoreaUploadSlot(),
   }
 }
 
@@ -2963,31 +3077,44 @@ function ensureTwoLineIntroTitle(
   return "오늘 이슈\n핵심 포인트"
 }
 
+function productionFormatKey(
+  productionMode: NewsClipProductionMode,
+  sourceSelectionMode: NewsSourceSelectionMode
+) {
+  if (productionMode === "report") return "report"
+  return sourceSelectionMode === "video-summary"
+    ? "video-summary"
+    : "single-range"
+}
+
 function stepIndex(step: NewsClipStep) {
   return NEWS_CLIP_STEPS.findIndex((item) => item.id === step)
 }
 
-function previousReviewStep(step: NewsClipStep): NewsClipStep {
-  if (step === "final") return "preview"
-  if (step === "preview") return "script"
-  if (step === "script" || step === "direction") return "angles"
-  if (step === "angles") return "issue"
-  return "issue"
-}
-
-function nextReviewStep(step: NewsClipStep): NewsClipStep {
-  if (step === "script") return "preview"
+function nextReviewStep(
+  step: NewsClipStep,
+  productionMode: NewsClipProductionMode
+): NewsClipStep {
+  if (step === "script")
+    return productionMode === "report" ? "direction" : "preview"
   if (step === "direction") return "preview"
   if (step === "preview") return "final"
   return "final"
 }
 
-const VISIBLE_NEWS_CLIP_STEPS = NEWS_CLIP_STEPS.filter(
-  (item) => item.id !== "direction" && item.id !== "source"
-)
+function visibleNewsClipSteps(productionMode: NewsClipProductionMode) {
+  return NEWS_CLIP_STEPS.filter(
+    (item) =>
+      item.id !== "source" &&
+      (productionMode === "report" || item.id !== "direction")
+  )
+}
 
-function visibleWorkflowStep(step: NewsClipStep): NewsClipStep {
-  if (step === "direction") return "preview"
+function visibleWorkflowStep(
+  step: NewsClipStep,
+  productionMode: NewsClipProductionMode
+): NewsClipStep {
+  if (step === "direction" && productionMode !== "report") return "preview"
   // 원본 선택은 이슈 단계 안의 내부 과정으로만 두고 사이드바에는 노출하지 않는다.
   if (step === "source") return "issue"
   return step

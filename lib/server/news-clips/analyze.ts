@@ -2,7 +2,6 @@ import { claudeText } from "@/lib/server/anthropic"
 import {
   buildCandidateWindows,
   buildCompleteUtteranceCandidates,
-  fitEditPlan,
 } from "@/lib/news-clips/timeline"
 import {
   issueAngleTerms,
@@ -14,6 +13,7 @@ import {
   titleLineCharacterLimit,
 } from "@/lib/news-clips/text-layout"
 import { parseTranscript } from "@/lib/news-clips/transcript"
+import { buildSourceAssemblyPlan } from "@/lib/news-clips/source-assembly"
 import {
   buildBuildup2Scenes,
   localBuildup2Draft,
@@ -23,7 +23,6 @@ import {
   buildReportScenes,
   ensureReportEndCta,
   isEndCtaScene,
-  normalizeQuoteScenes,
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
 import type {
@@ -34,10 +33,6 @@ import type {
   RemovedRange,
   TranscriptSegment,
 } from "@/lib/news-clips/types"
-
-const REPORT_MIN_CHARACTERS = 288
-const REPORT_TARGET_CHARACTERS = 312
-const REPORT_MAX_CHARACTERS = 320
 
 export type NewsAnalysisSource = {
   id: string
@@ -65,6 +60,11 @@ export type NewsAnalysisSourceContext = {
     start: number
     end: number
   }
+  /** 영상 요약형에서 원본 시간순으로 조립할 확정 구간들. */
+  lockedRanges?: Array<{
+    start: number
+    end: number
+  }>
 }
 
 export async function analyzeNewsTranscript(
@@ -131,21 +131,11 @@ export async function analyzeNewsTranscript(
       detectedSilences
     )
   }
-  const editPlan = fitEditPlan({
-    segments: transcript,
-    start: selectedCandidate.sourceStart,
-    end: selectedCandidate.sourceEnd,
-    silenceRanges: detectedSilences,
-    titleSeconds: settings.titleCardSeconds,
-    targetMinSeconds: settings.targetMinSeconds,
-    targetMaxSeconds: settings.targetMaxSeconds,
-    idealMinSeconds: settings.idealMinSeconds,
-    idealMaxSeconds: settings.idealMaxSeconds,
-  })
-  const windowStart =
-    editPlan.keepRanges[0]?.sourceStart ?? selectedCandidate.sourceStart
-  const windowEnd =
-    editPlan.keepRanges.at(-1)?.sourceEnd ?? selectedCandidate.sourceEnd
+  // 보도형은 TTS 대본이 최종 길이를 결정한다. 목표 초수에 맞추기 위해
+  // 근거 원본을 잘라내지 않고 사용자가 고른 후보 구간을 그대로 유지한다.
+  const windowStart = selectedCandidate.sourceStart
+  const windowEnd = selectedCandidate.sourceEnd
+  const sourceWindowDuration = Math.max(0.12, windowEnd - windowStart)
   let report = localReport(transcript, {
     ...selectedCandidate,
     sourceStart: windowStart,
@@ -195,15 +185,13 @@ export async function analyzeNewsTranscript(
     sourceContext.primarySourceId
   )
   const distributedScenes = distributeSupportingSources(
-    reportScenes,
-    sourceContext
-  )
-  const transcripts = Object.fromEntries([
-    [sourceContext.primarySourceId, transcript],
-    ...sourceContext.supportingSources.map(
-      (source) => [source.id, source.transcript] as const
+    normalizeReportScenesForFullTts(
+      reportScenes,
+      sourceContext.primarySourceId
     ),
-  ])
+    sourceContext,
+    transcript
+  )
   // 인트로 제목은 refineWithClaude titleOptions를 유지한다.
   // 대본 생성 후 제목을 다시 쓰면 주제고르기에서 고른 톤이 바뀐다.
   const rangedCandidate = {
@@ -216,14 +204,16 @@ export async function analyzeNewsTranscript(
     candidates: replaceCandidate(candidates, rangedCandidate),
     selectedCandidate: rangedCandidate,
     reportScript,
-    reportScenes: normalizeQuoteScenes(
-      distributedScenes,
-      transcripts,
-      sourceContext.primarySourceId,
-      settings.titleVoiceRate
-    ),
-    removedRanges: editPlan.removedRanges,
-    keepRanges: editPlan.keepRanges,
+    reportScenes: distributedScenes,
+    removedRanges: [],
+    keepRanges: [
+      {
+        sourceStart: windowStart,
+        sourceEnd: windowEnd,
+        outputStart: 0,
+        outputEnd: sourceWindowDuration,
+      },
+    ],
     analysisMode,
   }
 }
@@ -238,12 +228,24 @@ async function analyzeBuildup2Transcript(
   analysisMode: "claude" | "local",
   detectedSilences: RemovedRange[]
 ) {
+  const sourceAssembly = buildSourceAssemblyPlan(sourceContext.lockedRanges)
+  const lockedRanges = sourceAssembly.ranges
+  const lockedStartFloor = sourceContext.lockedRange
+    ? Math.min(sourceContext.lockedRange.start, sourceContext.lockedRange.end)
+    : undefined
+  const lockedEndCeiling = sourceContext.lockedRange
+    ? Math.max(sourceContext.lockedRange.start, sourceContext.lockedRange.end)
+    : undefined
   let draft = localBuildup2Draft(
     transcript,
     selectedCandidate,
     settings,
     detectedSilences,
-    sourceContext.primarySourceId
+    sourceContext.primarySourceId,
+    {
+      startFloor: lockedStartFloor,
+      endCeiling: lockedEndCeiling,
+    }
   )
   let mode = analysisMode
   if (useClaude) {
@@ -269,7 +271,11 @@ async function analyzeBuildup2Transcript(
           highlightEnd,
           transcript,
           sourceContext.primarySourceId,
-          claudeDraft.preferred
+          claudeDraft.preferred,
+          {
+            startFloor: locked ? highlightStart : undefined,
+            endCeiling: locked ? highlightEnd : undefined,
+          }
         ),
       }
       mode = "claude"
@@ -291,30 +297,68 @@ async function analyzeBuildup2Transcript(
   const highlightEnd = locked
     ? Math.max(locked.start, locked.end)
     : (draft.preferred[1]?.sourceEnd ?? selectedCandidate.sourceEnd)
-  const reportScenes = appendEndCtaScenes(
+  let reportScenes = appendEndCtaScenes(
     buildBuildup2Scenes(
       bodyScript || reportScript,
       highlightStart,
       highlightEnd,
       transcript,
       sourceContext.primarySourceId,
-      draft.preferred
+      draft.preferred,
+      {
+        startFloor: locked ? highlightStart : undefined,
+        endCeiling: locked ? highlightEnd : undefined,
+      }
     ),
     endCtaText,
     sourceContext.primarySourceId
   )
+  if (lockedRanges.length > 1) {
+    reportScenes = replaceBuildupQuoteWithRanges(
+      reportScenes,
+      lockedRanges,
+      sourceContext.primarySourceId
+    )
+  }
   const completedHighlight = reportScenes.find(
-    (scene) => scene.id === "buildup2-quote"
+    (scene) =>
+      scene.id === "buildup2-quote" ||
+      /^buildup2-quote-cut-\d+$/i.test(scene.id)
   )
-  const completedStart =
+  const snappedCompletedStart =
     completedHighlight?.sourceStart ??
     draft.preferred[1]?.sourceStart ??
     highlightStart
-  const completedEnd =
+  const completedStart = lockedRanges.length
+    ? lockedRanges[0]!.start
+    : lockedStartFloor === undefined
+      ? snappedCompletedStart
+      : Math.max(lockedStartFloor, snappedCompletedStart)
+  const snappedCompletedEnd = Math.max(
+    completedStart + 0.12,
     completedHighlight?.sourceEnd ??
-    draft.preferred[1]?.sourceEnd ??
-    highlightEnd
-  const completedDuration = Math.max(0.12, completedEnd - completedStart)
+      draft.preferred[1]?.sourceEnd ??
+      highlightEnd
+  )
+  const completedEnd = lockedRanges.length
+    ? lockedRanges.at(-1)!.end
+    : lockedEndCeiling === undefined
+      ? snappedCompletedEnd
+      : Math.min(lockedEndCeiling, snappedCompletedEnd)
+  const completedDuration = lockedRanges.length
+    ? sourceAssembly.duration
+    : Math.max(0.12, completedEnd - completedStart)
+  const keepRanges = lockedRanges.length
+    ? sourceAssembly.keepRanges
+    : [
+        {
+          sourceStart: completedStart,
+          sourceEnd: completedEnd,
+          outputStart: 0,
+          outputEnd: completedDuration,
+        },
+      ]
+  const removedRanges = sourceAssembly.removedRanges
   const rangedCandidate = {
     ...selectedCandidate,
     sourceStart: completedStart,
@@ -327,15 +371,8 @@ async function analyzeBuildup2Transcript(
     selectedCandidate: rangedCandidate,
     reportScript,
     reportScenes,
-    removedRanges: [],
-    keepRanges: [
-      {
-        sourceStart: completedStart,
-        sourceEnd: completedEnd,
-        outputStart: 0,
-        outputEnd: completedDuration,
-      },
-    ],
+    removedRanges,
+    keepRanges,
     analysisMode: mode,
   }
 }
@@ -345,18 +382,30 @@ async function buildup2WithClaude(
   candidate: NewsClipCandidate,
   sourceContext: NewsAnalysisSourceContext
 ) {
-  const relevant = sourceContext.directSource
-    ? transcript.slice(0, 180)
-    : transcript.filter(
-        (segment) =>
-          segment.end >= candidate.sourceStart - 15 &&
-          segment.start <= candidate.sourceEnd + 15
+  const lockedRanges = buildSourceAssemblyPlan(
+    sourceContext.lockedRanges
+  ).ranges
+  const relevant = lockedRanges.length
+    ? transcript.filter((segment) =>
+        lockedRanges.some(
+          (range) => segment.end > range.start && segment.start < range.end
+        )
       )
+    : sourceContext.directSource
+      ? transcript.slice(0, 180)
+      : transcript.filter(
+          (segment) =>
+            segment.end >= candidate.sourceStart - 15 &&
+            segment.start <= candidate.sourceEnd + 15
+        )
   const highlightQuote = relevant
-    .filter(
-      (segment) =>
-        segment.end > candidate.sourceStart &&
-        segment.start < candidate.sourceEnd
+    .filter((segment) =>
+      lockedRanges.length
+        ? lockedRanges.some(
+            (range) => segment.end > range.start && segment.start < range.end
+          )
+        : segment.end > candidate.sourceStart &&
+          segment.start < candidate.sourceEnd
     )
     .map((segment) => segment.text.trim())
     .filter(Boolean)
@@ -418,6 +467,7 @@ async function buildup2WithClaude(
         start: lockedStart,
         end: lockedEnd,
       },
+      selectedRanges: lockedRanges,
       transcript: relevant.map((segment) => ({
         start: segment.start,
         end: segment.end,
@@ -459,7 +509,12 @@ async function buildup2WithClaude(
     Math.min(start, end),
     Math.max(start, end),
     transcript,
-    sourceContext.primarySourceId
+    sourceContext.primarySourceId,
+    undefined,
+    {
+      startFloor: locked ? lockedStart : undefined,
+      endCeiling: locked ? lockedEnd : undefined,
+    }
   )
   return {
     script,
@@ -494,72 +549,235 @@ function lockCandidateToAngleRange(
   }
 }
 
-function distributeSupportingSources(
+const SUPPORTING_SOURCE_STOP_WORDS = new Set([
+  "관련",
+  "그리고",
+  "그런데",
+  "내용",
+  "대한",
+  "문제",
+  "사실",
+  "사람",
+  "이번",
+  "자료",
+  "정도",
+  "주장",
+  "지금",
+  "핵심",
+  "했다",
+  "한다",
+  "된다",
+  "됐다",
+])
+
+/** 보도형은 모든 발화를 TTS로 고정하고 영상은 무음 자료로만 사용한다. */
+export function normalizeReportScenesForFullTts(
   scenes: NewsReportScene[],
-  context: NewsAnalysisSourceContext
+  primarySourceId: string
 ) {
-  if (!context.supportingSources.length) return scenes
+  let mainIndex = 0
+  return scenes.map((scene) => {
+    const outro = isEndCtaScene(scene)
+    const inferredPart = mainIndex === 0 ? "lead" : "body"
+    if (!outro) mainIndex += 1
+    const part = outro ? "outro" : (scene.part ?? inferredPart)
+    const sourceId = scene.sourceId || primarySourceId
+    return {
+      ...scene,
+      part,
+      audioMode: "tts",
+      visual: "source",
+      visualMode:
+        sourceId && primarySourceId && sourceId !== primarySourceId
+          ? "supporting"
+          : "source",
+      sourceId,
+    } satisfies NewsReportScene
+  })
+}
+
+/**
+ * 보조 자료는 대본과 실제로 연결되는 경우에만 배정한다.
+ * 연속 중복 회피는 관련도가 비슷한 후보 안에서만 적용한다.
+ */
+export function distributeSupportingSources(
+  scenes: NewsReportScene[],
+  context: NewsAnalysisSourceContext,
+  primaryTranscript: TranscriptSegment[] = []
+) {
   let previousSourceId = ""
-  return scenes.map((scene, index) => {
-    if (scene.visual === "quote" || isEndCtaScene(scene)) {
-      previousSourceId = scene.sourceId || context.primarySourceId
-      return scene
+  const primarySource: NewsAnalysisSource = {
+    id: context.primarySourceId,
+    title: context.primarySourceTitle,
+    summary: context.primarySourceSummary,
+    transcript: primaryTranscript,
+  }
+  return scenes.map((scene) => {
+    const primaryMatch = bestSupportingSegment(scene.narration, primarySource)
+    const asPrimary = () => ({
+      ...scene,
+      visual: "source" as const,
+      audioMode: "tts" as const,
+      // 문장과 직접 연결되는 움직임을 찾지 못하면 무관한 영상을 흘리지 않고
+      // 핵심 원본의 한 프레임을 안전한 설명 이미지로 사용한다.
+      visualMode: primaryMatch.relevant
+        ? ("source" as const)
+        : ("still" as const),
+      sourceId: context.primarySourceId || scene.sourceId,
+      ...(scene.sourceId && scene.sourceId !== context.primarySourceId
+        ? {
+            sourceStart: primaryMatch.start,
+            sourceEnd: primaryMatch.end,
+          }
+        : {}),
+    })
+
+    if (isEndCtaScene(scene) || !context.supportingSources.length) {
+      const primary = asPrimary()
+      previousSourceId = primary.sourceId || context.primarySourceId
+      return primary
     }
+
     const requestedSourceId = scene.sourceId || context.primarySourceId
-    const shouldFindAlternative =
-      requestedSourceId === context.primarySourceId ||
-      requestedSourceId === previousSourceId
-    if (!shouldFindAlternative) {
-      previousSourceId = requestedSourceId
-      return scene
-    }
     const ranked = context.supportingSources
       .map((source) => ({
         source,
         match: bestSupportingSegment(scene.narration, source),
       }))
+      .filter((item) => item.match.relevant)
       .sort((left, right) => right.match.score - left.match.score)
-    const preferred =
-      ranked.find(
-        (item) => item.source.id !== previousSourceId && item.match.score > 0
-      ) ??
-      (index % 2 === 1
-        ? ranked.find((item) => item.source.id !== previousSourceId)
-        : undefined)
+
+    const best = ranked[0]
+    const requested = ranked.find(
+      (item) => item.source.id === requestedSourceId
+    )
+    let preferred = requested ?? best
+    if (preferred?.source.id === previousSourceId && best) {
+      const alternative = ranked.find(
+        (item) =>
+          item.source.id !== previousSourceId &&
+          item.match.score >= Math.max(1, best.match.score * 0.8)
+      )
+      preferred = alternative ?? preferred
+    }
+
     if (!preferred) {
-      previousSourceId = requestedSourceId
-      return scene
+      const primary = asPrimary()
+      previousSourceId = primary.sourceId || context.primarySourceId
+      return primary
     }
     previousSourceId = preferred.source.id
     return {
       ...scene,
+      visual: "source" as const,
+      audioMode: "tts" as const,
+      visualMode: "supporting" as const,
       sourceId: preferred.source.id,
       sourceStart: preferred.match.start,
       sourceEnd: preferred.match.end,
-    }
+    } satisfies NewsReportScene
   })
 }
 
-function bestSupportingSegment(narration: string, source: NewsAnalysisSource) {
-  const tokens = narration
-    .replace(/[^0-9A-Za-z가-힣\s]/g, " ")
-    .split(/\s+/)
-    .filter((token) => token.length >= 2)
-  const metadata = `${source.title} ${source.summary}`
+export function bestSupportingSegment(
+  narration: string,
+  source: NewsAnalysisSource
+) {
+  const tokens = relevanceTokens(narration)
+  const metadata = normalizeRelevanceText(`${source.title} ${source.summary}`)
   const ranked = source.transcript
-    .map((segment) => ({
-      segment,
-      score: tokens.filter((token) => segment.text.includes(token)).length,
-    }))
+    .map((segment) => {
+      const text = normalizeRelevanceText(segment.text)
+      const matches = tokens.filter((token) => text.includes(token))
+      return {
+        segment,
+        matches,
+        score: tokenScore(matches) * 2,
+      }
+    })
     .sort((left, right) => right.score - left.score)[0]
-  const metadataScore = tokens.filter((token) =>
-    metadata.includes(token)
-  ).length
+  const metadataMatches = tokens.filter((token) => metadata.includes(token))
+  const matchedTokens = [
+    ...new Set([...(ranked?.matches ?? []), ...metadataMatches]),
+  ]
+  const distinctiveMatch = matchedTokens.some(
+    (token) => token.length >= 3 || /\d/.test(token)
+  )
+  const relevant = matchedTokens.length >= 2 || distinctiveMatch
+  const start = ranked?.segment.start ?? 0
   return {
-    start: ranked?.segment.start ?? 0,
-    end: ranked?.segment.end ?? 5,
-    score: (ranked?.score ?? 0) + metadataScore,
+    start,
+    end: Math.max(start + 4.5, ranked?.segment.end ?? 5),
+    score: (ranked?.score ?? 0) + tokenScore(metadataMatches),
+    matchedTokens,
+    relevant,
   }
+}
+
+function relevanceTokens(value: string) {
+  return [
+    ...new Set(
+      value
+        .toLowerCase()
+        .replace(/[^0-9a-z가-힣\s]/g, " ")
+        .split(/\s+/)
+        .map(normalizeRelevanceToken)
+        .filter(
+          (token) =>
+            token.length >= 2 && !SUPPORTING_SOURCE_STOP_WORDS.has(token)
+        )
+    ),
+  ]
+}
+
+function normalizeRelevanceText(value: string) {
+  return value.toLowerCase().replace(/[^0-9a-z가-힣]/g, "")
+}
+
+function normalizeRelevanceToken(value: string) {
+  const suffixes = [
+    "으로부터",
+    "에게서는",
+    "에서는",
+    "이라는",
+    "이라고",
+    "으로는",
+    "에게",
+    "에서",
+    "으로",
+    "부터",
+    "까지",
+    "처럼",
+    "보다",
+    "이라",
+    "라고",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "에",
+    "도",
+    "만",
+    "과",
+    "와",
+    "로",
+  ]
+  for (const suffix of suffixes) {
+    if (value.endsWith(suffix) && value.length - suffix.length >= 2) {
+      return value.slice(0, -suffix.length)
+    }
+  }
+  return value
+}
+
+function tokenScore(tokens: string[]) {
+  return tokens.reduce(
+    (total, token) => total + (token.length >= 3 || /\d/.test(token) ? 2 : 1),
+    0
+  )
 }
 
 async function reportWithClaude(
@@ -611,7 +829,7 @@ async function reportWithClaude(
       "'시행됩니다', '선정됐습니다', '나타났습니다', '전해졌습니다', '비판이 나오고 있습니다', '자세히 알아보겠습니다'처럼 보도자료를 읽는 존댓말 종결은 사용하지 않는다.",
       "제공된 원문 밖의 사실이나 숨은 의도를 만들어내지 않는다. 확인되지 않은 의혹은 사실처럼 단정하지 말고 반드시 질문·가능성·추론으로 구분한다.",
       "근거 없이 '언론이 숨겼다', '아무도 모른다', '충격적인 진실'처럼 비밀을 과장하는 표현은 쓰지 않는다. 친밀한 말투와 사실의 희소성을 혼동하지 않는다.",
-      `댓글 유도 문구까지 포함한 전체 본문 TTS가 약 50~56초가 되도록 공백 제외 ${REPORT_MIN_CHARACTERS}~${REPORT_MAX_CHARACTERS}자로 작성하고, ${REPORT_TARGET_CHARACTERS}자 안팎을 우선한다.`,
+      "댓글 유도 문구까지 포함하되 목표 초수나 글자 수에 억지로 맞추지 않는다. 선택한 이슈를 이해하는 데 필요한 핵심 사실과 논평을 빠뜨리지 않은 결과 길이를 사용한다.",
       "대본의 마지막에는 앞선 결론과 자연스럽게 연결되는 짧은 질문과 댓글 유도를 반드시 포함한다.",
       "질문 예: 인물이면 '김계리의 의견에 어떻게 생각해?', 이슈면 '조작기소에 대해 어떻게 생각해?'. '주제, 어떻게 봐?'처럼 끊긴 말투는 쓰지 않는다.",
       "바로 다음 줄에 '댓글로 남겨줘.'를 둔다. 이 문구도 script의 마지막 발화이자 자막·visuals 마지막 source 장면으로 포함한다.",
@@ -625,22 +843,18 @@ async function reportWithClaude(
       settings.removeFillers
         ? "원문의 말버릇, 머뭇거림과 반복 표현은 보도 대본에서 제거한다."
         : "원문의 의미 있는 반복은 강조 의도를 해치지 않는 범위에서 유지한다.",
-      "visuals는 각 문장 순서대로 source 또는 quote 중 하나와 사용할 sourceId를 지정한다. 같은 자료를 연속 반복하지 말고 문장 근거와 가장 가까운 자료를 골고루 배치한다.",
-      "source는 아나운서 TTS가 이어지는 무음 자료 화면이다. quote는 TTS를 멈추고 원본 음성을 그대로 들려주는 강한 직접 발언이다.",
-      "보조 자료는 기본적으로 source로만 사용한다. 제공된 보조 자료 자막에 실제 직접 발언과 정확한 타임코드가 있을 때만 quote로 지정할 수 있다.",
-      "quote 문장의 script 내용은 지정한 원본 구간에서 실제로 말한 문장을 그대로 사용하고, 앞뒤 맥락을 왜곡하지 않는다.",
-      "quote에는 원문을 요약하거나 '주장했어', '말했어', '지적했어' 같은 해설형 종결로 바꾼 문장을 절대 넣지 않는다. 한 글자라도 확신할 수 없으면 source로 지정한다.",
-      "quote의 sourceStart와 sourceEnd는 해당 직접 발언 문장의 시작과 끝에 맞추고, 다음 문장이나 앞 문장이 섞이지 않게 한다.",
-      "quote 다음 문장은 원본 발언을 다시 반복하지 말고, '그런데', '이 말의 핵심은', '문제는'처럼 방금 들은 발언에서 다음 근거나 평가로 자연스럽게 이어지는 TTS 해설로 쓴다.",
-      "quote 앞뒤 문장을 이어 읽었을 때 주어와 논점이 갑자기 바뀌거나 같은 내용을 두 번 설명하지 않도록 전체 흐름을 검토한다.",
-      "source와 quote에는 해당 근거가 실제 등장하는 sourceStart와 sourceEnd를 원본 타임코드 안에서 지정한다.",
+      "visuals는 각 문장 순서대로 사용할 sourceId와 sourceStart, sourceEnd를 지정한다. 같은 자료를 연속 반복하지 말고 문장 근거와 가장 가까운 자료를 골고루 배치한다.",
+      "보도형의 음성은 처음부터 끝까지 승인된 대본을 읽는 TTS다. 원본 영상과 보조 자료의 소리는 사용하지 않는다.",
+      "모든 visual은 source로 지정한다. source는 TTS 아래에서 음소거되는 자료 화면이다.",
+      "자료 화면의 sourceStart와 sourceEnd는 해당 문장의 인물·장소·사건·근거가 실제 등장하는 구간으로 지정한다.",
+      "관련 근거를 확인할 수 없는 보조 자료를 화면 다양성을 위해 억지로 선택하지 않는다.",
       ...(sourceContext.avoidPrevious?.script?.trim()
         ? [
             "avoidPrevious.script는 직전에 쓴 대본이다. 문장·말순서·훅을 재탕하지 말고 같은 논점이라도 완전히 새 표현으로 다시 쓴다.",
             "단어만 살짝 바꾸거나 문장 앞뒤만 뒤집지 않는다. 도입 첫 문장부터 다르게 시작한다.",
           ]
         : []),
-      "JSON 객체만 출력한다: {script:string, visuals:[{visual:'source'|'quote',sourceId:string,sourceStart:number,sourceEnd:number}]}",
+      "JSON 객체만 출력한다: {script:string, visuals:[{visual:'source',sourceId:string,sourceStart:number,sourceEnd:number}]}",
     ].join("\n"),
     JSON.stringify({
       channelDirection: sourceContext.directSource
@@ -703,7 +917,7 @@ async function reportWithClaude(
     const retry = await claudeText(
       [
         "직전 대본과 너무 비슷하다. 같은 논점이라도 문장 구조·어휘·도입을 완전히 바꿔 새 대본을 다시 쓴다.",
-        "기존 작성 규칙을 유지하고 JSON만 출력한다: {script:string, visuals:[{visual:'source'|'quote',sourceId:string,sourceStart:number,sourceEnd:number}]}",
+        "기존 작성 규칙을 유지하고 JSON만 출력한다: {script:string, visuals:[{visual:'source',sourceId:string,sourceStart:number,sourceEnd:number}]}",
       ].join("\n"),
       JSON.stringify({
         avoidPrevious: { script: avoidScript.slice(0, 1200) },
@@ -745,18 +959,25 @@ async function reportWithClaude(
           (item as { sourceStart?: unknown }).sourceStart
         )
         const sourceEnd = Number((item as { sourceEnd?: unknown }).sourceEnd)
-        if (visual !== "source" && visual !== "quote") return []
+        if (visual !== "source") return []
+        const sourceId =
+          sourceContext.supportingSources.length > 0 &&
+          typeof requestedSourceId === "string" &&
+          availableSourceIds.has(requestedSourceId)
+            ? requestedSourceId
+            : sourceContext.primarySourceId
         return [
           {
             id: `report-scene-${index + 1}`,
             narration: "",
-            visual,
-            sourceId:
-              sourceContext.supportingSources.length > 0 &&
-              typeof requestedSourceId === "string" &&
-              availableSourceIds.has(requestedSourceId)
-                ? requestedSourceId
-                : sourceContext.primarySourceId,
+            part: index === 0 ? "lead" : "body",
+            audioMode: "tts",
+            visual: "source",
+            visualMode:
+              sourceId && sourceId !== sourceContext.primarySourceId
+                ? "supporting"
+                : "source",
+            sourceId,
             sourceStart: Number.isFinite(sourceStart)
               ? sourceStart
               : candidate.sourceStart,
@@ -778,14 +999,7 @@ function localReport(
     (segment) =>
       segment.end > candidate.sourceStart && segment.start < candidate.sourceEnd
   )
-  const selected: TranscriptSegment[] = []
-  let length = 0
-  for (const segment of relevant) {
-    if (length >= REPORT_TARGET_CHARACTERS) break
-    selected.push(segment)
-    length += segment.text.replace(/\s+/g, "").length
-  }
-  const body = selected.map((segment) => segment.text.trim()).join(" ")
+  const body = relevant.map((segment) => segment.text.trim()).join(" ")
   const script = body || candidate.preview
   return { script, preferred: [] as NewsReportScene[] }
 }
@@ -944,6 +1158,52 @@ function replaceCandidate(
   return candidates.map((candidate) =>
     candidate.id === next.id ? next : candidate
   )
+}
+
+function replaceBuildupQuoteWithRanges(
+  scenes: NewsReportScene[],
+  ranges: Array<{ start: number; end: number }>,
+  primarySourceId: string
+) {
+  const firstQuoteIndex = scenes.findIndex(
+    (scene) =>
+      scene.id === "buildup2-quote" ||
+      /^buildup2-quote-cut-\d+$/i.test(scene.id)
+  )
+  const template =
+    scenes[firstQuoteIndex] ??
+    scenes.find((scene) => scene.id === "buildup2-lead")
+  if (!template || firstQuoteIndex < 0) return scenes
+  const withoutQuotes = scenes.filter(
+    (scene) =>
+      scene.id !== "buildup2-quote" &&
+      !/^buildup2-quote-cut-\d+$/i.test(scene.id)
+  )
+  const insertionIndex = scenes
+    .slice(0, firstQuoteIndex)
+    .filter(
+      (scene) =>
+        scene.id !== "buildup2-quote" &&
+        !/^buildup2-quote-cut-\d+$/i.test(scene.id)
+    ).length
+  const quoteScenes = ranges.map((range, index): NewsReportScene => ({
+    ...template,
+    id: `buildup2-quote-cut-${index + 1}`,
+    narration: "",
+    part: "body",
+    audioMode: "original",
+    visualMode: "quote",
+    visual: "quote",
+    sourceId: template.sourceId || primarySourceId || undefined,
+    sourceStart: range.start,
+    sourceEnd: range.end,
+    ...(template.crop ? { crop: { ...template.crop } } : {}),
+  }))
+  return [
+    ...withoutQuotes.slice(0, insertionIndex),
+    ...quoteScenes,
+    ...withoutQuotes.slice(insertionIndex),
+  ]
 }
 
 function textsTooSimilar(left: string, right: string) {

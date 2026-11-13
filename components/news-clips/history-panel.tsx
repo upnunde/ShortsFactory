@@ -82,9 +82,9 @@ export function NewsHistoryPanel({
   }
 
   return (
-    <>
-      <header>
-        <h2 className="text-xl font-semibold">히스토리</h2>
+    <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pt-6">
+      <header className="shrink-0 border-b border-separator pb-4">
+        <h2 className="text-xl leading-7 font-semibold">히스토리</h2>
       </header>
       {note ? <p className="text-sm text-warning">{note}</p> : null}
       <section className="grid gap-3 md:grid-cols-2">
@@ -124,7 +124,15 @@ export function NewsHistoryPanel({
                   ) : null}
                 </div>
                 <Card.Description>
-                  {formatWhen(item.updatedAt)}
+                  {item.finalized ? "완료 " : "수정 "}
+                  {formatWhen(
+                    item.finalized && item.completedAt
+                      ? item.completedAt
+                      : item.updatedAt
+                  )}
+                  {showRecentEdit(item)
+                    ? ` · 최근 수정 ${formatWhen(item.updatedAt)}`
+                    : ""}
                   {item.durationSeconds > 0
                     ? ` · ${item.durationSeconds.toFixed(1)}초`
                     : ""}
@@ -185,7 +193,7 @@ export function NewsHistoryPanel({
           </AlertDialog.Container>
         </AlertDialog.Backdrop>
       </AlertDialog>
-    </>
+    </div>
   )
 }
 
@@ -202,4 +210,14 @@ function formatWhen(value: string) {
     hour: "2-digit",
     minute: "2-digit",
   })
+}
+
+function showRecentEdit(item: NewsHistoryEntry) {
+  if (!item.finalized || !item.completedAt) return false
+  const completed = new Date(item.completedAt)
+  const updated = new Date(item.updatedAt)
+  if (Number.isNaN(completed.getTime()) || Number.isNaN(updated.getTime())) {
+    return false
+  }
+  return updated.getTime() - completed.getTime() >= 60_000
 }

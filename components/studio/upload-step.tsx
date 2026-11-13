@@ -130,7 +130,9 @@ export function UploadStep({
             7시입니다.
             {inWindow && uploadAt === project.scheduledAt
               ? ""
-              : ` 이 시각은 권장 시간 밖이거나 이미 지났습니다. 유튜브 예약에는 ${uploadAt.replace("T", " ")}를 넣습니다.`}{" "}
+              : uploadAt === project.scheduledAt
+                ? " 권장 시간 밖이어도 선택한 시각 그대로 예약합니다."
+                : ` 선택한 시각이 지났으므로 유튜브 예약에는 ${uploadAt.replace("T", " ")}를 넣습니다.`}{" "}
             인스타그램과 틱톡은 예약 시각을 받지 않아서, 이 시각에 앱이 직접
             올립니다.
             {project.autoUpload

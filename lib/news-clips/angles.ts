@@ -1,3 +1,12 @@
+export type NewsAngleSourceRange = {
+  id: string
+  label: string
+  summary: string
+  evidence: string
+  sourceStart: number
+  sourceEnd: number
+}
+
 export type NewsAngleOption = {
   id: string
   title: string
@@ -8,6 +17,10 @@ export type NewsAngleOption = {
   /** 이 주제를 뒷받침하는 원본 구간(초). 없으면 0. */
   sourceStart: number
   sourceEnd: number
+  /** 영상 요약형에서 하나의 주제를 조립하는 복수 원본 구간. */
+  ranges?: NewsAngleSourceRange[]
+  /** 공백 구간을 제외한 ranges 실제 재생 시간 합계. */
+  estimatedDurationSeconds?: number
 }
 
 export type AngleTranscriptSegment = {
@@ -15,6 +28,7 @@ export type AngleTranscriptSegment = {
   text: string
   start: number
   end: number
+  words?: Array<{ text: string; start: number; end: number }>
 }
 
 export function angleHasLockedRange(
@@ -35,15 +49,21 @@ export function transcriptForAngle<T extends AngleTranscriptSegment>(
   if (!angleHasLockedRange(angle)) return []
 
   return transcript
-    .filter(
-      (segment) =>
+    .filter((segment) => {
+      const speech = angleTranscriptSpeechBounds(segment)
+      return (
         Number.isFinite(segment.start) &&
         Number.isFinite(segment.end) &&
-        segment.end > angle.sourceStart &&
-        segment.start < angle.sourceEnd &&
+        speech.end > angle.sourceStart &&
+        speech.start < angle.sourceEnd &&
         segment.text.trim().length > 0
-    )
-    .toSorted((a, b) => a.start - b.start || a.end - b.end)
+      )
+    })
+    .toSorted((a, b) => {
+      const aSpeech = angleTranscriptSpeechBounds(a)
+      const bSpeech = angleTranscriptSpeechBounds(b)
+      return aSpeech.start - bSpeech.start || aSpeech.end - bSpeech.end
+    })
 }
 
 /** 2번에서 보여주는 문장 범위와 실제 영상 범위를 동일하게 맞춘다. */
@@ -58,8 +78,9 @@ export function lockAngleRangeToTranscript<T extends NewsAngleOption>(
 
   return {
     ...angle,
-    sourceStart: Math.round(first.start * 100) / 100,
-    sourceEnd: Math.round(last.end * 100) / 100,
+    sourceStart:
+      Math.round(angleTranscriptSpeechBounds(first).start * 100) / 100,
+    sourceEnd: Math.round(angleTranscriptSpeechBounds(last).end * 100) / 100,
   }
 }
 
@@ -69,18 +90,26 @@ export function includeLeadingContext<T extends NewsAngleOption>(
   transcript: AngleTranscriptSegment[]
 ): T {
   const ordered = transcript
-    .filter(
-      (segment) =>
+    .filter((segment) => {
+      const speech = angleTranscriptSpeechBounds(segment)
+      return (
         segment.text.trim() &&
-        Number.isFinite(segment.start) &&
-        Number.isFinite(segment.end) &&
-        segment.end > segment.start
-    )
-    .toSorted((left, right) => left.start - right.start || left.end - right.end)
-  const firstIndex = ordered.findIndex(
-    (segment) =>
-      segment.end > angle.sourceStart && segment.start < angle.sourceEnd
-  )
+        Number.isFinite(speech.start) &&
+        Number.isFinite(speech.end) &&
+        speech.end > speech.start
+      )
+    })
+    .toSorted((left, right) => {
+      const leftSpeech = angleTranscriptSpeechBounds(left)
+      const rightSpeech = angleTranscriptSpeechBounds(right)
+      return (
+        leftSpeech.start - rightSpeech.start || leftSpeech.end - rightSpeech.end
+      )
+    })
+  const firstIndex = ordered.findIndex((segment) => {
+    const speech = angleTranscriptSpeechBounds(segment)
+    return speech.end > angle.sourceStart && speech.start < angle.sourceEnd
+  })
   if (firstIndex <= 0) return angle
   const firstText = ordered[firstIndex]!.text.replace(/\s+/g, " ").trim()
   if (!openingNeedsContext(firstText)) return angle
@@ -94,7 +123,26 @@ export function includeLeadingContext<T extends NewsAngleOption>(
   }
   return {
     ...angle,
-    sourceStart: Math.round(ordered[contextIndex]!.start * 100) / 100,
+    sourceStart:
+      Math.round(
+        angleTranscriptSpeechBounds(ordered[contextIndex]!).start * 100
+      ) / 100,
+  }
+}
+
+/** 자막 표시 tail이 아닌 단어 타임스탬프를 각도 범위의 기준으로 쓴다. */
+function angleTranscriptSpeechBounds(segment: AngleTranscriptSegment) {
+  const words = (segment.words ?? []).filter(
+    (word) =>
+      word.text.trim() &&
+      Number.isFinite(word.start) &&
+      Number.isFinite(word.end) &&
+      word.end > word.start
+  )
+  if (!words.length) return { start: segment.start, end: segment.end }
+  return {
+    start: Math.min(...words.map((word) => word.start)),
+    end: Math.max(...words.map((word) => word.end)),
   }
 }
 
@@ -128,10 +176,19 @@ export function normalizeAngleOptions(value: unknown): NewsAngleOption[] {
       const summary =
         typeof record.summary === "string" ? record.summary.trim() : ""
       if (!title || !summary) return []
+      const ranges = normalizeAngleRanges(record.ranges)
       const rawStart = Number(
-        record.sourceStart ?? record.source_start ?? record.start
+        record.sourceStart ??
+          record.source_start ??
+          record.start ??
+          ranges[0]?.sourceStart
       )
-      const rawEnd = Number(record.sourceEnd ?? record.source_end ?? record.end)
+      const rawEnd = Number(
+        record.sourceEnd ??
+          record.source_end ??
+          record.end ??
+          ranges.at(-1)?.sourceEnd
+      )
       const sourceStart = Number.isFinite(rawStart) ? Math.max(0, rawStart) : 0
       const sourceEnd = Number.isFinite(rawEnd)
         ? Math.max(sourceStart, rawEnd)
@@ -157,8 +214,74 @@ export function normalizeAngleOptions(value: unknown): NewsAngleOption[] {
               : "",
           sourceStart: Math.round(sourceStart * 100) / 100,
           sourceEnd: Math.round(sourceEnd * 100) / 100,
+          ...(ranges.length ? { ranges } : {}),
+          ...(ranges.length ||
+          Number.isFinite(Number(record.estimatedDurationSeconds))
+            ? {
+                estimatedDurationSeconds:
+                  Math.round(
+                    (ranges.length
+                      ? ranges.reduce(
+                          (total, range) =>
+                            total + (range.sourceEnd - range.sourceStart),
+                          0
+                        )
+                      : Math.max(0, Number(record.estimatedDurationSeconds))) *
+                      100
+                  ) / 100,
+              }
+            : {}),
         } satisfies NewsAngleOption,
       ]
     })
     .slice(0, 6)
+}
+
+function normalizeAngleRanges(value: unknown): NewsAngleSourceRange[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .flatMap((item, index) => {
+      if (!item || typeof item !== "object") return []
+      const record = item as Partial<NewsAngleSourceRange> & {
+        source_start?: unknown
+        source_end?: unknown
+        start?: unknown
+        end?: unknown
+      }
+      const rawStart = Number(
+        record.sourceStart ?? record.source_start ?? record.start
+      )
+      const rawEnd = Number(record.sourceEnd ?? record.source_end ?? record.end)
+      if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) return []
+      const sourceStart = Math.max(0, rawStart)
+      const sourceEnd = Math.max(sourceStart, rawEnd)
+      if (sourceEnd - sourceStart < 0.12) return []
+      return [
+        {
+          id:
+            typeof record.id === "string" && record.id.trim()
+              ? record.id.trim().slice(0, 120)
+              : `angle-range-${index + 1}`,
+          label:
+            typeof record.label === "string"
+              ? record.label.trim().slice(0, 80)
+              : `핵심 구간 ${index + 1}`,
+          summary:
+            typeof record.summary === "string"
+              ? record.summary.trim().slice(0, 300)
+              : "",
+          evidence:
+            typeof record.evidence === "string"
+              ? record.evidence.trim().slice(0, 600)
+              : "",
+          sourceStart: Math.round(sourceStart * 100) / 100,
+          sourceEnd: Math.round(sourceEnd * 100) / 100,
+        },
+      ]
+    })
+    .toSorted(
+      (left, right) =>
+        left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
+    )
+    .slice(0, 8)
 }

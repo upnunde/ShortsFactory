@@ -2,6 +2,10 @@ import { NextResponse } from "next/server"
 
 import type { NewsClipProject } from "@/lib/news-clips/types"
 import { uploadNewsClipToYoutube } from "@/lib/server/news-clips/youtube-upload"
+import {
+  validRenderJobId,
+  writeNewsRenderProgress,
+} from "@/lib/server/news-clips/render-progress"
 
 export const runtime = "nodejs"
 export const maxDuration = 180
@@ -10,6 +14,7 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     project?: NewsClipProject
     scheduledAt?: string
+    jobId?: unknown
   } | null
   if (!body?.project || body.project.type !== "news_clip") {
     return NextResponse.json(
@@ -17,11 +22,16 @@ export async function POST(request: Request) {
       { status: 400 }
     )
   }
+  const jobId = validRenderJobId(body.jobId) ? body.jobId : ""
   try {
+    if (jobId) await writeNewsRenderProgress(jobId, 1, "업로드 준비 중")
     return NextResponse.json(
       await uploadNewsClipToYoutube(
         body.project,
-        typeof body.scheduledAt === "string" ? body.scheduledAt : ""
+        typeof body.scheduledAt === "string" ? body.scheduledAt : "",
+        jobId
+          ? (percent, label) => writeNewsRenderProgress(jobId, percent, label)
+          : undefined
       )
     )
   } catch (error) {

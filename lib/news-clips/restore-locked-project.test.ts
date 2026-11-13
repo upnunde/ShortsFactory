@@ -2,7 +2,10 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import { prepareRenderProject } from "./prepare-render-project.ts"
-import { restoreLockedEditorialSnapshot } from "./restore-locked-project.ts"
+import {
+  restoreLockedEditorialSnapshot,
+  shouldRefreshQuoteTranscripts,
+} from "./restore-locked-project.ts"
 import {
   defaultNewsClipSettings,
   freshNewsClipProject,
@@ -141,5 +144,46 @@ test("잠긴 빌드업형은 새로고침 후에도 quote-cut·크롭·자막 �
       end,
     })),
     subtitles.map(({ id, text, start, end }) => ({ id, text, start, end }))
+  )
+})
+
+test("4번에서 자막을 확정한 빌드업형은 렌더 중 원문을 다시 전사하지 않는다", () => {
+  const base = freshNewsClipProject("news-channel-30cfb65e")
+  assert.equal(
+    shouldRefreshQuoteTranscripts({
+      ...base,
+      productionMode: "buildup2",
+      subtitles: [
+        {
+          id: "manual-caption",
+          text: "사용자가 확정한 문구",
+          start: 1,
+          end: 2,
+          emphasis: [],
+          emphasisColor: "yellow",
+          edited: true,
+        },
+      ],
+      subtitleTimingsLocked: true,
+    }),
+    false
+  )
+  assert.equal(
+    shouldRefreshQuoteTranscripts({
+      ...base,
+      productionMode: "buildup2",
+      subtitles: [],
+      subtitleTimingsLocked: false,
+    }),
+    true
+  )
+  assert.equal(
+    shouldRefreshQuoteTranscripts({
+      ...base,
+      productionMode: "report",
+      subtitles: [],
+      subtitleTimingsLocked: false,
+    }),
+    false
   )
 })

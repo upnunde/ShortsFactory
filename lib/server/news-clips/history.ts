@@ -1,8 +1,10 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 
 import {
   isNewsHistoryId,
+  newsHistoryActivityAt,
+  resolveNewsHistoryCompletedAt,
   type NewsHistoryEntry,
   type NewsHistorySnapshot,
 } from "@/lib/news-clips/history"
@@ -20,10 +22,16 @@ const publicOutputRoot = path.join(
 let chain: Promise<void> = Promise.resolve()
 
 export async function listNewsHistory(profileId: string) {
-  const index = await readIndex()
-  return index
-    .filter((entry) => entry.profileId === profileId)
-    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+  return enqueue(async () => {
+    const index = await readIndex()
+    const repaired = await backfillLegacyCompletionTimes(index)
+    if (repaired.changed) await writeIndex(repaired.entries)
+    return repaired.entries
+      .filter((entry) => entry.profileId === profileId)
+      .sort((a, b) =>
+        newsHistoryActivityAt(b).localeCompare(newsHistoryActivityAt(a))
+      )
+  })
 }
 
 export async function saveNewsHistory(snapshot: NewsHistorySnapshot) {
@@ -31,7 +39,22 @@ export async function saveNewsHistory(snapshot: NewsHistorySnapshot) {
   if (!isNewsHistoryId(id)) return false
   return enqueue(async () => {
     const savedAt = new Date().toISOString()
-    const stored: NewsHistorySnapshot = { ...snapshot, savedAt }
+    const index = await readIndex()
+    const existing = index.find((item) => item.id === id)
+    const legacyCompletedAt =
+      existing?.finalized && !existing.completedAt
+        ? await legacyCompletionTime(id, existing.updatedAt)
+        : existing?.completedAt
+    const finalRenderedAt = snapshot.finalized
+      ? await finalRenderCompletionTime(id)
+      : undefined
+    const completedAt = resolveNewsHistoryCompletedAt({
+      finalized: snapshot.finalized,
+      requested: mostRecentDate(snapshot.completedAt, finalRenderedAt),
+      existing: legacyCompletedAt,
+      fallback: savedAt,
+    })
+    const stored: NewsHistorySnapshot = { ...snapshot, completedAt, savedAt }
     const entry: NewsHistoryEntry = {
       id,
       profileId: snapshot.project.profileId,
@@ -44,6 +67,7 @@ export async function saveNewsHistory(snapshot: NewsHistorySnapshot) {
       step: snapshot.step,
       updatedAt: savedAt,
       finalized: snapshot.finalized,
+      completedAt,
       hasPreview: Boolean(snapshot.project.previewUrl),
       hasFinal: Boolean(snapshot.project.outputUrl),
       durationSeconds: snapshot.project.outputDurationSeconds,
@@ -54,7 +78,6 @@ export async function saveNewsHistory(snapshot: NewsHistorySnapshot) {
       path.join(folder, "project.json"),
       `${JSON.stringify(stored, null, 2)}\n`
     )
-    const index = await readIndex()
     await writeIndex([entry, ...index.filter((item) => item.id !== id)])
     return true
   })
@@ -68,6 +91,18 @@ export async function readNewsHistory(id: string, profileId: string) {
         await readFile(path.join(root, id, "project.json"), "utf8")
       ) as NewsHistorySnapshot
       if (snapshot.project.profileId !== profileId) return null
+      if (snapshot.finalized) {
+        const entry = (await readIndex()).find((item) => item.id === id)
+        snapshot.completedAt = resolveNewsHistoryCompletedAt({
+          finalized: true,
+          requested: mostRecentDate(
+            snapshot.completedAt,
+            entry?.completedAt,
+            await finalRenderCompletionTime(id)
+          ),
+          fallback: await legacyCompletionTime(id, snapshot.savedAt),
+        })
+      }
       return repairLegacyHistoryTranscript(snapshot)
     } catch {
       return null
@@ -148,6 +183,61 @@ async function readIndex(): Promise<NewsHistoryEntry[]> {
   } catch {
     return []
   }
+}
+
+async function backfillLegacyCompletionTimes(entries: NewsHistoryEntry[]) {
+  let changed = false
+  const repaired = await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.finalized) return entry
+      const completedAt = resolveNewsHistoryCompletedAt({
+        finalized: true,
+        requested: await finalRenderCompletionTime(entry.id),
+        existing: entry.completedAt,
+        fallback: await legacyCompletionTime(entry.id, entry.updatedAt),
+      })
+      if (completedAt === entry.completedAt) return entry
+      changed = true
+      return {
+        ...entry,
+        completedAt,
+      }
+    })
+  )
+  return { entries: repaired, changed }
+}
+
+async function legacyCompletionTime(id: string, fallback: string) {
+  try {
+    const file = await stat(path.join(root, id, "project.json"))
+    if (file.birthtimeMs > 0 && !Number.isNaN(file.birthtime.getTime())) {
+      return file.birthtime.toISOString()
+    }
+  } catch {
+    // 이전 저장 파일이 없으면 인덱스의 마지막 시각을 사용한다.
+  }
+  return fallback
+}
+
+async function finalRenderCompletionTime(id: string) {
+  try {
+    const file = await stat(path.join(publicOutputRoot, id, "final.mp4"))
+    if (file.mtimeMs > 0 && !Number.isNaN(file.mtime.getTime())) {
+      return file.mtime.toISOString()
+    }
+  } catch {
+    // 최종 영상이 없는 진행 중 작업은 저장 시각을 사용한다.
+  }
+  return undefined
+}
+
+function mostRecentDate(...values: Array<string | undefined>) {
+  return values
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && !Number.isNaN(new Date(value).getTime())
+    )
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
 }
 
 function validEntry(value: unknown) {

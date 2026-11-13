@@ -51,23 +51,25 @@ test("빌드업형은 lead를 서두, quote를 본문으로 나눈다", () => {
   )
 })
 
-test("보도형은 첫 장면을 서두로 둔다", () => {
+test("보도형은 배열 순서가 아니라 명시한 part로 서두와 본문을 나눈다", () => {
   const parts = splitScenesByClipPart(
     [
       {
-        id: "s1",
-        narration: "첫째",
-        visual: "source",
-        sourceStart: 0,
-        sourceEnd: 2,
-        crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
-      },
-      {
         id: "s2",
         narration: "둘째",
+        part: "body",
         visual: "source",
         sourceStart: 2,
         sourceEnd: 4,
+        crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
+      },
+      {
+        id: "s1",
+        narration: "첫째",
+        part: "lead",
+        visual: "source",
+        sourceStart: 0,
+        sourceEnd: 2,
         crop: { x: 50, y: 50, zoom: 1, faceTracking: false },
       },
       {
@@ -88,6 +90,37 @@ test("보도형은 첫 장면을 서두로 둔다", () => {
   assert.deepEqual(
     parts.body.map((scene) => scene.id),
     ["s2"]
+  )
+})
+
+test("레거시 보도형도 장면 위치가 아닌 저장 ID로 서두를 복원한다", () => {
+  const parts = splitScenesByClipPart(
+    [
+      {
+        id: "report-scene-2",
+        narration: "본문",
+        visual: "source",
+        sourceStart: 2,
+        sourceEnd: 4,
+      },
+      {
+        id: "report-scene-1",
+        narration: "서두",
+        visual: "source",
+        sourceStart: 0,
+        sourceEnd: 2,
+      },
+    ],
+    "report"
+  )
+
+  assert.deepEqual(
+    parts.lead.map((scene) => scene.id),
+    ["report-scene-1"]
+  )
+  assert.deepEqual(
+    parts.body.map((scene) => scene.id),
+    ["report-scene-2"]
   )
 })
 

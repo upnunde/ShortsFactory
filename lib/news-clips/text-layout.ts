@@ -153,7 +153,6 @@ function titleAvailableWidth(layout: NewsTextLayout) {
 
 // Pretendard 한글 실제 폭 ≈ 1em. 0.9면 줄에 글자를 너무 많이 넣어 ASS에서 화면을 넘는다.
 const TEXT_GLYPH_WIDTH_RATIO = 1.05
-const AUTO_SUBTITLE_FILL_RATIO = 0.8
 
 export function normalizeSubtitleCues(
   cues: SubtitleCue[],
@@ -168,9 +167,15 @@ export function normalizeSubtitleCues(
  */
 export function layoutTimedSubtitleCues(
   cues: SubtitleCue[],
-  layout: NewsTextLayout
+  layout: NewsTextLayout,
+  options: { maxLines?: 1 | 2 } = {}
 ): SubtitleCue[] {
-  const lineLimit = automaticSubtitleLineLimit(layout)
+  const lineLimit = unitsPerLine(layout)
+  const maxLines = options.maxLines === 1 ? 1 : 2
+  const formatChunk = (value: string) =>
+    maxLines === 1
+      ? normalizeText(value)
+      : wrapSubtitleChunkToTwoLines(value, layout, lineLimit)
   return cues.flatMap((cue) => {
     const raw = cue.text.replace(/\r\n/g, "\n").trim()
     if (!raw) return []
@@ -181,7 +186,7 @@ export function layoutTimedSubtitleCues(
       .filter(Boolean)
     if (
       explicitLines.length > 0 &&
-      explicitLines.length <= 2 &&
+      explicitLines.length <= maxLines &&
       explicitLines.every((line) => subtitleUnits(line) <= lineLimit)
     ) {
       const text = explicitLines.join("\n")
@@ -197,11 +202,12 @@ export function layoutTimedSubtitleCues(
     const chunks = splitIntoSubtitleChunks(
       raw.replace(/\n+/g, " "),
       layout,
-      lineLimit
+      lineLimit,
+      maxLines
     )
     if (!chunks.length) return []
     if (chunks.length === 1) {
-      const text = wrapSubtitleChunkToTwoLines(chunks[0]!, layout, lineLimit)
+      const text = formatChunk(chunks[0]!)
       return [
         {
           ...cue,
@@ -216,18 +222,25 @@ export function layoutTimedSubtitleCues(
     const duration = Math.max(0, cue.end - cue.start)
     let elapsedWeight = 0
     return chunks.map((chunk, index) => {
+      const sourceWeightStart = elapsedWeight
       const start = cue.start + (duration * elapsedWeight) / totalWeight
       elapsedWeight += weights[index]!
       const end =
         index === chunks.length - 1
           ? cue.end
           : cue.start + (duration * elapsedWeight) / totalWeight
-      const text = wrapSubtitleChunkToTwoLines(chunk, layout, lineLimit)
+      const text = formatChunk(chunk)
       return {
-        ...cue,
+        ...subtitleCueWithoutSourceRange(cue),
         id: `${cue.id}-${index + 1}`,
         start: round(start),
         end: round(end),
+        ...splitSubtitleCueSourceRange(
+          cue,
+          sourceWeightStart,
+          elapsedWeight,
+          totalWeight
+        ),
         text,
         emphasis: cue.emphasis.filter((word) => text.includes(word)),
       }
@@ -236,7 +249,7 @@ export function layoutTimedSubtitleCues(
 }
 
 function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
-  const lineLimit = automaticSubtitleLineLimit(layout)
+  const lineLimit = unitsPerLine(layout)
   return cues.flatMap((cue) => {
     const chunks = splitIntoSubtitleChunks(cue.text, layout, lineLimit)
     if (chunks.length === 0) return []
@@ -246,6 +259,7 @@ function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
     let elapsedWeight = 0
 
     return chunks.map((chunk, index) => {
+      const sourceWeightStart = elapsedWeight
       const start = cue.start + (duration * elapsedWeight) / totalWeight
       elapsedWeight += weights[index]
       const end =
@@ -253,10 +267,18 @@ function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
           ? cue.end
           : cue.start + (duration * elapsedWeight) / totalWeight
       return {
-        ...cue,
+        ...(chunks.length === 1 ? cue : subtitleCueWithoutSourceRange(cue)),
         id: chunks.length === 1 ? cue.id : `${cue.id}-${index + 1}`,
         start: round(start),
         end: round(end),
+        ...(chunks.length === 1
+          ? {}
+          : splitSubtitleCueSourceRange(
+              cue,
+              sourceWeightStart,
+              elapsedWeight,
+              totalWeight
+            )),
         text: wrapSubtitleChunkToTwoLines(chunk, layout, lineLimit),
         emphasis: cue.emphasis.filter((word) => chunk.includes(word)),
       }
@@ -304,6 +326,22 @@ export function canMergeSubtitleCueWithNext(
   )
 }
 
+export function canUndoSubtitleCueMerge(cue: SubtitleCue) {
+  return Array.isArray(cue.mergedFrom) && cue.mergedFrom.length === 2
+}
+
+/** 합치기 직전의 두 자막과 각각의 원래 시간을 그대로 복원한다. */
+export function undoSubtitleCueMerge(cues: SubtitleCue[], cueId: string) {
+  const index = cues.findIndex((cue) => cue.id === cueId)
+  const current = cues[index]
+  if (!current || !canUndoSubtitleCueMerge(current)) return cues
+  return [
+    ...cues.slice(0, index),
+    ...current.mergedFrom!.map(cloneSubtitleCue),
+    ...cues.slice(index + 1),
+  ]
+}
+
 /** 인접한 같은 장면 자막을 시간 범위와 사용자 문구를 보존한 채 합친다. */
 export function mergeSubtitleCueWithNext(
   cues: SubtitleCue[],
@@ -313,11 +351,7 @@ export function mergeSubtitleCueWithNext(
   const index = cues.findIndex((cue) => cue.id === cueId)
   const current = cues[index]
   const next = cues[index + 1]
-  if (
-    !current?.sceneId ||
-    !next?.sceneId ||
-    current.sceneId !== next.sceneId
-  ) {
+  if (!current?.sceneId || !next?.sceneId || current.sceneId !== next.sceneId) {
     return cues
   }
 
@@ -326,10 +360,7 @@ export function mergeSubtitleCueWithNext(
   const joinedText = normalizeJoinedCalendarDate(
     joinSubtitleText(currentText, nextText)
   )
-  const text = reflowSubtitleTextPreservingContent(
-    joinedText,
-    layout
-  )
+  const text = reflowSubtitleTextPreservingContent(joinedText, layout)
   const originalText = normalizeJoinedCalendarDate(
     joinSubtitleText(
       normalizeText(current.originalText ?? current.text),
@@ -337,9 +368,10 @@ export function mergeSubtitleCueWithNext(
     )
   )
   const merged: SubtitleCue = {
-    ...current,
+    ...subtitleCueWithoutSourceRange(current),
     start: Math.min(current.start, next.start),
     end: Math.max(current.end, next.end),
+    ...mergeSubtitleCueSourceRanges(current, next),
     text,
     emphasis: [...new Set([...current.emphasis, ...next.emphasis])].filter(
       (word) => text.includes(word)
@@ -351,9 +383,23 @@ export function mergeSubtitleCueWithNext(
         ...(next.originalEmphasis ?? next.emphasis),
       ]),
     ],
+    mergedFrom: [cloneSubtitleCue(current), cloneSubtitleCue(next)],
     edited: true,
   }
   return [...cues.slice(0, index), merged, ...cues.slice(index + 2)]
+}
+
+function cloneSubtitleCue(cue: SubtitleCue): SubtitleCue {
+  return {
+    ...cue,
+    emphasis: [...cue.emphasis],
+    ...(cue.originalEmphasis
+      ? { originalEmphasis: [...cue.originalEmphasis] }
+      : {}),
+    ...(cue.mergedFrom
+      ? { mergedFrom: cue.mergedFrom.map(cloneSubtitleCue) }
+      : {}),
+  }
 }
 
 function normalizeJoinedCalendarDate(value: string) {
@@ -376,22 +422,26 @@ function resetEditedSubtitleCueValue(cue: SubtitleCue): SubtitleCue {
 
 export function formatEditedSubtitleText(text: string, layout: NewsTextLayout) {
   const lineLimit = unitsPerLine(layout)
-  // 사용자가 넣은 줄바꿈은 폭 안에 들어오면 유지하고, 넘치면 전체를 다시 감싼다.
-  if (/\r?\n/.test(text)) {
-    const lines = text
-      .replace(/\r\n/g, "\n")
-      .split("\n")
-      .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
-      .filter(Boolean)
-      .slice(0, 2)
-    if (lines.length && lines.every((line) => visualUnits(line) <= lineLimit)) {
-      return lines.join("\n")
-    }
-    return wrapSubtitleChunkToTwoLines(lines.join(" "), layout)
+  const lines = text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 2)
+  // 검수 UI의 n/13과 같은 기준을 사용한다. 띄어쓰기는 글자 수에서 제외한다.
+  if (
+    lines.length &&
+    lines.every((line) => subtitleCharacterCount(line) <= lineLimit)
+  ) {
+    return lines.join("\n")
   }
-  const normalized = normalizeText(text)
+  const normalized = normalizeText(lines.join(" ") || text)
   if (!normalized) return ""
   return wrapSubtitleChunkToTwoLines(normalized, layout)
+}
+
+export function subtitleCharacterCount(value: string) {
+  return [...value.replace(/\s/gu, "")].length
 }
 
 /**
@@ -411,7 +461,9 @@ export function reflowSubtitleTextPreservingContent(
     automaticSubtitleLineLimit(layout)
   )
   const comparable = (value: string) => value.replace(/\s+/g, "")
-  return comparable(formatted) === comparable(normalized) ? formatted : text.trim()
+  return comparable(formatted) === comparable(normalized)
+    ? formatted
+    : text.trim()
 }
 
 function mergeSubtitleSentenceCues(cues: SubtitleCue[]) {
@@ -435,12 +487,72 @@ function mergeSubtitleSentenceCues(cues: SubtitleCue[]) {
     ) {
       previous.text = joinSubtitleText(previous.text, text)
       previous.end = Math.max(previous.end, cue.end)
+      const sourceRange = mergeSubtitleCueSourceRanges(previous, cue)
+      delete previous.sourceStart
+      delete previous.sourceEnd
+      Object.assign(previous, sourceRange)
       previous.emphasis = [...new Set([...previous.emphasis, ...cue.emphasis])]
       continue
     }
     merged.push({ ...cue, text, emphasis: [...cue.emphasis] })
   }
   return merged
+}
+
+type SubtitleSourceRange = Required<
+  Pick<SubtitleCue, "sourceStart" | "sourceEnd">
+>
+
+function subtitleCueSourceRange(cue: SubtitleCue): SubtitleSourceRange | null {
+  const sourceStart = cue.sourceStart
+  const sourceEnd = cue.sourceEnd
+  return typeof sourceStart === "number" &&
+    Number.isFinite(sourceStart) &&
+    typeof sourceEnd === "number" &&
+    Number.isFinite(sourceEnd) &&
+    sourceEnd >= sourceStart
+    ? { sourceStart, sourceEnd }
+    : null
+}
+
+function subtitleCueWithoutSourceRange(cue: SubtitleCue): SubtitleCue {
+  const next = { ...cue }
+  delete next.sourceStart
+  delete next.sourceEnd
+  return next
+}
+
+function splitSubtitleCueSourceRange(
+  cue: SubtitleCue,
+  startWeight: number,
+  endWeight: number,
+  totalWeight: number
+): SubtitleSourceRange | Record<string, never> {
+  const range = subtitleCueSourceRange(cue)
+  if (!range || totalWeight <= 0) return {}
+  const duration = range.sourceEnd - range.sourceStart
+  return {
+    sourceStart: round(
+      range.sourceStart + (duration * startWeight) / totalWeight
+    ),
+    sourceEnd:
+      endWeight >= totalWeight
+        ? range.sourceEnd
+        : round(range.sourceStart + (duration * endWeight) / totalWeight),
+  }
+}
+
+function mergeSubtitleCueSourceRanges(
+  left: SubtitleCue,
+  right: SubtitleCue
+): SubtitleSourceRange | Record<string, never> {
+  const leftRange = subtitleCueSourceRange(left)
+  const rightRange = subtitleCueSourceRange(right)
+  if (!leftRange || !rightRange) return {}
+  return {
+    sourceStart: Math.min(leftRange.sourceStart, rightRange.sourceStart),
+    sourceEnd: Math.max(leftRange.sourceEnd, rightRange.sourceEnd),
+  }
 }
 
 function cuePreservesTimingBoundary(cue: SubtitleCue) {
@@ -480,11 +592,12 @@ export function retimeSubtitleCues(cues: SubtitleCue[], duration: number) {
 export function splitIntoSubtitleChunks(
   text: string,
   layout: NewsTextLayout,
-  lineLimit = unitsPerLine(layout)
+  lineLimit = unitsPerLine(layout),
+  maxLines: 1 | 2 = 2
 ) {
   const normalized = normalizeText(text)
   if (!normalized) return []
-  const chunkLimit = lineLimit * 2
+  const chunkLimit = lineLimit * maxLines
   const sentences = normalized
     .match(/[^.!?。！？]+[.!?。！？]?/g)
     ?.map((value) => value.trim()) ?? [normalized]
@@ -519,8 +632,10 @@ function wrapSubtitleChunkToTwoLines(
     const overflow =
       Math.max(0, firstUnits - lineLimit) + Math.max(0, secondUnits - lineLimit)
     const score =
-      overflow * lineLimit * 4 +
-      Math.abs(firstUnits - secondUnits) +
+      // 문법 덩어리 보호 점수가 높아도 실제 한 줄 상한을 넘는 후보를
+      // 선택하면 안 된다. 폭 안에 드는 어절 경계를 항상 먼저 고른다.
+      overflow * lineLimit * 20 +
+      Math.abs(firstUnits - secondUnits) * 0.3 +
       subtitleLineBreakPenalty(first, second, lineLimit)
     if (score < bestScore) {
       bestIndex = index
@@ -533,9 +648,8 @@ function wrapSubtitleChunkToTwoLines(
   if (subtitleUnits(first) <= lineLimit && subtitleUnits(second) <= lineLimit) {
     return `${first}\n${second}`
   }
-  // 수정 여유용 80% 기준으로 단어가 잘리는 경우에만 실제 화면 한계까지
-  // 늘린다. 실제 폭에 들어가는 문장을 `체포되\n셔서` 처럼 어절 중간에서
-  // 잘라 보이는 것보다 자연스러운 어절 경계를 우선한다.
+  // 호출자가 보수적인 폭을 전달했더라도 실제 화면에 들어가면
+  // `체포되\n셔서`처럼 어절을 자르지 않고 자연스러운 경계를 우선한다.
   const physicalLimit = unitsPerLine(layout)
   if (physicalLimit > lineLimit) {
     let physicalIndex = 0
@@ -547,12 +661,8 @@ function wrapSubtitleChunkToTwoLines(
       const secondUnits = subtitleUnits(physicalSecond)
       if (firstUnits > physicalLimit || secondUnits > physicalLimit) continue
       const score =
-        Math.abs(firstUnits - secondUnits) +
-        subtitleLineBreakPenalty(
-          physicalFirst,
-          physicalSecond,
-          physicalLimit
-        )
+        Math.abs(firstUnits - secondUnits) * 0.3 +
+        subtitleLineBreakPenalty(physicalFirst, physicalSecond, physicalLimit)
       if (score < physicalScore) {
         physicalIndex = index
         physicalScore = score
@@ -575,6 +685,13 @@ function subtitleLineBreakPenalty(
   const left = normalizeText(first)
   const right = normalizeText(second)
   let penalty = 0
+  if (
+    isShortSubtitleOrphan(left, lineLimit) &&
+    !continuesPurposeModifierOnNextLine(left, right)
+  ) {
+    penalty += lineLimit * 8
+  }
+  if (isShortSubtitleOrphan(right, lineLimit)) penalty += lineLimit * 8
   if (startsWithSubtitleParticle(right)) penalty += lineLimit * 12
   if (
     /[\d,.%]$/u.test(left) &&
@@ -584,19 +701,115 @@ function subtitleLineBreakPenalty(
   ) {
     penalty += lineLimit * 12
   }
+  if (
+    /^(?:맞서서?|향해|통해|대해|관해|위한|대한|따른|하면서|아니라)(?:\s|$)/u.test(
+      right
+    ) &&
+    !continuesPurposeModifierOnNextLine(left, right)
+  ) {
+    penalty += lineLimit * 14
+  }
+  if (
+    /(?:은|는|이|가|을|를)$/u.test(left) &&
+    /^(?:맞서서?|향해|통해|대해|관해|하면서|[가-힣]+기)(?:\s|$)/u.test(right) &&
+    !/^[가-힣]+기\s+(?:위해|위해서|위하여)(?:\s|$)/u.test(right)
+  ) {
+    penalty += lineLimit * 14
+  }
+  if (
+    /(?:기|함)$/u.test(left) &&
+    /^(?:위한|위해|위해서|위하여)(?:\s|$)/u.test(right) &&
+    !continuesPurposeModifierOnNextLine(left, right)
+  ) {
+    penalty += lineLimit * 14
+  }
+  if (
+    /(?:게|케|히)$/u.test(left.split(" ").at(-1) ?? "") &&
+    /^(?:한|할|하는|했던|해|해서|하지)(?:\s|$)/u.test(right)
+  ) {
+    penalty += lineLimit * 14
+  }
+  if (splitsSubtitleNominalCompound(left, right)) {
+    penalty += lineLimit * 12
+  }
   if (/(?:의|에|에서|에게|께|로|으로|와|과|위한|대한|따른)$/u.test(left)) {
     penalty += lineLimit * 2.5
   }
-  if (/[,;:，；：–—]$/u.test(left)) penalty -= lineLimit * 1.2
-  else if (/[.!?。！？]$/u.test(left)) penalty -= lineLimit * 1.5
+  if (/[,;:，；：–—]$/u.test(left)) penalty -= lineLimit * 4
+  else if (/[.!?。！？]$/u.test(left)) penalty -= lineLimit * 5
+  if (endsWithSubtitleClauseBreak(left)) penalty -= lineLimit * 5
   if (
     /^(?:그런데|하지만|그러나|그래서|그리고|다만|반면|결국|따라서|한편|즉|또)\b/u.test(
       right
     )
   ) {
-    penalty -= lineLimit * 0.8
+    penalty -= lineLimit * 3
   }
   return penalty
+}
+
+function isShortSubtitleOrphan(value: string, lineLimit: number) {
+  return (
+    normalizeText(value).split(" ").length === 1 &&
+    subtitleUnits(value) < lineLimit * 0.45
+  )
+}
+
+function continuesPurposeModifierOnNextLine(left: string, right: string) {
+  return (
+    /(?:기|함)$/u.test(normalizeText(left)) &&
+    /^(?:위한|대한|따른)\s+\S+/u.test(normalizeText(right))
+  )
+}
+
+function splitsSubtitleNominalCompound(left: string, right: string) {
+  const current = normalizeText(left).split(" ").at(-1) ?? ""
+  const next = normalizeText(right).split(" ")[0] ?? ""
+  // `사고 원인`, `보고서 내용`의 명사 끝을 연결어미 -고/-서로
+  // 오인해 줄을 가르지 않는다.
+  if (
+    /(?:사고|원고|피고|선고|광고|경고|해고|최고|재고|참고|보고서|문서|순서|질서|부서)$/u.test(
+      current
+    ) &&
+    /^[가-힣A-Za-z0-9]+(?:은|는|이|가|을|를|의|에|에서|로|으로|와|과|도|만)[,.;:!?。！？]?$/u.test(
+      next
+    )
+  ) {
+    return true
+  }
+  if (
+    /^(?:한|할|하는|했던)$/u.test(current) &&
+    /^것(?:은|는|이|가|을|를)$/u.test(next)
+  ) {
+    return false
+  }
+  if (
+    endsWithSubtitleClauseBreak(current) ||
+    /(?:했어|됐어|있어|없어|이야|거야|한다|했다|된다|됐다|있다|없다|입니다|습니다)$/u.test(
+      current
+    )
+  ) {
+    return false
+  }
+  return (
+    /^[가-힣A-Za-z0-9]+$/u.test(current) &&
+    /^[가-힣A-Za-z0-9]+(?:은|는|이|가|을|를|의|에|에서|로|으로|와|과|도|만)[,.;:!?。！？]?$/u.test(
+      next
+    )
+  )
+}
+
+function endsWithSubtitleClauseBreak(value: string) {
+  const text = normalizeText(value)
+  if (
+    /(?:고자|면서|면서도|니까|는데|지만|라고|하며|하고|해서|하여|돼서|되어|되고|으며|거나)$/u.test(
+      text
+    )
+  ) {
+    return true
+  }
+  if (/(?:에서|으로|에게|께|부터|까지|보다)$/u.test(text)) return false
+  return /(?:고|서|며)$/u.test(text)
 }
 
 function startsWithSubtitleParticle(value: string) {
@@ -659,8 +872,14 @@ function naturalClauses(sentence: string) {
       .split(
         /\s+(?=(?:하지만|그러나|반면(?:에)?|또한|다만|결국|따라서|그러므로|한편|이에 따라)(?:\s|$))/
       )
-      .map((value) => value.trim())
-      .filter(Boolean)
+      .flatMap((part) =>
+        part
+          .split(
+            /(?<=(?:고자|면서|면서도|니까|는데|지만|라고|하며|하고|해서|하여|돼서|되어|되고|으며|거나|(?<![에으위])[고서며]))\s+/u
+          )
+          .map((value) => value.trim())
+          .filter(Boolean)
+      )
   )
 }
 
@@ -740,6 +959,18 @@ function balanceChunkBoundaries(
     }
     index += 1
   }
+  // 두 칸 모두 길이가 충분해도 `정권의 / 수준`, `나가기 / 위해`처럼
+  // 문법 덩어리를 가르는 경계라면 인접 어절을 다시 배분한다.
+  for (let pairIndex = 0; pairIndex < balanced.length - 1; pairIndex += 1) {
+    const [left, right] = balanceChunkPair(
+      balanced[pairIndex]!,
+      balanced[pairIndex + 1]!,
+      limit,
+      measure
+    )
+    balanced[pairIndex] = left
+    balanced[pairIndex + 1] = right
+  }
   return balanced
 }
 
@@ -792,7 +1023,12 @@ function pairScore(
     : /[,;:，；：–—]$/.test(left)
       ? limit * 0.18
       : 0
-  return Math.abs(leftUnits - rightUnits) + shortPenalty - naturalBreakBonus
+  return (
+    Math.abs(leftUnits - rightUnits) +
+    shortPenalty -
+    naturalBreakBonus +
+    subtitleLineBreakPenalty(left, right, limit)
+  )
 }
 
 function fitSingleLine(value: string, limit: number) {
@@ -858,15 +1094,17 @@ function unitsPerLine(layout: NewsTextLayout) {
 }
 
 function automaticSubtitleLineLimit(layout: NewsTextLayout) {
-  return Math.max(
-    4,
-    Math.floor(unitsPerLine(layout) * AUTO_SUBTITLE_FILL_RATIO)
-  )
+  return unitsPerLine(layout)
 }
 
-/** 자동 생성 때 수정 여백을 남겨 사용하는 안전 글자 단위. */
+/** 자동·수동 자막이 공통으로 사용하는 FFmpeg 실제 한 줄 글자 단위. */
 export function automaticSubtitleLineCharacterLimit(layout: NewsTextLayout) {
   return automaticSubtitleLineLimit(layout)
+}
+
+/** 문장 연결을 지킬 때만 사용할 수 있는 실제 두 줄 전체 글자 단위. */
+export function automaticSubtitleCueCharacterLimit(layout: NewsTextLayout) {
+  return subtitleLineCharacterLimit(layout) * 2
 }
 
 /** 검수 화면에서 수동 편집할 때 사용할 수 있는 FFmpeg 실제 한 줄 폭. */

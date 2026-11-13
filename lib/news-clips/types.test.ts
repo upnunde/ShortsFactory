@@ -59,6 +59,7 @@ test("새 이슈를 선택하면 이전 원본과 후속 제작 데이터를 초
     reportScript: "이전 대본",
     supplementalContext: "이전 첨부 내용",
     outputUrl: "/old.mp4",
+    youtubeScheduledAt: "2026-11-15T07:30",
   }
   const issue = {
     id: "new-issue",
@@ -84,4 +85,26 @@ test("새 이슈를 선택하면 이전 원본과 후속 제작 데이터를 초
   assert.equal(reset.reportScript, "")
   assert.equal(reset.supplementalContext, "")
   assert.equal(reset.outputUrl, "")
+  assert.equal(reset.youtubeScheduledAt, "2026-11-15T07:30")
+})
+
+test("새 프로젝트는 저장 가능한 유튜브 공개 시각을 기본값으로 가진다", () => {
+  const project = freshNewsClipProject("news-channel-test")
+
+  assert.match(project.youtubeScheduledAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+})
+
+test("원본 선택 방식은 같은 렌더 모드를 공유하고 진행 초기화 뒤에도 유지한다", () => {
+  const project = {
+    ...freshNewsClipProject("news-channel-test"),
+    productionMode: "buildup2" as const,
+    sourceSelectionMode: "video-summary" as const,
+    sourceOverview: "영상 전체 핵심 요약",
+  }
+
+  const reset = resetNewsClipProjectProgress(project, null)
+
+  assert.equal(reset.productionMode, "buildup2")
+  assert.equal(reset.sourceSelectionMode, "video-summary")
+  assert.equal(reset.sourceOverview, "")
 })

@@ -1,19 +1,35 @@
 import { collapseBuildup2HighlightCuts } from "./buildup.ts"
-import { removeTrailingCtaFromLead } from "./clip-parts.ts"
-import { snapSourceRangeToCompleteUtterance } from "./speech-bounds.ts"
+import { angleHasLockedRange } from "./angles.ts"
+import { applyBuildupBodyCuts } from "./body-cuts.ts"
+import {
+  partitionSubtitlesByPart,
+  removeTrailingCtaFromLead,
+  reportScenePart,
+  splitScenesByClipPart,
+} from "./clip-parts.ts"
+import {
+  snapSourceRangeToCompleteUtterance,
+  tightenLockedSourceRangeToSpeech,
+} from "./speech-bounds.ts"
 import {
   NEWS_TOTAL_GAP_SECONDS,
   appendEndCtaScenes,
+  canonicalReportScript,
   estimateReportScenesDuration,
   isEndCtaScene,
+  mergeEditedSubtitleText,
   normalizeQuoteScenes,
+  reportSceneAudioMode,
+  reportSceneVisualMode,
   reportCaptionPhrases,
   reportSubtitles,
   splitEndCtaFromScript,
 } from "./report.ts"
 import {
-  automaticSubtitleLineCharacterLimit,
+  automaticSubtitleCueCharacterLimit,
+  layoutTimedSubtitleCues,
   normalizeSubtitleCues,
+  subtitleLineCharacterLimit,
 } from "./text-layout.ts"
 import { normalizeTranscriptCalendarDates } from "./transcript.ts"
 import type {
@@ -39,14 +55,74 @@ export function prepareRenderProject(
 ): { project: NewsClipProject; reason: string } {
   const primarySourceId = project.source?.id ?? ""
   const transcript = normalizeTranscriptCalendarDates(project.transcript)
-  let reportScenes = options.lockTimeline
-    ? project.reportScenes.map((scene) => ({ ...scene }))
-    : normalizeQuoteScenes(
-        collapseBuildup2HighlightCuts(project.reportScenes),
-        primarySourceId ? { [primarySourceId]: transcript } : {},
-        primarySourceId,
-        settings.titleVoiceRate
+  const selectedAngle = project.angleOptions.find(
+    (angle) => angle.id === project.selectedAngleId
+  )
+  const selectedCandidate = project.candidates.find(
+    (candidate) => candidate.id === project.selectedCandidateId
+  )
+  const hasManualCutHistory = project.removedRanges.some(
+    (range) => range.reason === "manual"
+  )
+  const rawLockedBuildupRange =
+    project.productionMode === "buildup2" &&
+    selectedAngle &&
+    angleHasLockedRange(selectedAngle)
+      ? {
+          start: Math.min(selectedAngle.sourceStart, selectedAngle.sourceEnd),
+          end: Math.max(selectedAngle.sourceStart, selectedAngle.sourceEnd),
+        }
+      : null
+  const lockedBuildupRange = rawLockedBuildupRange
+    ? tightenLockedSourceRangeToSpeech(
+        rawLockedBuildupRange.start,
+        rawLockedBuildupRange.end,
+        transcript
       )
+    : null
+  const rawCandidateBuildupRange =
+    project.productionMode === "buildup2" &&
+    hasManualCutHistory &&
+    selectedCandidate &&
+    Number.isFinite(selectedCandidate.sourceStart) &&
+    Number.isFinite(selectedCandidate.sourceEnd) &&
+    selectedCandidate.sourceEnd - selectedCandidate.sourceStart >= 0.2
+      ? {
+          start: selectedCandidate.sourceStart,
+          end: selectedCandidate.sourceEnd,
+        }
+      : null
+  const candidateBuildupRange = rawCandidateBuildupRange
+    ? tightenLockedSourceRangeToSpeech(
+        rawCandidateBuildupRange.start,
+        rawCandidateBuildupRange.end,
+        transcript
+      )
+    : null
+  const canonicalBuildupRange = lockedBuildupRange ?? candidateBuildupRange
+  let keepRanges = project.keepRanges
+  let reportScenes =
+    project.productionMode === "report"
+      ? project.reportScenes.map((scene) => ({
+          ...scene,
+          part: reportScenePart(scene, "report"),
+          audioMode: "tts" as const,
+          visualMode:
+            reportSceneVisualMode(scene) === "quote"
+              ? scene.sourceId && scene.sourceId !== primarySourceId
+                ? ("supporting" as const)
+                : ("source" as const)
+              : reportSceneVisualMode(scene),
+          visual: "source" as const,
+        }))
+      : options.lockTimeline
+        ? project.reportScenes.map((scene) => ({ ...scene }))
+        : normalizeQuoteScenes(
+            collapseBuildup2HighlightCuts(project.reportScenes),
+            primarySourceId ? { [primarySourceId]: transcript } : {},
+            primarySourceId,
+            settings.titleVoiceRate
+          )
   if (
     !options.lockTimeline &&
     project.productionMode === "buildup2" &&
@@ -56,10 +132,18 @@ export function prepareRenderProject(
       if (scene.id !== "buildup2-quote" || scene.visual !== "quote") {
         return scene
       }
+      const requestedStart = canonicalBuildupRange?.start ?? scene.sourceStart
+      const requestedEnd = canonicalBuildupRange?.end ?? scene.sourceEnd
       const completed = snapSourceRangeToCompleteUtterance(
-        scene.sourceStart,
-        scene.sourceEnd,
-        transcript
+        requestedStart,
+        requestedEnd,
+        transcript,
+        // 주제 선택에서 이미 확정한 시작점이다. 검수용 자막 segment의
+        // 표시 tail을 실제 발화로 오인해 이전 문장으로 되감지 않는다.
+        {
+          minimumStart: canonicalBuildupRange?.start ?? scene.sourceStart,
+          maximumEnd: canonicalBuildupRange?.end,
+        }
       )
       return {
         ...scene,
@@ -68,8 +152,69 @@ export function prepareRenderProject(
       }
     })
   }
+  if (project.productionMode === "buildup2" && hasManualCutHistory) {
+    const quote = reportScenes.find(
+      (scene) =>
+        scene.id === "buildup2-quote" ||
+        /^buildup2-quote-cut-\d+$/i.test(scene.id)
+    )
+    const bounds =
+      canonicalBuildupRange ??
+      (quote ? { start: quote.sourceStart, end: quote.sourceEnd } : null)
+    if (bounds) {
+      const cutPlan = applyBuildupBodyCuts(
+        reportScenes,
+        bounds,
+        project.removedRanges,
+        {
+          primarySourceId,
+          templates: project.reportScenes,
+        }
+      )
+      if (cutPlan.reason) {
+        return { project, reason: "report-scenes-required" }
+      }
+      reportScenes = cutPlan.scenes
+      keepRanges = cutPlan.keepRanges
+    }
+  }
 
-  const { body, cta } = splitEndCtaFromScript(project.reportScript)
+  // 원본 음성 본문의 영상·음성 경계는 실제로 채택할 수 있는 단어 범위와
+  // 같아야 한다. 기존 잠긴 프로젝트도 이 단계에서 양끝의 무자막 영상을 복구한다.
+  if (project.productionMode === "buildup2" && transcript.length) {
+    reportScenes = reportScenes.map((scene) => {
+      if (
+        reportSceneAudioMode(scene) !== "original" ||
+        scene.id !== "buildup2-quote"
+      ) {
+        return scene
+      }
+      const tightened = tightenLockedSourceRangeToSpeech(
+        scene.sourceStart,
+        scene.sourceEnd,
+        transcript
+      )
+      return Math.abs(tightened.start - scene.sourceStart) < 0.01 &&
+        Math.abs(tightened.end - scene.sourceEnd) < 0.01
+        ? scene
+        : {
+            ...scene,
+            sourceStart: tightened.start,
+            sourceEnd: tightened.end,
+          }
+    })
+  }
+  const quoteEdgesChanged = reportScenes.some((scene) => {
+    if (reportSceneAudioMode(scene) !== "original") return false
+    const saved = project.reportScenes.find((item) => item.id === scene.id)
+    return (
+      saved !== undefined &&
+      (Math.abs(saved.sourceStart - scene.sourceStart) >= 0.01 ||
+        Math.abs(saved.sourceEnd - scene.sourceEnd) >= 0.01)
+    )
+  })
+
+  const { cta } = splitEndCtaFromScript(project.reportScript)
   const existingCta = reportScenes.find((scene) => isEndCtaScene(scene))
   const ctaText = (existingCta?.narration || cta || "").trim()
   if (project.productionMode === "buildup2" && ctaText) {
@@ -94,43 +239,6 @@ export function prepareRenderProject(
     return { project, reason }
   }
 
-  const subtitleBody =
-    project.productionMode === "buildup2"
-      ? reportScenes
-          .filter((scene) => !isEndCtaScene(scene))
-          .map((scene) => scene.narration.trim())
-          .filter(Boolean)
-          .join("\n")
-      : body || project.reportScript
-  const generatedSubtitles = normalizeSubtitleCues(
-    reportSubtitles(
-      reportScenes,
-      undefined,
-      reportCaptionPhrases(subtitleBody),
-      transcript,
-      {
-        maxCaptionCharacters:
-          automaticSubtitleLineCharacterLimit(settings.bodySubtitleText) * 2,
-      }
-    ),
-    settings.bodySubtitleText
-  )
-  const subtitles =
-    options.lockTimeline && project.subtitles.length > 0
-      ? project.subtitles.map((cue) => ({
-          ...cue,
-          emphasis: [...cue.emphasis],
-          ...(cue.originalEmphasis
-            ? { originalEmphasis: [...cue.originalEmphasis] }
-            : {}),
-        }))
-      : options.rebuildSubtitles || project.subtitles.length === 0
-        ? generatedSubtitles
-        : normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText)
-  const outputBodyDuration = estimateReportScenesDuration(
-    reportScenes,
-    settings.titleVoiceRate
-  )
   const normalizedReportScript =
     project.productionMode === "buildup2"
       ? [
@@ -140,7 +248,70 @@ export function prepareRenderProject(
           .map((value) => value?.trim() ?? "")
           .filter(Boolean)
           .join("\n")
-      : project.reportScript
+      : canonicalReportScript(project.reportScript, reportScenes)
+  const { body: normalizedBody } = splitEndCtaFromScript(normalizedReportScript)
+  const subtitleBody =
+    project.productionMode === "buildup2"
+      ? reportScenes
+          .filter((scene) => !isEndCtaScene(scene))
+          .map((scene) => scene.narration.trim())
+          .filter(Boolean)
+          .join("\n")
+      : normalizedBody || normalizedReportScript
+  const normalizedGeneratedSubtitles = normalizeSubtitleCues(
+    reportSubtitles(
+      reportScenes,
+      undefined,
+      reportCaptionPhrases(subtitleBody),
+      transcript,
+      {
+        maxCaptionCharacters:
+          automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
+        preferredCaptionCharacters: subtitleLineCharacterLimit(
+          settings.bodySubtitleText
+        ),
+      }
+    ),
+    settings.bodySubtitleText
+  )
+  const generatedSceneParts = splitScenesByClipPart(
+    reportScenes,
+    project.productionMode
+  )
+  const generatedSubtitleParts = partitionSubtitlesByPart(
+    normalizedGeneratedSubtitles,
+    generatedSceneParts.lead,
+    generatedSceneParts.body
+  )
+  // 서두는 짧고 빠르게 읽히도록 한 줄을 우선한다. 한 줄 폭을 넘는
+  // 문장은 같은 시간 범위 안에서 여러 자막 칸으로 나눈다.
+  const generatedSubtitles = [
+    ...layoutTimedSubtitleCues(
+      generatedSubtitleParts.lead,
+      settings.bodySubtitleText,
+      { maxLines: 1 }
+    ),
+    ...generatedSubtitleParts.body,
+    ...generatedSubtitleParts.outro,
+  ].sort((left, right) => left.start - right.start || left.end - right.end)
+  const subtitles =
+    options.lockTimeline && project.subtitles.length > 0 && !quoteEdgesChanged
+      ? project.subtitles.map((cue) => ({
+          ...cue,
+          emphasis: [...cue.emphasis],
+          ...(cue.originalEmphasis
+            ? { originalEmphasis: [...cue.originalEmphasis] }
+            : {}),
+        }))
+      : quoteEdgesChanged
+        ? mergeEditedSubtitleText(generatedSubtitles, project.subtitles)
+        : options.rebuildSubtitles || project.subtitles.length === 0
+          ? generatedSubtitles
+          : normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText)
+  const outputBodyDuration = estimateReportScenesDuration(
+    reportScenes,
+    settings.titleVoiceRate
+  )
 
   return {
     reason: "",
@@ -149,7 +320,11 @@ export function prepareRenderProject(
       transcript,
       reportScript: normalizedReportScript,
       reportScenes,
+      keepRanges,
       subtitles,
+      subtitleTimingsLocked: quoteEdgesChanged
+        ? false
+        : project.subtitleTimingsLocked,
       outputDurationSeconds:
         settings.titleCardSeconds + outputBodyDuration + NEWS_TOTAL_GAP_SECONDS,
       renderSignature: "",
@@ -181,11 +356,18 @@ export function renderContractReason(
 ) {
   if (!project.source?.approved) return "source-not-approved"
   if (!project.title.trim()) return "title-required"
-  if (!project.reportScript.trim()) return "report-script-required"
+  const reportScript =
+    project.productionMode === "report"
+      ? canonicalReportScript(project.reportScript, reportScenes)
+      : project.reportScript.trim()
+  if (!reportScript) return "report-script-required"
   if (!reportScenes.length) return "report-scenes-required"
 
   const broken = reportScenes.find((scene) => {
-    if (scene.visual === "quote") {
+    if (project.productionMode === "report") {
+      return !scene.narration.trim()
+    }
+    if (reportSceneAudioMode(scene) === "original") {
       return (
         !Number.isFinite(scene.sourceStart) ||
         !Number.isFinite(scene.sourceEnd) ||
@@ -195,7 +377,7 @@ export function renderContractReason(
     return !scene.narration.trim()
   })
   if (broken) {
-    return broken.visual === "quote"
+    return reportSceneAudioMode(broken) === "original"
       ? "report-scene-quote-range-invalid"
       : "report-scene-narration-required"
   }

@@ -19,6 +19,9 @@ import {
 } from "@/lib/news-clips/intro"
 import { densifySourceKeeps } from "@/lib/news-clips/buildup"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
+import { localizeLockedSubtitleCues } from "@/lib/news-clips/preview-subtitles"
+import { shouldRefreshQuoteTranscripts } from "@/lib/news-clips/restore-locked-project"
+import { clampSceneSourceRange } from "@/lib/news-clips/scene-edit"
 import {
   finalPlaybackDuration,
   normalizeFinalPlaybackRate,
@@ -29,6 +32,11 @@ import {
   sourceFootageSecondsForOutput,
   sourceVideoSetpts,
 } from "@/lib/news-clips/playback"
+import {
+  buildMediaMotionFilter,
+  buildScaleCropFilter,
+  normalizeNewsMediaMotion,
+} from "@/lib/news-clips/video-fit"
 import { tightenQuoteSegment } from "@/lib/server/news-clips/quote-tighten"
 import { detectAudioSilence } from "@/lib/server/news-clips/vad"
 import { NEWS_SILENCE_CUT_MIN_SECONDS } from "@/lib/news-clips/vad"
@@ -38,6 +46,8 @@ import {
   quoteTranscriptAlignment,
   applySubtitleTimingForRender,
   mergeEditedSubtitleText,
+  reportSceneAudioMode,
+  reportSceneVisualMode,
   reportCaptionPhrases,
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
@@ -46,7 +56,7 @@ import {
   splitScenesByClipPart,
 } from "@/lib/news-clips/clip-parts"
 import { snapSubtitleCueTimes } from "@/lib/news-clips/frame-snap"
-import { bodySourceCreditText } from "@/lib/news-clips/source-credit"
+import { projectSourceCreditText } from "@/lib/news-clips/source-credit"
 import { NEWS_RENDER_SCHEMA_VERSION } from "@/lib/news-clips/render-key"
 import { concatNewsClips } from "@/lib/server/news-clips/concat-clips"
 import {
@@ -66,10 +76,11 @@ import {
 } from "@/lib/news-clips/transcript"
 import { koreanSpeechUnits } from "@/lib/news-clips/korean-speech"
 import {
-  automaticSubtitleLineCharacterLimit,
+  automaticSubtitleCueCharacterLimit,
   layoutTimedSubtitleCues,
   resolveTextBox,
   splitIntroTitleLines,
+  subtitleLineCharacterLimit,
   titleLineFits,
   titleLineRenderMetrics,
 } from "@/lib/news-clips/text-layout"
@@ -94,6 +105,7 @@ import {
 import type {
   NewsClipProject,
   NewsClipSettings,
+  NewsMediaMotion,
   NewsPreviewPart,
   NewsReportScene,
   NewsSource,
@@ -145,13 +157,16 @@ export async function renderNewsTextOverlay({
 
   await mkdir(folder, { recursive: true })
   const titleAss = path.join(folder, `${key}-title.ass`)
+  const sourceAss = path.join(folder, `${key}-source.ass`)
   const filters: string[] = ["format=rgba", "colorchannelmixer=aa=0"]
   if (mode === "title") {
-    await writeFile(titleAss, titleAssText(title, 1, settings))
-    filters.push(assAlphaFilter(titleAss))
+    await Promise.all([
+      writeFile(titleAss, titleAssText(title, 1, settings)),
+      writeFile(sourceAss, bodySourceAssText(sourceCredit, 1, settings)),
+    ])
+    filters.push(assAlphaFilter(titleAss), assAlphaFilter(sourceAss))
   } else {
     const subtitleAss = path.join(folder, `${key}-subtitle.ass`)
-    const sourceAss = path.join(folder, `${key}-source.ass`)
     await Promise.all([
       writeFile(titleAss, bodyTitleAssText(title, 1, settings)),
       writeFile(
@@ -248,7 +263,10 @@ export async function renderNewsFramePreview({
   )
 
   if (mode === "title") {
-    await writeFile(titleAss, titleAssText(title, 1, settings))
+    await Promise.all([
+      writeFile(titleAss, titleAssText(title, 1, settings)),
+      writeFile(sourceAss, bodySourceAssText(sourceCredit, 1, settings)),
+    ])
     const frameFilter = frame
       ? `;[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,setsar=1[title-frame];[title-bg][title-frame]overlay=0:0:format=auto[title-composed]`
       : ""
@@ -261,7 +279,7 @@ export async function renderNewsFramePreview({
       placeholder,
       ...(frame ? ["-loop", "1", "-i", frame] : []),
       "-filter_complex",
-      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[title-bg]${frameFilter};[${titleInput}]${assFilter(titleAss)}[v]`,
+      `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[title-bg]${frameFilter};[${titleInput}]${assFilter(titleAss)},${assFilter(sourceAss)}[v]`,
       "-map",
       "[v]",
       "-frames:v",
@@ -293,16 +311,15 @@ export async function renderNewsFramePreview({
     ),
     writeFile(sourceAss, bodySourceAssText(sourceCredit, 1, settings)),
   ])
-  const rect = settings.videoRect
-  const frameFilter = frame
-    ? `[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bg]`
-    : "color=c=#101114:s=1080x1920:r=1:d=1[bg]"
-  const sceneWidth = Math.round(rect.width * 1.22)
-  const sceneHeight = Math.round(rect.height * 1.22)
+  // 영상 전체 깔고 프레임을 위에 올린다. videoRect 구멍 배치는 쓰지 않는다.
+  const clipFilter =
+    `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[clip]`
+  const frameOverlay = frame
+    ? `[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,setsar=1[frame];[clip][frame]overlay=0:0:format=auto[framed]`
+    : `[clip]format=yuv420p[framed]`
   const filter = [
-    `[0:v]scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${rect.width}:${rect.height}:x='(iw-ow)*0.42':y='if(gte(iw/ih\\,1.2)\\,0\\,(ih-oh)*0.34)',setsar=1[clip]`,
-    frameFilter,
-    `[bg][clip]overlay=${rect.x}:${rect.y}[framed]`,
+    clipFilter,
+    frameOverlay,
     `[framed]${assFilter(titleAss)},${assFilter(subtitleAss)},${assFilter(sourceAss)}[v]`,
   ].join(";")
   await run(ffmpegBin(), [
@@ -456,11 +473,15 @@ async function renderNewsClipExclusive(
       })
     )
   )
-  const refreshedTranscriptSources = await refreshUnreliableQuoteTranscripts({
-    project,
-    sourceFiles,
-    sourceTranscripts,
-  })
+  // 보도형은 승인된 대본을 풀 TTS로 읽고 원본 영상은 무음 자료화면으로만
+  // 사용한다. 원본 발언을 쓰는 빌드업형에서만 quote 전사를 다시 확인한다.
+  const refreshedTranscriptSources = shouldRefreshQuoteTranscripts(project)
+    ? await refreshUnreliableQuoteTranscripts({
+        project,
+        sourceFiles,
+        sourceTranscripts,
+      })
+    : new Set<string>()
   const refreshedPrimaryTranscript = sourceTranscripts.get(source.id)
   if (refreshedPrimaryTranscript) {
     project = {
@@ -555,7 +576,8 @@ async function renderNewsClipExclusive(
       project.quoteVolume,
       ttsProvider,
       sourceTranscripts,
-      part
+      part,
+      project.productionMode === "report"
     )
   }
 
@@ -595,6 +617,7 @@ async function renderNewsClipExclusive(
   )
 
   function partSubtitles(options: {
+    part: "lead" | "body" | "outro"
     planned: typeof leadScenesPlanned
     report: NonNullable<typeof leadReport> | null
     edited: typeof project.subtitles
@@ -605,6 +628,12 @@ async function renderNewsClipExclusive(
     const transcriptWasRefreshed = options.planned.some((scene) =>
       refreshedTranscriptSources.has(scene.sourceId || primarySourceId)
     )
+    const lockedEdited = localizeLockedSubtitleCues(
+      options.edited,
+      options.offsetSeconds,
+      options.report.duration +
+        (options.part === "outro" ? NEWS_OUTRO_GAP_SECONDS : 0)
+    )
     if (
       project.subtitleTimingsLocked &&
       options.edited.length &&
@@ -612,17 +641,26 @@ async function renderNewsClipExclusive(
     ) {
       // 4번에서 확정한 문구·줄바꿈·개수·시간을 그대로 렌더한다.
       // 폭 검증은 입력 UI에서 끝났으므로 서버가 다시 줄바꿈하지 않는다.
-      return options.edited.map((cue) => ({
-        ...cue,
-        start: cue.start - options.offsetSeconds,
-        end: cue.end - options.offsetSeconds,
-      }))
+      // 다만 자동 생성된 서두만 한 줄 우선 규칙으로 정리한다. 사용자가
+      // 직접 줄바꿈한 edited 자막은 그대로 보존한다.
+      return options.part === "lead"
+        ? lockedEdited.flatMap((cue) =>
+            cue.edited
+              ? [cue]
+              : layoutTimedSubtitleCues(
+                  [cue],
+                  settings.bodySubtitleText,
+                  { maxLines: 1 }
+                )
+          )
+        : lockedEdited
     }
     const localEdited = options.edited.map((cue) => ({
       ...cue,
       start: Math.max(0, cue.start - options.offsetSeconds),
       end: Math.max(0.04, cue.end - options.offsetSeconds),
     }))
+    const lineCharacters = subtitleLineCharacterLimit(settings.bodySubtitleText)
     const measured = snapSubtitleCueTimes(
       layoutTimedSubtitleCues(
         applySubtitleTimingForRender(
@@ -635,19 +673,25 @@ async function renderNewsClipExclusive(
             captionPhrases: reportCaptionPhrases(options.phrases),
             transcript: project.transcript,
             maxCaptionCharacters:
-              automaticSubtitleLineCharacterLimit(settings.bodySubtitleText) *
-              2,
+              options.part === "lead"
+                ? lineCharacters
+                : automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
+            preferredCaptionCharacters: lineCharacters,
           }
         ),
-        settings.bodySubtitleText
+        settings.bodySubtitleText,
+        { maxLines: options.part === "lead" ? 1 : 2 }
       )
     )
-    return transcriptWasRefreshed
-      ? mergeEditedSubtitleText(measured, localEdited)
-      : measured
+    // 영상 경계를 복구해 타임코드를 다시 만들더라도 사용자가 직접 고친 문구는
+    // 새 실측 구간 위에 다시 얹는다. 자동 자막에는 edited가 없어 영향이 없다.
+    return mergeEditedSubtitleText(measured, localEdited, {
+      trustExactId: true,
+    })
   }
 
   const leadSubtitles = partSubtitles({
+    part: "lead",
     planned: leadScenesPlanned,
     report: leadReport,
     edited: lockedParts.lead,
@@ -655,6 +699,7 @@ async function renderNewsClipExclusive(
     phrases: narrationOf(leadScenesPlanned) || bodyScript,
   })
   const bodySubtitles = partSubtitles({
+    part: "body",
     planned: bodyScenesPlanned,
     report: bodyReport,
     edited: lockedParts.body,
@@ -662,6 +707,7 @@ async function renderNewsClipExclusive(
     phrases: narrationOf(bodyScenesPlanned) || bodyScript,
   })
   const outroSubtitlesLocal = partSubtitles({
+    part: "outro",
     planned: outroScenesPlanned,
     report: outroReport,
     edited: lockedParts.outro,
@@ -695,9 +741,16 @@ async function renderNewsClipExclusive(
     titleCardDurationSeconds,
     outputDurationSeconds,
   }
+  const commonSourceCredit = projectSourceCreditText(
+    effectiveProject.sourceCredit
+  )
   const titleStillRange = selectIntroStillRange(effectiveProject)
   const titleStillSource =
     sourceFiles.get(titleStillRange.sourceId) ?? source.localFile
+  const titleStillFit =
+    sources.get(titleStillRange.sourceId)?.mediaType === "image"
+      ? "contain"
+      : "cover"
   const titleStill = await extractTitleStill(
     titleStillSource,
     titleStillRange,
@@ -717,11 +770,13 @@ async function renderNewsClipExclusive(
     introStillZoom: effectiveProject.introStillZoom,
     introStillX: effectiveProject.introStillX,
     introStillY: effectiveProject.introStillY,
+    introMotion: effectiveProject.introMotion,
     titleCardDurationSeconds,
     titleFrameImage: settings.titleFrameImage,
     titleBackgroundImage: {
       source: titleStillSource,
       range: titleStillRange,
+      fit: titleStillFit,
     },
     tts: ttsIdentity,
     titleVoiceRate: settings.titleVoiceRate,
@@ -761,7 +816,7 @@ async function renderNewsClipExclusive(
       bodySubtitleText: settings.bodySubtitleText,
       bodySourceText: settings.bodySourceText,
       sourceColor: settings.sourceColor,
-      sourceCredit: bodySourceCreditText(source),
+      sourceCredit: commonSourceCredit,
       emphasisColor: settings.emphasisColor,
       subtitleColor: settings.subtitleColor,
       safeMarginPercent: settings.safeMarginPercent,
@@ -808,8 +863,6 @@ async function renderNewsClipExclusive(
   const leadSourceAss = path.join(folder, `${prefix}lead-source.ass`)
   const bodySourceAss = path.join(folder, `${prefix}body-source.ass`)
   const outroSourceAss = path.join(folder, `${prefix}outro-source.ass`)
-  const sourceCredit = bodySourceCreditText(source)
-
   const exportCaptionCues =
     mode === "final"
       ? retimeSubtitlesForFinalPlayback(exportSubtitles, finalPlaybackRate)
@@ -833,9 +886,9 @@ async function renderNewsClipExclusive(
     ),
     writeFile(
       leadSourceAss,
-      bodySourceAssText(
-        sourceCredit,
-        Math.max(0.1, leadDurationSeconds),
+      bodySourceAssTextForScenes(
+        leadReport?.scenes ?? [],
+        commonSourceCredit,
         settings
       )
     ),
@@ -849,9 +902,9 @@ async function renderNewsClipExclusive(
     ),
     writeFile(
       bodySourceAss,
-      bodySourceAssText(
-        sourceCredit,
-        Math.max(0.1, bodyDurationSeconds),
+      bodySourceAssTextForScenes(
+        bodyReport?.scenes ?? [],
+        commonSourceCredit,
         settings
       )
     ),
@@ -865,9 +918,9 @@ async function renderNewsClipExclusive(
     ),
     writeFile(
       outroSourceAss,
-      bodySourceAssText(
-        sourceCredit,
-        Math.max(0.1, outroDurationSeconds),
+      bodySourceAssTextForScenes(
+        outroReport?.scenes ?? [],
+        commonSourceCredit,
         settings
       )
     ),
@@ -890,9 +943,11 @@ async function renderNewsClipExclusive(
     await makeTitleVideo(
       settings,
       titleStill,
+      titleStillFit,
       effectiveProject.introStillZoom,
       effectiveProject.introStillX,
       effectiveProject.introStillY,
+      effectiveProject.introMotion,
       effectiveProject.titleVolume,
       titleAss,
       titleAudio,
@@ -913,6 +968,7 @@ async function renderNewsClipExclusive(
       effectiveProject,
       settings,
       sourceFiles,
+      sources,
       source.id,
       leadReport.audio,
       leadReport.scenes,
@@ -936,6 +992,7 @@ async function renderNewsClipExclusive(
       effectiveProject,
       settings,
       sourceFiles,
+      sources,
       source.id,
       bodyReport.audio,
       bodyReport.scenes,
@@ -959,6 +1016,7 @@ async function renderNewsClipExclusive(
       effectiveProject,
       settings,
       sourceFiles,
+      sources,
       source.id,
       outroReport.audio,
       outroReport.scenes,
@@ -1107,7 +1165,7 @@ async function refreshUnreliableQuoteTranscripts({
   >()
   for (const scene of project.reportScenes) {
     if (
-      scene.visual !== "quote" ||
+      reportSceneAudioMode(scene) !== "original" ||
       !Number.isFinite(scene.sourceStart) ||
       !Number.isFinite(scene.sourceEnd) ||
       scene.sourceEnd <= scene.sourceStart
@@ -1318,9 +1376,13 @@ function invalidProjectReason(
   }
   if (!project.reportScript.trim()) return "report-script-required"
   if (project.reportScenes.length === 0) return "report-scenes-required"
-  // quote 무음컷(…-cut-2 이후)은 원본 음성만 쓰므로 narration이 비어 있을 수 있다.
+  // 보도형은 화면 종류와 무관하게 모든 장면을 TTS로 읽는다. 빌드업형의
+  // quote 무음컷(…-cut-2 이후)만 원본 음성을 쓰므로 narration이 비어도 된다.
   const brokenScene = project.reportScenes.find((scene) => {
-    if (scene.visual === "quote") {
+    if (project.productionMode === "report" && !scene.narration.trim()) {
+      return true
+    }
+    if (reportSceneAudioMode(scene) === "original") {
       return (
         !Number.isFinite(scene.sourceStart) ||
         !Number.isFinite(scene.sourceEnd) ||
@@ -1330,7 +1392,10 @@ function invalidProjectReason(
     return !scene.narration.trim()
   })
   if (brokenScene) {
-    return brokenScene.visual === "quote"
+    if (project.productionMode === "report" && !brokenScene.narration.trim()) {
+      return "report-scene-narration-required"
+    }
+    return reportSceneAudioMode(brokenScene) === "original"
       ? "report-scene-quote-range-invalid"
       : "report-scene-narration-required"
   }
@@ -1341,6 +1406,7 @@ async function resolveProjectSources(project: NewsClipProject) {
   const primarySourceId = project.source?.id ?? ""
   const selectedSourceIds = new Set([
     primarySourceId,
+    project.introSourceId,
     ...project.reportScenes.map((scene) => scene.sourceId || primarySourceId),
   ])
   const resolved = new Map<string, NewsSource>()
@@ -1503,6 +1569,186 @@ type TimedReportScene = NewsReportScene & {
   tightVideoPath?: string
 }
 
+function speechTextWeight(value: string) {
+  const compact = value.normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "")
+  return Math.max(1, Array.from(compact).length)
+}
+
+/**
+ * 한 파트를 한 번에 합성한 단어 타임라인을 장면별 상대 시간으로 나눈다.
+ * 보도형은 문장마다 TTS를 새로 시작하지 않아 억양을 유지하면서도 기존
+ * 장면별 자막·자료화면 렌더 계약을 그대로 사용할 수 있다.
+ */
+function timeContinuousTtsScenes(
+  scenes: NewsReportScene[],
+  words: TypecastSpeechTiming["words"],
+  audioDuration: number
+) {
+  const duration = Math.max(0.1, audioDuration)
+  const sceneWeights = scenes.map((scene) => speechTextWeight(scene.narration))
+  const totalSceneWeight = sceneWeights.reduce((sum, weight) => sum + weight, 0)
+
+  if (!words.length) {
+    let elapsedWeight = 0
+    return scenes.map((scene, index) => {
+      const start = (duration * elapsedWeight) / totalSceneWeight
+      elapsedWeight += sceneWeights[index]!
+      const end =
+        index === scenes.length - 1
+          ? duration
+          : (duration * elapsedWeight) / totalSceneWeight
+      return {
+        ...scene,
+        start: roundDuration(start),
+        end: roundDuration(end),
+        duration: roundDuration(Math.max(0.1, end - start)),
+        alignment: [],
+      } satisfies TimedReportScene
+    })
+  }
+
+  const wordWeights = words.map((word) => speechTextWeight(word.text))
+  const totalWordWeight = wordWeights.reduce((sum, weight) => sum + weight, 0)
+  const boundaries = [0]
+  let sceneWeightCursor = 0
+  let wordWeightCursor = 0
+  let wordCursor = 0
+
+  for (let sceneIndex = 0; sceneIndex < scenes.length - 1; sceneIndex += 1) {
+    sceneWeightCursor += sceneWeights[sceneIndex]!
+    const target = (totalWordWeight * sceneWeightCursor) / totalSceneWeight
+    const remainingScenes = scenes.length - sceneIndex - 1
+    const maxBoundary = Math.max(
+      wordCursor,
+      words.length - Math.min(remainingScenes, words.length)
+    )
+    while (
+      wordCursor < maxBoundary &&
+      wordWeightCursor + wordWeights[wordCursor]! <= target
+    ) {
+      wordWeightCursor += wordWeights[wordCursor]!
+      wordCursor += 1
+    }
+    if (
+      wordCursor < maxBoundary &&
+      wordCursor === boundaries.at(-1) &&
+      words.length >= scenes.length
+    ) {
+      wordWeightCursor += wordWeights[wordCursor]!
+      wordCursor += 1
+    }
+    boundaries.push(wordCursor)
+  }
+  boundaries.push(words.length)
+
+  const sceneTimes = [0]
+  for (let index = 1; index < boundaries.length - 1; index += 1) {
+    const boundary = boundaries[index]!
+    const nextWord = words[boundary]
+    const previousWord = words[Math.max(0, boundary - 1)]
+    const fallback = (duration * index) / Math.max(1, boundaries.length - 1)
+    const candidate = nextWord?.start ?? previousWord?.end ?? fallback
+    const previous = sceneTimes.at(-1) ?? 0
+    const remainingScenes = boundaries.length - index - 1
+    sceneTimes.push(
+      Math.max(
+        previous + 0.04,
+        Math.min(duration - remainingScenes * 0.04, candidate)
+      )
+    )
+  }
+  sceneTimes.push(duration)
+
+  return scenes.map((scene, index) => {
+    const start = Math.max(0, sceneTimes[index] ?? 0)
+    const rawEnd = sceneTimes[index + 1] ?? duration
+    const end = Math.max(start + 0.04, Math.min(duration, rawEnd))
+    const sceneWords = words
+      .slice(boundaries[index], boundaries[index + 1])
+      .map((word) => ({
+        ...word,
+        start: roundDuration(Math.max(0, word.start - start)),
+        end: roundDuration(Math.max(0.04, word.end - start)),
+      }))
+    return {
+      ...scene,
+      start: roundDuration(start),
+      end: roundDuration(end),
+      duration: roundDuration(end - start),
+      alignment: sceneWords,
+    } satisfies TimedReportScene
+  })
+}
+
+async function synthesizeContinuousReportPart({
+  scenes,
+  settings,
+  folder,
+  ttsVolume,
+  provider,
+  part,
+}: {
+  scenes: NewsReportScene[]
+  settings: NewsClipSettings
+  folder: string
+  ttsVolume: number
+  provider: ResolvedNewsTtsProvider
+  part: "lead" | "body" | "outro"
+}) {
+  const narration = scenes
+    .map((scene) => scene.narration.trim())
+    .filter(Boolean)
+    .join("\n\n")
+  if (!narration) throw new Error("report-scene-narration-required")
+
+  const speechKey = digest({
+    narration,
+    pacing: NEWS_TTS_PACING_VERSION,
+    tts: newsTtsCacheIdentity(provider),
+    rate: settings.titleVoiceRate,
+    mode: "report-full-tts-v1",
+  }).slice(0, 16)
+  const speech = path.join(folder, `report-${part}-continuous-${speechKey}.wav`)
+  const timing = await synthesizeSpeech(narration, settings, speech, provider)
+  const duration = await mediaDuration(speech)
+  const alignment = scaleSpeechWordsToDuration(
+    timing?.words ?? [],
+    duration,
+    timing?.audioDuration
+  )
+  const timedScenes = timeContinuousTtsScenes(scenes, alignment, duration)
+  const signature = digest({
+    part,
+    speech,
+    duration,
+    ttsVolume,
+    // 자료영상 구간·크롭은 음성과 무관하다. 영상만 고쳤을 때 동일한
+    // TTS/정규화 오디오를 재사용하도록 장면 화면값은 키에 넣지 않는다.
+    concatAudio: "v5-report-full-tts-part",
+  })
+  const audioRaw = path.join(
+    folder,
+    `report-${part}-${signature.slice(0, 16)}-raw.m4a`
+  )
+  const audio = path.join(
+    folder,
+    `report-${part}-${signature.slice(0, 16)}.m4a`
+  )
+  if (!(await exists(audioRaw))) {
+    await concatAudio([{ path: speech, volume: ttsVolume, duration }], audioRaw)
+  }
+  if (!(await exists(audio))) {
+    await normalizePartAudio(audioRaw, audio, duration)
+  }
+  return {
+    audio,
+    signature,
+    scenes: timedScenes,
+    narrationDuration: roundDuration(duration),
+    duration: roundDuration(duration),
+  }
+}
+
 async function synthesizeReport(
   scenes: NewsReportScene[],
   settings: NewsClipSettings,
@@ -1513,10 +1759,21 @@ async function synthesizeReport(
   quoteVolume: number,
   provider: ResolvedNewsTtsProvider,
   transcripts: Map<string, TranscriptSegment[]>,
-  part: "lead" | "body" | "outro" = "body"
+  part: "lead" | "body" | "outro" = "body",
+  fullTts = false
 ) {
   if (!scenes.length) {
     throw new Error("report-scenes-required")
+  }
+  if (fullTts) {
+    return synthesizeContinuousReportPart({
+      scenes,
+      settings,
+      folder,
+      ttsVolume,
+      provider,
+      part,
+    })
   }
   const audioFiles: {
     path: string
@@ -1527,7 +1784,7 @@ async function synthesizeReport(
   const alignments: TypecastSpeechTiming["words"][] = []
   const tightVideoPaths: Array<string | undefined> = []
   for (const [index, scene] of scenes.entries()) {
-    if (scene.visual === "quote") {
+    if (reportSceneAudioMode(scene) === "original") {
       const source =
         sources.get(scene.sourceId || primarySourceId) ??
         sources.get(primarySourceId)
@@ -1804,9 +2061,11 @@ async function extractTitleStill(
 async function makeTitleVideo(
   settings: NewsClipSettings,
   backgroundImage: string,
+  backgroundFit: "cover" | "contain",
   introStillZoom: number,
   introStillX: number,
   introStillY: number,
+  introMotion: NewsMediaMotion,
   titleVolume: number,
   assPath: string,
   audioPath: string,
@@ -1826,31 +2085,42 @@ async function makeTitleVideo(
       ]
   const frameInput = frame ? ["-loop", "1", "-i", frame] : []
   const audioIndex = frame ? 2 : 1
-  const titleFrameCount = Math.max(1, Math.ceil(titleCardDurationSeconds * 30))
-  const zoomProgressFrames = Math.max(1, titleFrameCount - 1)
-  const introZoomStart = Number.isFinite(introStillZoom)
-    ? Math.max(1, Math.min(1.8, introStillZoom))
+  const requestedIntroZoom = Number.isFinite(introStillZoom)
+    ? Math.max(1 / 3, Math.min(3, introStillZoom))
     : 1
-  const introZoomDelta = introZoomStart * 0.05
+  const introZoomStart = Math.max(1, requestedIntroZoom)
   const introFocusX = Number.isFinite(introStillX)
-    ? Math.max(0, Math.min(100, introStillX)) / 100
+    ? Math.max(-50, Math.min(150, introStillX)) / 100
     : 0.5
   const introFocusY = Number.isFinite(introStillY)
-    ? Math.max(0, Math.min(100, introStillY)) / 100
+    ? Math.max(-50, Math.min(150, introStillY)) / 100
     : 0.5
-  // FFmpeg 6 crop에는 eval=frame이 없다. 고해상도로 맞춘 뒤 zoompan으로 확대한다.
-  const maxIntroZoom = introZoomStart + introZoomDelta
-  const oversample = Math.min(6, Math.max(3, Math.ceil(maxIntroZoom * 2)))
-  const baseWidth = dimensions.width * oversample
-  const baseHeight = dimensions.height * oversample
-  const zoomExpr = `${introZoomStart.toFixed(6)}+${introZoomDelta.toFixed(6)}*on/${zoomProgressFrames}`
-  const baseFilter = [
-    `[0:v]scale=${baseWidth}:${baseHeight}:force_original_aspect_ratio=increase:flags=lanczos`,
-    `crop=${baseWidth}:${baseHeight}`,
-    "setsar=1",
-    `zoompan=z='${zoomExpr}':x='(iw-iw/zoom)*${introFocusX.toFixed(4)}':y='(ih-ih/zoom)*${introFocusY.toFixed(4)}':d=${titleFrameCount}:s=${dimensions.width}x${dimensions.height}:fps=30`,
-    "setsar=1[title-bg]",
-  ].join(",")
+  // 이미지의 확대값이 1배를 넘어가도 기본 contain을 유지한다. 여기서
+  // cover로 바꾸면 편집 화면보다 기본 크롭이 한 번 더 적용된다.
+  const useContainFit = backgroundFit === "contain"
+  const normalizedMotion = normalizeNewsMediaMotion(introMotion, "zoom-in")
+  const motionOversample = normalizedMotion === "none" ? 1 : 3
+  const motionWidth = dimensions.width * motionOversample
+  const motionHeight = dimensions.height * motionOversample
+  const staticScaleCrop = buildScaleCropFilter({
+    targetWidth: motionWidth,
+    targetHeight: motionHeight,
+    zoom: introZoomStart,
+    cropX: `(iw-ow)*${introFocusX.toFixed(4)}`,
+    cropY: `(ih-oh)*${introFocusY.toFixed(4)}`,
+    fit: useContainFit ? "contain" : "cover",
+  })
+  const motionFilter = buildMediaMotionFilter({
+    motion: normalizedMotion,
+    targetWidth: dimensions.width,
+    targetHeight: dimensions.height,
+    durationSeconds: titleCardDurationSeconds,
+    inputIsStill: true,
+  })
+  const animatedBackground = motionFilter
+    ? `${staticScaleCrop},${motionFilter}`
+    : staticScaleCrop
+  const baseFilter = `[0:v]${animatedBackground},fps=30,setsar=1[title-bg]`
   const frameFilter = frame
     ? `;[1:v]scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=decrease,pad=${dimensions.width}:${dimensions.height}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,setsar=1[title-frame];[title-bg][title-frame]overlay=0:0:format=auto[title-composed]`
     : ""
@@ -1883,6 +2153,7 @@ async function makeBodyVideo(
   project: NewsClipProject,
   settings: NewsClipSettings,
   sources: Map<string, string>,
+  sourceRecords: Map<string, NewsSource>,
   primarySourceId: string,
   reportAudio: string,
   scenes: TimedReportScene[],
@@ -1893,7 +2164,6 @@ async function makeBodyVideo(
   dimensions: RenderDimensions,
   requestedBodyDurationSeconds: number
 ) {
-  const rect = settings.videoRect
   const narrationDurationSeconds = Math.max(0.1, scenes.at(-1)?.end ?? 0.1)
   // 파트 길이는 요청값·나레이션만 본다. 합본 자막 timeline으로 늘리면
   // intro/body/outro 분리 시 다른 파트 길이가 섞인다.
@@ -1927,12 +2197,9 @@ async function makeBodyVideo(
       )
     )
   )
-  const scaledRect = {
-    x: Math.round(rect.x * dimensions.scale),
-    y: Math.round(rect.y * dimensions.scale),
-    width: Math.round(rect.width * dimensions.scale),
-    height: Math.round(rect.height * dimensions.scale),
-  }
+  // 영상은 캔버스 전체(맨 뒤). 프레임이 노출 영역을 결정한다.
+  const canvasWidth = dimensions.width
+  const canvasHeight = dimensions.height
   const background = publicFile(settings.bodyFrameImage)
   const backgroundIndex = background
     ? sourceInputs.length + uniqueTightClips.length
@@ -1953,30 +2220,76 @@ async function makeBodyVideo(
     const duration = Math.max(0.1, scene.duration)
     const renderDuration =
       duration + (index === scenes.length - 1 ? endCardDuration : 0)
+    const sceneMotion = normalizeNewsMediaMotion(scene.motion)
+    // 완성 해상도에서 바로 zoompan을 계산하면 작은 변화가 픽셀 단위로
+    // 반올림되어 끊겨 보인다. 모션 장면만 3배 캔버스에서 계산한 뒤
+    // 최종 크기로 축소해 서브픽셀 이동을 부드럽게 표현한다.
+    const motionOversample = sceneMotion === "none" ? 1 : 3
+    const motionWidth = canvasWidth * motionOversample
+    const motionHeight = canvasHeight * motionOversample
     const crop = scene.crop ?? project.crop
-    const sceneZoom = Math.max(1.02, Math.min(1.8, crop.zoom))
-    const sceneCropX = `(iw-ow)*${Math.max(0, Math.min(100, crop.x)) / 100}`
-    const sceneCropY = `(ih-oh)*${Math.max(0, Math.min(100, crop.y)) / 100}`
-    const sceneWidth = Math.round(scaledRect.width * sceneZoom)
-    const sceneHeight = Math.round(scaledRect.height * sceneZoom)
-    const scaleCrop = `scale=${sceneWidth}:${sceneHeight}:force_original_aspect_ratio=increase,crop=${scaledRect.width}:${scaledRect.height}:x='${sceneCropX}':y='${sceneCropY}',setsar=1`
+    const sceneZoom = Math.max(1 / 3, Math.min(3, crop.zoom))
+    const sceneCropX = `(iw-ow)*${Math.max(-50, Math.min(150, crop.x)) / 100}`
+    const sceneCropY = `(ih-oh)*${Math.max(-50, Math.min(150, crop.y)) / 100}`
+    const sceneSource = sourceRecords.get(sceneSourceId)
+    const scaleCrop = buildScaleCropFilter({
+      targetWidth: motionWidth,
+      targetHeight: motionHeight,
+      zoom: sceneZoom,
+      cropX: sceneCropX,
+      cropY: sceneCropY,
+      fit: sceneSource?.mediaType === "image" ? "contain" : "cover",
+    })
+    const motionFilter = buildMediaMotionFilter({
+      motion: sceneMotion,
+      targetWidth: canvasWidth,
+      targetHeight: canvasHeight,
+      durationSeconds: renderDuration,
+      inputIsStill:
+        sceneSource?.mediaType === "image" ||
+        reportSceneVisualMode(scene) === "still",
+    })
+    const animatedScaleCrop = motionFilter
+      ? `${scaleCrop},${motionFilter}`
+      : scaleCrop
     // 원본 푸티지 원배속. fps만 고정해 타임라인을 안정적으로 맞춘다.
     const speed = `${sourceVideoSetpts(NEWS_SOURCE_PLAYBACK_RATE)},fps=30`
     const finish = `tpad=stop_mode=clone:stop_duration=${renderDuration},trim=duration=${renderDuration},setpts=PTS-STARTPTS[scene${index}]`
-    if (scene.visual === "quote") {
+    if (reportSceneVisualMode(scene) === "still") {
+      const stillAt = Math.max(
+        0,
+        Math.min(
+          Math.max(0, sourceDurationSeconds - 0.08),
+          Number.isFinite(scene.sourceStart) ? scene.sourceStart : 0
+        )
+      )
+      const stillEnd = Math.min(
+        sourceDurationSeconds,
+        Math.max(stillAt + 0.04, stillAt + 1 / 30)
+      )
+      return `[${sourceInputIndex}:v]trim=start=${stillAt}:end=${stillEnd},setpts=PTS-STARTPTS,${animatedScaleCrop},fps=30,${finish}`
+    }
+    if (reportSceneAudioMode(scene) === "original") {
       const tightIndex = scene.tightVideoPath
         ? tightClipIndexes.get(scene.tightVideoPath)
         : undefined
       if (tightIndex !== undefined) {
         // quote-tighten 단계에서 이미 컷·원배속 적용됨
-        return `[${tightIndex}:v]setpts=PTS-STARTPTS,${scaleCrop},${finish}`
+        return `[${tightIndex}:v]setpts=PTS-STARTPTS,${animatedScaleCrop},${finish}`
       }
       const baseSourceRange = fitSceneSourceRange(
         scene,
         sourceFootageSecondsForOutput(duration),
         sourceDurationSeconds
       )
-      return `[${sourceInputIndex}:v]trim=start=${baseSourceRange.start}:end=${baseSourceRange.end},setpts=PTS-STARTPTS,${speed},${scaleCrop},${finish}`
+      return `[${sourceInputIndex}:v]trim=start=${baseSourceRange.start}:end=${baseSourceRange.end},setpts=PTS-STARTPTS,${speed},${animatedScaleCrop},${finish}`
+    }
+    if (project.productionMode === "report") {
+      // 보도형의 음성·자막 길이는 TTS가 고정한다. 자료영상은 사용자가
+      // 선택한 시작·종료 범위 밖으로 확장하지 않고 부족한 길이는 finish의
+      // tpad가 마지막 프레임으로 채운다.
+      const selectedRange = clampSceneSourceRange(scene, sourceDurationSeconds)
+      return `[${sourceInputIndex}:v]trim=start=${selectedRange.start}:end=${selectedRange.end},setpts=PTS-STARTPTS,${speed},${animatedScaleCrop},${finish}`
     }
     const footageNeed = sourceFootageSecondsForOutput(renderDuration)
     const baseSourceRange = fitSceneSourceRange(
@@ -1995,11 +2308,11 @@ async function makeBodyVideo(
     )
     if (packed.length <= 1) {
       const only = packed[0] ?? baseSourceRange
-      return `[${sourceInputIndex}:v]trim=start=${only.start}:end=${only.end},setpts=PTS-STARTPTS,${speed},${scaleCrop},${finish}`
+      return `[${sourceInputIndex}:v]trim=start=${only.start}:end=${only.end},setpts=PTS-STARTPTS,${speed},${animatedScaleCrop},${finish}`
     }
     const pieces = packed.map((keep, pieceIndex) => {
       const label = `s${index}p${pieceIndex}`
-      return `[${sourceInputIndex}:v]trim=start=${keep.start}:end=${keep.end},setpts=PTS-STARTPTS,${speed},${scaleCrop}[${label}]`
+      return `[${sourceInputIndex}:v]trim=start=${keep.start}:end=${keep.end},setpts=PTS-STARTPTS,${speed},${animatedScaleCrop}[${label}]`
     })
     const concatLabels = packed
       .map((_, pieceIndex) => `[s${index}p${pieceIndex}]`)
@@ -2007,14 +2320,18 @@ async function makeBodyVideo(
     return `${pieces.join(";")};${concatLabels}concat=n=${packed.length}:v=1:a=0,${finish}`
   })
   const concatInputs = scenes.map((_, index) => `[scene${index}]`).join("")
-  const backgroundFilter = background
-    ? `[${backgroundIndex}:v]scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=increase,crop=${dimensions.width}:${dimensions.height},setsar=1[bg]`
-    : `color=c=#101114:s=${dimensions.width}x${dimensions.height}:r=30:d=${bodyDurationSeconds}[bg]`
+  // 프레임은 영상 위에 올린다. 투명 영역으로 뒤 영상이 보인다.
+  const frameOverlayFilters = background
+    ? [
+        `[${backgroundIndex}:v]scale=${canvasWidth}:${canvasHeight}:force_original_aspect_ratio=decrease,pad=${canvasWidth}:${canvasHeight}:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,setsar=1[frame]`,
+        `[clip][frame]overlay=0:0:format=auto[framed]`,
+      ]
+    : [`[clip]format=yuv420p[framed]`]
   const filter = [
     ...sceneFilters,
     `${concatInputs}concat=n=${scenes.length}:v=1:a=0[clip]`,
-    backgroundFilter,
-    `[bg][clip]overlay=${scaledRect.x}:${scaledRect.y}[framed];[framed]${assFilter(bodyTitleAss)},${assFilter(captionsAss)},${assFilter(bodySourceAss)}[vout]`,
+    ...frameOverlayFilters,
+    `[framed]${assFilter(bodyTitleAss)},${assFilter(captionsAss)},${assFilter(bodySourceAss)}[vout]`,
     `[${reportAudioIndex}:a]apad,atrim=duration=${bodyDurationSeconds},alimiter=limit=0.95[aout]`,
   ].join(";")
   await run(ffmpegBin(), [
@@ -2230,6 +2547,46 @@ function bodySourceAssText(
   )
 }
 
+function bodySourceAssTextForScenes(
+  scenes: TimedReportScene[],
+  sourceCredit: string,
+  settings: NewsClipSettings
+) {
+  const layout = settings.bodySourceText
+  const anchor = textAnchor(layout, settings.safeMarginPercent)
+  const text = sourceCredit.replace(/\s+/g, " ").trim()
+  if (!text) {
+    return assSingleLineDocument(
+      assFontFamily(settings.fontFamily, layout.fontWeight),
+      layout.fontSize,
+      ""
+    )
+  }
+  const events = scenes
+    .map((scene) => {
+      const metrics = titleLineRenderMetrics(text, layout, 0.35)
+      return assSingleLineTimedEvent(
+        text,
+        scene.start,
+        scene.end,
+        layout,
+        metrics.fontSize,
+        metrics.scaleX,
+        settings.sourceColor,
+        anchor.x,
+        layout.y,
+        anchor.alignment
+      )
+    })
+    .filter(Boolean)
+    .join("\n")
+  return assSingleLineDocument(
+    assFontFamily(settings.fontFamily, layout.fontWeight),
+    layout.fontSize,
+    events
+  )
+}
+
 function assSingleLineDocument(
   fontFamily: string,
   fontSize: number,
@@ -2249,7 +2606,33 @@ function assSingleLineEvent(
   y: number,
   alignment: number
 ) {
-  return `Dialogue: 0,0:00:00.00,${assTime(duration)},SingleLine,,0,0,0,,{\\an${alignment}\\pos(${x},${y})\\q2\\bord0\\shad0\\fs${fontSize}\\fscx${Math.round(scaleX * 100)}\\fsp${layout.letterSpacing}\\b${layout.fontWeight}\\c${hexToAss(color)}}${assText(text)}`
+  return assSingleLineTimedEvent(
+    text,
+    0,
+    duration,
+    layout,
+    fontSize,
+    scaleX,
+    color,
+    x,
+    y,
+    alignment
+  )
+}
+
+function assSingleLineTimedEvent(
+  text: string,
+  start: number,
+  end: number,
+  layout: NewsClipSettings["titleCardText"],
+  fontSize: number,
+  scaleX: number,
+  color: string,
+  x: number,
+  y: number,
+  alignment: number
+) {
+  return `Dialogue: 0,${assTime(start)},${assTime(Math.max(start + 0.04, end))},SingleLine,,0,0,0,,{\\an${alignment}\\pos(${x},${y})\\q2\\bord0\\shad0\\fs${fontSize}\\fscx${Math.round(scaleX * 100)}\\fsp${layout.letterSpacing}\\b${layout.fontWeight}\\c${hexToAss(color)}}${assText(text)}`
 }
 
 function textAnchor(
@@ -2360,6 +2743,15 @@ function manifestOf(
       title: source.title,
       channel: source.channel,
       originalUrl: source.originalUrl,
+      mediaType: source.mediaType ?? "video",
+      provider: source.provider ?? "",
+      pageUrl: source.pageUrl ?? source.originalUrl,
+      creator: source.creator ?? "",
+      licenseName: source.licenseName ?? "",
+      licenseUrl: source.licenseUrl ?? "",
+      attribution: source.attribution ?? "",
+      relevanceScore: source.searchMetrics?.relevanceScore ?? null,
+      relevanceReason: source.searchMetrics?.relevanceReason ?? "",
     })),
     sourceTimecode: candidate
       ? { start: candidate.sourceStart, end: candidate.sourceEnd }
@@ -2368,8 +2760,12 @@ function manifestOf(
     candidateScores: candidate?.scores ?? null,
     candidateReason: candidate?.reason ?? "",
     title: project.title,
+    sourceCredit: projectSourceCreditText(project.sourceCredit),
     reportScript: project.reportScript,
     reportScenes: project.reportScenes.map((scene) => ({
+      part: scene.part,
+      audioMode: reportSceneAudioMode(scene),
+      visualMode: reportSceneVisualMode(scene),
       visual: scene.visual,
       narration: scene.narration,
       sourceId: scene.sourceId || project.source?.id || "",
@@ -2529,7 +2925,7 @@ function fitSceneSourceRange(
       Number.isFinite(scene.sourceEnd) ? scene.sourceEnd : originalStart + 0.5
     )
   )
-  if (scene.visual === "quote") {
+  if (reportSceneAudioMode(scene) === "original") {
     return {
       start: roundDuration(originalStart),
       end: roundDuration(originalEnd),

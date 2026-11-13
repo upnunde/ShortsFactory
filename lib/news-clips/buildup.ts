@@ -13,6 +13,13 @@ import type {
 export const BUILDUP2_LEAD_PROMPT_HINT =
   "핵심 발언의 모순·온도만 짚는 차분한 반말 서두 1~2문장. '들어봐' 고정 훅·CTA 금지"
 
+type Buildup2RangeOptions = {
+  /** 사용자가 확정한 시작점. 발화 보정이 이 시점보다 앞설 수 없다. */
+  startFloor?: number
+  /** 사용자가 확정한 끝점. 문장 완결 보정이 이 시점을 넘을 수 없다. */
+  endCeiling?: number
+}
+
 export function keepRangesInside(
   start: number,
   end: number,
@@ -151,7 +158,8 @@ export function localBuildup2Draft(
   candidate: NewsClipCandidate,
   _settings: Pick<NewsClipSettings, "titleCardSeconds">,
   _silences: RemovedRange[],
-  primarySourceId = ""
+  primarySourceId = "",
+  options: Buildup2RangeOptions = {}
 ) {
   void _settings
   void _silences
@@ -159,14 +167,20 @@ export function localBuildup2Draft(
   const completed = snapSourceRangeToCompleteUtterance(
     candidate.sourceStart,
     candidate.sourceEnd,
-    transcript
+    transcript,
+    {
+      minimumStart: options.startFloor,
+      maximumEnd: options.endCeiling,
+    }
   )
   const scenes = buildBuildup2Scenes(
     teaser,
     completed.start,
     completed.end,
     transcript,
-    primarySourceId
+    primarySourceId,
+    undefined,
+    options
   )
   const duration = Math.max(0.12, completed.end - completed.start)
   return {
@@ -190,13 +204,44 @@ export function buildBuildup2Scenes(
   highlightEnd: number,
   transcript: TranscriptSegment[],
   primarySourceId = "",
-  preferred?: NewsReportScene[]
+  preferred?: NewsReportScene[],
+  options: Buildup2RangeOptions = {}
 ): NewsReportScene[] {
   const teaserScene = preferred?.find((scene) => scene.id === "buildup2-lead")
-  const highlightScene = preferred?.find(
-    (scene) =>
-      scene.id === "buildup2-quote" || scene.id.startsWith("buildup2-quote")
-  )
+  const preferredCutScenes = (preferred ?? [])
+    .filter(
+      (scene) =>
+        /^buildup2-quote-cut-\d+$/i.test(scene.id) &&
+        Number.isFinite(scene.sourceStart) &&
+        Number.isFinite(scene.sourceEnd) &&
+        scene.sourceEnd > scene.sourceStart
+    )
+    .sort(
+      (left, right) =>
+        left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
+    )
+  const highlightScene =
+    preferred?.find((scene) => scene.id === "buildup2-quote") ??
+    preferredCutScenes[0]
+  const explicitStartFloor = Number.isFinite(options.startFloor)
+    ? options.startFloor
+    : undefined
+  const preferredRangeIsValid =
+    highlightScene?.id === "buildup2-quote" &&
+    Number.isFinite(highlightScene?.sourceStart) &&
+    Number.isFinite(highlightScene?.sourceEnd) &&
+    (highlightScene?.sourceEnd ?? 0) > (highlightScene?.sourceStart ?? 0)
+  const preferredStartFloor = preferredRangeIsValid
+    ? highlightScene?.sourceStart
+    : undefined
+  const startFloor = explicitStartFloor ?? preferredStartFloor
+  const explicitEndCeiling = Number.isFinite(options.endCeiling)
+    ? options.endCeiling
+    : undefined
+  const preferredEndCeiling = preferredRangeIsValid
+    ? highlightScene?.sourceEnd
+    : undefined
+  const endCeiling = explicitEndCeiling ?? preferredEndCeiling
   const teaserRange = snapSourceRangeToSpeech(
     highlightStart,
     Math.min(highlightStart + 3, highlightEnd),
@@ -206,29 +251,45 @@ export function buildBuildup2Scenes(
   const quoteRange = snapSourceRangeToCompleteUtterance(
     highlightStart,
     highlightEnd,
-    transcript
+    transcript,
+    { minimumStart: startFloor, maximumEnd: endCeiling }
   )
-  return [
-    {
-      id: teaserScene?.id || "buildup2-lead",
-      narration: teaser.trim(),
-      visual: "source",
-      sourceId: teaserScene?.sourceId || primarySourceId || undefined,
-      sourceStart: round(teaserRange.start),
-      sourceEnd: round(teaserRange.end),
-      ...(teaserScene?.crop ? { crop: teaserScene.crop } : {}),
-    },
-    {
-      // 서두·마무리만 TTS. 하이라이트는 원본 영상+음성, 자막은 전사 기준.
-      id: "buildup2-quote",
-      narration: "",
-      visual: "quote",
-      sourceId: highlightScene?.sourceId || primarySourceId || undefined,
-      sourceStart: round(quoteRange.start),
-      sourceEnd: round(quoteRange.end),
-      ...(highlightScene?.crop ? { crop: highlightScene.crop } : {}),
-    },
-  ]
+  const lead: NewsReportScene = {
+    id: teaserScene?.id || "buildup2-lead",
+    narration: teaser.trim(),
+    visual: "source",
+    sourceId: teaserScene?.sourceId || primarySourceId || undefined,
+    sourceStart: round(teaserRange.start),
+    sourceEnd: round(teaserRange.end),
+    ...(teaserScene?.crop ? { crop: teaserScene.crop } : {}),
+  }
+  const quoteScenes = preferredCutScenes.length
+    ? preferredCutScenes.map((scene) => ({
+        ...scene,
+        narration: "",
+        part: "body" as const,
+        audioMode: "original" as const,
+        visualMode: "quote" as const,
+        visual: "quote" as const,
+        sourceId: scene.sourceId || primarySourceId || undefined,
+        ...(scene.crop ? { crop: { ...scene.crop } } : {}),
+      }))
+    : [
+        {
+          // 서두·마무리만 TTS. 하이라이트는 원본 영상+음성, 자막은 전사 기준.
+          id: "buildup2-quote",
+          narration: "",
+          part: "body" as const,
+          audioMode: "original" as const,
+          visualMode: "quote" as const,
+          visual: "quote" as const,
+          sourceId: highlightScene?.sourceId || primarySourceId || undefined,
+          sourceStart: round(quoteRange.start),
+          sourceEnd: round(quoteRange.end),
+          ...(highlightScene?.crop ? { crop: { ...highlightScene.crop } } : {}),
+        },
+      ]
+  return [lead, ...quoteScenes]
 }
 
 /** 잘린 하이라이트 조각들까지 포함해 전체 원본 구간을 구한다. */
@@ -242,12 +303,19 @@ export function buildup2HighlightBounds(
       scene.visual === "quote" &&
       (scene.id === "buildup2-quote" ||
         /^buildup2-quote-cut-\d+/i.test(scene.id) ||
-        scene.id.startsWith("buildup2-quote"))
+        scene.id.startsWith("buildup2-quote")) &&
+      Number.isFinite(scene.sourceStart) &&
+      Number.isFinite(scene.sourceEnd) &&
+      scene.sourceEnd > scene.sourceStart
   )
+  const safeFallbackStart = Number.isFinite(fallbackStart) ? fallbackStart : 0
+  const safeFallbackEnd = Number.isFinite(fallbackEnd)
+    ? fallbackEnd
+    : safeFallbackStart + 0.12
   if (!pieces.length) {
     return {
-      start: Math.min(fallbackStart, fallbackEnd),
-      end: Math.max(fallbackStart, fallbackEnd),
+      start: Math.min(safeFallbackStart, safeFallbackEnd),
+      end: Math.max(safeFallbackStart + 0.12, safeFallbackEnd),
     }
   }
   return {

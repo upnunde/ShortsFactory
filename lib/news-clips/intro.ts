@@ -11,11 +11,19 @@ export type IntroStillRange = {
 export function selectIntroStillRange(
   project: NewsClipProject
 ): IntroStillRange {
+  const selectedIntroSource = project.introSourceId
+    ? [project.source, ...project.supportingSources].find(
+        (source) => source?.id === project.introSourceId
+      )
+    : null
+  const introSource = selectedIntroSource ?? project.source
+  const introSourceId = introSource?.id ?? ""
+
   if (
     typeof project.introStillTimeSeconds === "number" &&
     Number.isFinite(project.introStillTimeSeconds)
   ) {
-    const sourceDuration = project.source?.durationSeconds ?? 0
+    const sourceDuration = introSource?.durationSeconds ?? 0
     const time = Math.max(
       0,
       sourceDuration > 0
@@ -24,9 +32,20 @@ export function selectIntroStillRange(
     )
     return {
       sceneId: "manual-intro-still",
-      sourceId: project.source?.id ?? "",
+      sourceId: introSourceId,
       start: time,
       end: time,
+      visual: "manual",
+    }
+  }
+
+  if (selectedIntroSource) {
+    const duration = Math.max(0.1, selectedIntroSource.durationSeconds || 12)
+    return {
+      sceneId: "custom-intro-source",
+      sourceId: selectedIntroSource.id,
+      start: 0,
+      end: duration,
       visual: "manual",
     }
   }

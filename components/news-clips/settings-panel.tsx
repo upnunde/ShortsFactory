@@ -7,6 +7,7 @@ import { Play, Plus, Square, Trash2 } from "lucide-react"
 import { NewsFramePreview } from "@/components/news-clips/frame-preview"
 import { LoadingButtonLabel } from "@/components/news-clips/loading-button-label"
 import { SegmentedTabs } from "@/components/news-clips/segmented-tabs"
+import { stepActionBarClassName } from "@/components/news-clips/step-action-bar"
 import { AccountsPanel } from "@/components/studio/accounts-panel"
 import {
   resolveTextBox,
@@ -374,725 +375,733 @@ export function NewsClipSettingsPanel({
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-semibold">뉴스 리포트 채널 설정</h2>
-          <p className="mt-1 text-sm text-muted">
-            이 채널의 프레임과 TTS 설정을 관리합니다.
-          </p>
-        </div>
-        <Button variant="outline" onPress={onClose}>
-          닫기
-        </Button>
-      </header>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pt-6">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-separator pb-4">
+          <div>
+            <h2 className="text-xl font-semibold">뉴스 리포트 채널 설정</h2>
+            <p className="mt-1 text-sm text-muted">
+              이 채널의 프레임과 TTS 설정을 관리합니다.
+            </p>
+          </div>
+          <Button variant="outline" onPress={onClose}>
+            닫기
+          </Button>
+        </header>
 
-      <SegmentedTabs
-        ariaLabel="뉴스 리포트 설정 구분"
-        equalWidth={false}
-        className="overflow-x-auto"
-        value={settingsTab}
-        onChange={setSettingsTab}
-        items={[
-          { id: "search", label: "검색" },
-          { id: "assets", label: "화면 자산" },
-          { id: "text", label: "텍스트 배치" },
-          { id: "audio", label: "오디오·자막" },
-          { id: "accounts", label: "채널 연결" },
-        ]}
-      />
+        <SegmentedTabs
+          ariaLabel="뉴스 리포트 설정 구분"
+          equalWidth={false}
+          className="overflow-x-auto"
+          value={settingsTab}
+          onChange={setSettingsTab}
+          items={[
+            { id: "search", label: "검색" },
+            { id: "assets", label: "화면 자산" },
+            { id: "text", label: "텍스트 배치" },
+            { id: "audio", label: "오디오·자막" },
+            { id: "accounts", label: "채널 연결" },
+          ]}
+        />
 
-      {settingsTab === "search" ? (
-        <div className="flex flex-col gap-6">
-          <Card>
-            <Card.Header>
-              <Card.Title>이슈 탐색·원본 검색</Card.Title>
-              <Card.Description>
-                이슈 탐색과 원본 검색 기준을 정합니다.
-              </Card.Description>
-            </Card.Header>
-            <Card.Content className="grid gap-5 md:grid-cols-2">
-              <label className="flex flex-col gap-2 md:col-span-2">
-                <span className="text-sm font-medium">우선 탐색 주제</span>
-                <textarea
-                  rows={4}
-                  maxLength={500}
-                  value={settings.issueSearchGuidance}
-                  onChange={(event) =>
-                    setSettings({
-                      ...settings,
-                      issueSearchGuidance: event.currentTarget.value,
-                    })
-                  }
-                  className={fieldClass}
-                  placeholder="예: 현 정부 정책의 모순, 민주당 관련 논란, 세금·부동산 정책이 국민 생활에 미치는 영향"
-                />
-              </label>
-              <div className="flex flex-col gap-3 md:col-span-2">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">
-                      우선 검색 채널 · 선택 사항
-                    </p>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onPress={() =>
-                      setChannels((current) => [
-                        ...current,
-                        {
-                          id: crypto.randomUUID(),
-                          name: "",
-                          youtubeChannelId: "",
-                          priority: 3,
-                          enabled: true,
-                        },
-                      ])
+        {settingsTab === "search" ? (
+          <div className="flex flex-col gap-5">
+            <Card>
+              <Card.Header className="border-b border-separator pb-4">
+                <Card.Title>이슈 탐색·원본 검색</Card.Title>
+                <Card.Description>
+                  이슈 탐색과 원본 검색 기준을 정합니다.
+                </Card.Description>
+              </Card.Header>
+              <Card.Content className="grid gap-5 md:grid-cols-2">
+                <label className="flex flex-col gap-2 md:col-span-2">
+                  <span className="text-sm font-medium">우선 탐색 주제</span>
+                  <textarea
+                    rows={4}
+                    maxLength={500}
+                    value={settings.issueSearchGuidance}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        issueSearchGuidance: event.currentTarget.value,
+                      })
                     }
-                  >
-                    채널 추가
-                  </Button>
-                </div>
-                {channels.length
-                  ? channels.map((channel) => (
-                      <div
-                        key={channel.id}
-                        className="grid gap-2 rounded-xl border border-separator p-3 md:grid-cols-[1fr_1.2fr_90px_80px_auto]"
-                      >
-                        <input
-                          aria-label="채널 이름"
-                          value={channel.name}
-                          onChange={(event) =>
-                            setChannels((current) =>
-                              updateChannel(current, channel.id, {
-                                name: event.currentTarget.value,
-                              })
-                            )
-                          }
-                          className={fieldClass}
-                          placeholder="채널 이름"
-                        />
-                        <input
-                          aria-label="YouTube 채널 ID"
-                          value={channel.youtubeChannelId}
-                          onChange={(event) =>
-                            setChannels((current) =>
-                              updateChannel(current, channel.id, {
-                                youtubeChannelId: event.currentTarget.value,
-                              })
-                            )
-                          }
-                          className={fieldClass}
-                          placeholder="UC..."
-                        />
-                        <label className="flex items-center gap-2 text-xs">
-                          우선
+                    className={fieldClass}
+                    placeholder="예: 현 정부 정책의 모순, 민주당 관련 논란, 세금·부동산 정책이 국민 생활에 미치는 영향"
+                  />
+                </label>
+                <div className="flex flex-col gap-3 md:col-span-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">
+                        우선 검색 채널 · 선택 사항
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onPress={() =>
+                        setChannels((current) => [
+                          ...current,
+                          {
+                            id: crypto.randomUUID(),
+                            name: "",
+                            youtubeChannelId: "",
+                            priority: 3,
+                            enabled: true,
+                          },
+                        ])
+                      }
+                    >
+                      채널 추가
+                    </Button>
+                  </div>
+                  {channels.length
+                    ? channels.map((channel) => (
+                        <div
+                          key={channel.id}
+                          className="grid gap-2 rounded-xl border border-separator p-3 md:grid-cols-[1fr_1.2fr_90px_80px_auto]"
+                        >
                           <input
-                            type="number"
-                            min={1}
-                            max={5}
-                            value={channel.priority}
+                            aria-label="채널 이름"
+                            value={channel.name}
                             onChange={(event) =>
                               setChannels((current) =>
                                 updateChannel(current, channel.id, {
-                                  priority: Number(event.currentTarget.value),
+                                  name: event.currentTarget.value,
                                 })
                               )
                             }
                             className={fieldClass}
+                            placeholder="채널 이름"
                           />
-                        </label>
-                        <label className="flex items-center justify-center gap-2 text-xs">
                           <input
-                            type="checkbox"
-                            checked={channel.enabled}
+                            aria-label="YouTube 채널 ID"
+                            value={channel.youtubeChannelId}
                             onChange={(event) =>
                               setChannels((current) =>
                                 updateChannel(current, channel.id, {
-                                  enabled: event.currentTarget.checked,
+                                  youtubeChannelId: event.currentTarget.value,
                                 })
                               )
                             }
+                            className={fieldClass}
+                            placeholder="UC..."
                           />
-                          사용
-                        </label>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onPress={() =>
-                            setChannels((current) =>
-                              current.filter((item) => item.id !== channel.id)
-                            )
-                          }
-                        >
-                          삭제
-                        </Button>
-                      </div>
-                    ))
-                  : null}
-                <label className="flex items-start gap-3 rounded-xl border border-separator p-4 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={settings.communitySignalsEnabled}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        communitySignalsEnabled: event.currentTarget.checked,
-                      })
-                    }
-                  />
-                  <span className="font-medium">
-                    공개 커뮤니티 이슈 보조 신호
-                  </span>
-                </label>
-              </div>
-              <div className="rounded-xl border border-separator p-4">
-                <p className="text-sm font-medium">제목 인트로 길이</p>
-              </div>
-            </Card.Content>
-          </Card>
-        </div>
-      ) : null}
-
-      {settingsTab === "assets" ? (
-        <div className="flex flex-col gap-6">
-          <Card>
-            <Card.Header>
-              <Card.Title>고정 프레임</Card.Title>
-              <Card.Description>
-                제목·본문 고정 프레임을 등록합니다.
-              </Card.Description>
-            </Card.Header>
-            <Card.Content className="grid gap-4 md:grid-cols-2">
-              <AssetField
-                label="제목 프레임 이미지"
-                value={settings.titleFrameImage}
-                accept="image/*"
-                onFile={(file) => void upload("titleFrame", file)}
-              />
-              <AssetField
-                label="본문 프레임 이미지"
-                value={settings.bodyFrameImage}
-                accept="image/*"
-                onFile={(file) => void upload("bodyFrame", file)}
-              />
-              <div className="rounded-xl border border-separator bg-default p-4 md:col-span-2">
-                <p className="text-sm font-medium">자료 영상 영역 · 3:2 고정</p>
-                <p className="mt-2 text-sm text-muted">
-                  기준 캔버스 1080×720 · 720p 출력 720×480
-                </p>
-              </div>
-            </Card.Content>
-          </Card>
-        </div>
-      ) : null}
-
-      {settingsTab === "text" ? (
-        <div className="flex flex-col gap-6">
-          <Card>
-            <Card.Header>
-              <Card.Title>글꼴·텍스트 위치</Card.Title>
-              <Card.Description>
-                미리보기·초안·최종에 같은 글자 배치를 씁니다.
-              </Card.Description>
-            </Card.Header>
-            <Card.Content className="grid items-start gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-              <div className="flex flex-col gap-3 lg:sticky lg:top-6">
-                <SegmentedTabs
-                  ariaLabel="프레임 미리보기"
-                  value={frameMode}
-                  onChange={setFrameMode}
-                  items={[
-                    { id: "title", label: "제목 프레임" },
-                    { id: "body", label: "본문 프레임" },
-                  ]}
-                />
-                <NewsFramePreview
-                  mode={frameMode}
-                  title={previewTitle || "뉴스 핵심을\n두 줄 안에 표시"}
-                  subtitle={
-                    previewSubtitle ||
-                    "본문 자막도 두 줄 안에서\n음성에 맞춰 표시됩니다"
-                  }
-                  sourceCredit="출처 · 예시 방송"
-                  settings={settings}
-                  showGuides
-                  className="w-full"
-                />
-                {frameMode === "title" && previewTitleOverflow ? (
-                  <p className="text-xs font-medium text-danger">
-                    {previewTitleOverflowLabel} 제목 폭 초과
-                  </p>
-                ) : null}
-              </div>
-
-              <div className="flex min-w-0 flex-col gap-5">
-                <RangeField
-                  label="안전 여백"
-                  value={settings.safeMarginPercent}
-                  min={5}
-                  max={12}
-                  step={1}
-                  formatValue={(value) => `${Math.round(value)}%`}
-                  onChange={(safeMarginPercent) =>
-                    setSettings({ ...settings, safeMarginPercent })
-                  }
-                />
-                <label className="flex flex-col gap-2">
-                  <span className="text-sm">글꼴</span>
-                  <select
-                    value={settings.fontFamily}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        fontFamily:
-                          event.currentTarget.value === "Black Han Sans"
-                            ? "Black Han Sans"
-                            : "Pretendard",
-                      })
-                    }
-                    className={fieldClass}
-                  >
-                    <option value="Pretendard">Pretendard</option>
-                    <option value="Black Han Sans">Black Han Sans</option>
-                  </select>
-                </label>
-
-                {frameMode === "title" ? (
-                  <TextLayoutEditor
-                    title="제목 프레임 제목"
-                    value={settings.titleCardText}
-                    maxWidthPercent={100}
-                    secondaryFontSize={settings.titleCardSecondFontSize}
-                    lineHeightPercent={settings.titleCardLineHeightPercent}
-                    color={settings.titleCardColor}
-                    secondaryColor={settings.titleCardSecondColor}
-                    safeMarginPercent={settings.safeMarginPercent}
-                    onChange={(titleCardText) =>
-                      setSettings({ ...settings, titleCardText })
-                    }
-                    onSecondaryFontSizeChange={(titleCardSecondFontSize) =>
-                      setSettings({ ...settings, titleCardSecondFontSize })
-                    }
-                    onLineHeightPercentChange={(titleCardLineHeightPercent) =>
-                      setSettings({ ...settings, titleCardLineHeightPercent })
-                    }
-                    onColorChange={(titleCardColor) =>
-                      setSettings({ ...settings, titleCardColor })
-                    }
-                    onSecondaryColorChange={(titleCardSecondColor) =>
-                      setSettings({ ...settings, titleCardSecondColor })
-                    }
-                  />
-                ) : (
-                  <>
-                    <SegmentedTabs
-                      ariaLabel="본문 텍스트"
-                      value={bodyTextTab}
-                      onChange={setBodyTextTab}
-                      items={[
-                        { id: "title", label: "제목" },
-                        { id: "subtitle", label: "자막" },
-                        { id: "source", label: "출처" },
-                      ]}
-                    />
-                    {bodyTextTab === "title" ? (
-                      <TextLayoutEditor
-                        title="본문 상단 제목 · 한 줄"
-                        value={settings.bodyTitleText}
-                        maxWidthPercent={100}
-                        color={settings.bodyTitleColor}
-                        safeMarginPercent={settings.safeMarginPercent}
-                        onChange={(bodyTitleText) =>
-                          setSettings({ ...settings, bodyTitleText })
-                        }
-                        onColorChange={(bodyTitleColor) =>
-                          setSettings({ ...settings, bodyTitleColor })
-                        }
-                      />
-                    ) : null}
-                    {bodyTextTab === "subtitle" ? (
-                      <TextLayoutEditor
-                        title="본문 자막"
-                        value={settings.bodySubtitleText}
-                        maxWidthPercent={100}
-                        color={settings.subtitleColor}
-                        safeMarginPercent={settings.safeMarginPercent}
-                        onChange={(bodySubtitleText) =>
-                          setSettings({ ...settings, bodySubtitleText })
-                        }
-                        onColorChange={(subtitleColor) =>
-                          setSettings({ ...settings, subtitleColor })
-                        }
-                      />
-                    ) : null}
-                    {bodyTextTab === "source" ? (
-                      <>
-                        <div className="rounded-xl border border-separator bg-default p-3 text-sm text-muted">
-                          출처 문구는 사용 중인 원본 영상의 채널명을 감지해
-                          자동으로 넣습니다. 여기서는 글꼴·위치·색만 정합니다.
-                        </div>
-                        <TextLayoutEditor
-                          title="본문 출처"
-                          value={settings.bodySourceText}
-                          maxWidthPercent={100}
-                          color={settings.sourceColor}
-                          safeMarginPercent={settings.safeMarginPercent}
-                          onChange={(bodySourceText) =>
-                            setSettings({ ...settings, bodySourceText })
-                          }
-                          onColorChange={(sourceColor) =>
-                            setSettings({ ...settings, sourceColor })
-                          }
-                        />
-                      </>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            </Card.Content>
-          </Card>
-        </div>
-      ) : null}
-
-      {settingsTab === "audio" ? (
-        <div className="flex flex-col gap-6">
-          <Card>
-            <Card.Header>
-              <Card.Title>오디오·자막</Card.Title>
-              <Card.Description>
-                논평 TTS를 고릅니다. 직접 발언은 원본 음성입니다.
-              </Card.Description>
-            </Card.Header>
-            <Card.Content className="grid gap-5 md:grid-cols-2">
-              <div className="flex flex-col gap-5 md:col-span-2">
-                <label className="flex max-w-md flex-col gap-2">
-                  <span className="text-sm font-medium">TTS 제공자</span>
-                  <select
-                    value={settings.ttsProvider}
-                    className={fieldClass}
-                    onChange={(event) => {
-                      stopVoicePreview()
-                      setSettings({
-                        ...settings,
-                        ttsProvider: event.currentTarget.value as
-                          "auto" | "free" | "typecast",
-                      })
-                    }}
-                  >
-                    <option value="auto">자동 · Typecast 우선</option>
-                    <option value="free">무료 TTS</option>
-                    <option value="typecast">Typecast</option>
-                  </select>
-                </label>
-                {settings.ttsProvider === "typecast" ? (
-                  <div className="flex max-w-md flex-col gap-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-medium">
-                        Typecast 사용량
-                      </span>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        isDisabled={typecastUsagePending}
-                        onPress={() => void loadTypecastUsage()}
-                      >
-                        {typecastUsagePending ? "확인 중" : "새로고침"}
-                      </Button>
-                    </div>
-                    {typecastUsage ? (
-                      <>
-                        <div className="h-2 overflow-hidden rounded-full bg-default">
-                          <div
-                            className={`h-full rounded-full transition-[width] ${
-                              typecastUsage.usedPercent >= 90
-                                ? "bg-danger"
-                                : typecastUsage.usedPercent >= 70
-                                  ? "bg-warning"
-                                  : "bg-success"
-                            }`}
-                            style={{
-                              width: `${Math.min(100, typecastUsage.usedPercent)}%`,
-                            }}
-                          />
-                        </div>
-                        <p className="text-sm text-muted">
-                          {typecastUsage.usedCredits.toLocaleString("ko-KR")} /{" "}
-                          {typecastUsage.planCredits.toLocaleString("ko-KR")}{" "}
-                          크레딧 · {typecastUsage.usedPercent}% 사용
-                        </p>
-                      </>
-                    ) : (
-                      <p className="text-sm text-muted">
-                        {typecastUsagePending
-                          ? "사용량을 확인하는 중…"
-                          : typecastUsageNote || "사용량 정보가 없습니다."}
-                      </p>
-                    )}
-                  </div>
-                ) : null}
-                {settings.ttsProvider !== "free" ? (
-                  <section className="flex flex-col gap-4 border-t border-separator pt-5">
-                    <div className="flex items-center justify-between gap-3">
-                      <h3 className="text-sm font-semibold">
-                        Typecast 음성 목록
-                      </h3>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onPress={addTypecastVoice}
-                      >
-                        <Plus className="size-4" /> 음성 추가
-                      </Button>
-                    </div>
-                    <label className="flex max-w-md flex-col gap-2">
-                      <span className="text-sm">기본 Typecast 음성</span>
-                      <select
-                        value={settings.typecastVoiceId}
-                        className={fieldClass}
-                        onChange={(event) => {
-                          stopVoicePreview()
-                          setSettings({
-                            ...settings,
-                            typecastVoiceId: event.currentTarget.value,
-                          })
-                        }}
-                      >
-                        {settings.typecastVoices.map((voice) => (
-                          <option key={voice.id} value={voice.voiceId}>
-                            {voice.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="divide-y divide-separator">
-                      {settings.typecastVoices.map((voice) => (
-                        <div
-                          key={voice.id}
-                          className="grid items-end gap-3 py-4 first:pt-0 last:pb-0 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_9rem_auto]"
-                        >
-                          <label className="flex min-w-0 flex-col gap-2">
-                            <span className="text-sm">음성 이름</span>
+                          <label className="flex items-center gap-2 text-xs">
+                            우선
                             <input
-                              value={voice.name}
-                              className={fieldClass}
+                              type="number"
+                              min={1}
+                              max={5}
+                              value={channel.priority}
                               onChange={(event) =>
-                                updateTypecastVoice(voice, {
-                                  name: event.currentTarget.value,
-                                })
+                                setChannels((current) =>
+                                  updateChannel(current, channel.id, {
+                                    priority: Number(event.currentTarget.value),
+                                  })
+                                )
                               }
-                              placeholder="예: 뉴스 앵커"
+                              className={fieldClass}
                             />
                           </label>
-                          <label className="flex min-w-0 flex-col gap-2">
-                            <span className="text-sm">음성 코드</span>
+                          <label className="flex items-center justify-center gap-2 text-xs">
                             <input
-                              value={voice.voiceId}
-                              className={fieldClass}
+                              type="checkbox"
+                              checked={channel.enabled}
                               onChange={(event) =>
-                                updateTypecastVoice(voice, {
-                                  voiceId: event.currentTarget.value,
-                                })
+                                setChannels((current) =>
+                                  updateChannel(current, channel.id, {
+                                    enabled: event.currentTarget.checked,
+                                  })
+                                )
                               }
-                              placeholder="tc_..."
                             />
+                            사용
                           </label>
                           <Button
-                            variant="outline"
-                            className="w-full justify-center"
-                            isDisabled={
-                              voiceBusy !== "" ||
-                              !/^tc_[a-z0-9]{8,96}$/i.test(voice.voiceId.trim())
-                            }
-                            onPress={() =>
-                              void previewVoice({
-                                id: voice.id,
-                                provider: "typecast",
-                                voiceId: settings.titleVoice,
-                                typecastVoiceId: voice.voiceId,
-                              })
-                            }
-                          >
-                            {voicePlaying === voice.id ? (
-                              <Square className="size-4 fill-current" />
-                            ) : (
-                              <Play className="size-4" />
-                            )}
-                            {voiceBusy === voice.id
-                              ? "생성 중"
-                              : voicePlaying === voice.id
-                                ? "멈추기"
-                                : "미리듣기"}
-                          </Button>
-                          <Button
+                            size="sm"
                             variant="ghost"
-                            isIconOnly
-                            aria-label={`${voice.name} 삭제`}
-                            isDisabled={settings.typecastVoices.length <= 1}
-                            onPress={() => removeTypecastVoice(voice)}
+                            onPress={() =>
+                              setChannels((current) =>
+                                current.filter((item) => item.id !== channel.id)
+                              )
+                            }
                           >
-                            <Trash2 className="size-4" />
+                            삭제
                           </Button>
                         </div>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-                {settings.ttsProvider !== "typecast" ? (
-                  <section className="grid items-end gap-3 border-t border-separator pt-5 md:grid-cols-[minmax(0,1fr)_9rem]">
-                    <label className="flex min-w-0 flex-col gap-2">
-                      <span className="text-sm font-semibold">
-                        {settings.ttsProvider === "auto"
-                          ? "무료 대체 음성"
-                          : "무료 TTS 목소리"}
-                      </span>
-                      <select
-                        value={newsTtsVoiceById(settings.titleVoice).id}
-                        className={fieldClass}
-                        onChange={(event) => {
-                          stopVoicePreview()
-                          setSettings({
-                            ...settings,
-                            titleVoice: newsTtsVoiceById(
-                              event.currentTarget.value
-                            ).id,
-                          })
-                        }}
-                      >
-                        {NEWS_TTS_VOICES.map((voice) => (
-                          <option key={voice.id} value={voice.id}>
-                            {voice.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <Button
-                      variant="outline"
-                      className="w-full justify-center"
-                      isDisabled={voiceBusy !== ""}
-                      onPress={() =>
-                        void previewVoice({
-                          id: `free-${settings.titleVoice}`,
-                          provider: "free",
-                          voiceId: settings.titleVoice,
-                          typecastVoiceId: settings.typecastVoiceId,
+                      ))
+                    : null}
+                  <label className="flex items-start gap-3 rounded-xl border border-separator p-4 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={settings.communitySignalsEnabled}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          communitySignalsEnabled: event.currentTarget.checked,
                         })
                       }
-                    >
-                      {voicePlaying === `free-${settings.titleVoice}` ? (
-                        <Square className="size-4 fill-current" />
-                      ) : (
-                        <Play className="size-4" />
-                      )}
-                      {voiceBusy === `free-${settings.titleVoice}`
-                        ? "생성 중"
-                        : voicePlaying === `free-${settings.titleVoice}`
-                          ? "멈추기"
-                          : "미리듣기"}
-                    </Button>
-                  </section>
-                ) : null}
-              </div>
-              <div className="md:col-span-2">
+                    />
+                    <span className="font-medium">
+                      공개 커뮤니티 이슈 보조 신호
+                    </span>
+                  </label>
+                </div>
+                <div className="rounded-xl border border-separator p-4">
+                  <p className="text-sm font-medium">제목 인트로 길이</p>
+                </div>
+              </Card.Content>
+            </Card>
+          </div>
+        ) : null}
+
+        {settingsTab === "assets" ? (
+          <div className="flex flex-col gap-5">
+            <Card>
+              <Card.Header className="border-b border-separator pb-4">
+                <Card.Title>고정 프레임</Card.Title>
+                <Card.Description>
+                  제목·본문 고정 프레임을 등록합니다.
+                </Card.Description>
+              </Card.Header>
+              <Card.Content className="grid gap-4 md:grid-cols-2">
                 <AssetField
-                  label="고정 BGM"
-                  value={settings.bgmFile}
-                  accept="audio/*"
-                  onFile={(file) => void upload("bgm", file)}
+                  label="제목 프레임 이미지"
+                  value={settings.titleFrameImage}
+                  accept="image/*"
+                  onFile={(file) => void upload("titleFrame", file)}
                 />
-              </div>
-              <RangeField
-                label="BGM 기본 음량"
-                value={settings.bgmVolume}
-                min={0}
-                max={0.4}
-                step={0.01}
-                formatValue={ratioPercent}
-                onChange={(bgmVolume) =>
-                  setSettings({ ...settings, bgmVolume })
-                }
-              />
-              <RangeField
-                label="아나운서 TTS 속도"
-                value={settings.titleVoiceRate}
-                min={-15}
-                max={8}
-                step={1}
-                formatValue={signedPercent}
-                onChange={(titleVoiceRate) =>
-                  setSettings({ ...settings, titleVoiceRate })
-                }
-              />
-              <RangeField
-                label="원본 직접 발언 기본 음량"
-                value={settings.quoteVolume}
-                min={0}
-                max={2}
-                step={0.05}
-                formatValue={ratioPercent}
-                onChange={(quoteVolume) =>
-                  setSettings({ ...settings, quoteVolume })
-                }
-              />
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={settings.removeFillers}
-                  onChange={(event) =>
-                    setSettings({
-                      ...settings,
-                      removeFillers: event.currentTarget.checked,
-                    })
-                  }
+                <AssetField
+                  label="본문 프레임 이미지"
+                  value={settings.bodyFrameImage}
+                  accept="image/*"
+                  onFile={(file) => void upload("bodyFrame", file)}
                 />
-                보도 대본에서 말버릇·반복 표현 제거
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={settings.bgmEnabled}
-                  onChange={(event) =>
-                    setSettings({
-                      ...settings,
-                      bgmEnabled: event.currentTarget.checked,
-                    })
-                  }
-                />
-                모든 뉴스 쇼츠에 BGM 기본 적용
-              </label>
-            </Card.Content>
-          </Card>
-        </div>
-      ) : null}
+                <div className="rounded-xl border border-separator bg-default p-4 md:col-span-2">
+                  <p className="text-sm font-medium">
+                    자료 영상 영역 · 3:2 고정
+                  </p>
+                  <p className="mt-2 text-sm text-muted">
+                    기준 캔버스 1080×720 · 720p 출력 720×480
+                  </p>
+                </div>
+              </Card.Content>
+            </Card>
+          </div>
+        ) : null}
 
-      {settingsTab === "accounts" ? (
-        <div className="flex flex-col gap-6">
-          <AccountsPanel
-            notice={accountNotice}
-            profileId={profileId}
-            returnTo="news"
-            expectedYoutubeChannelId={youtubeChannelId}
-          />
-          <label className="flex items-center justify-between gap-4 rounded-xl border border-separator p-4 text-sm">
-            <span className="font-medium">
-              최종본 완성 후 YouTube 비공개 자동 업로드
-            </span>
-            <input
-              type="checkbox"
-              checked={settings.youtubeAutoUpload}
-              onChange={(event) =>
-                setSettings({
-                  ...settings,
-                  youtubeAutoUpload: event.currentTarget.checked,
-                })
-              }
+        {settingsTab === "text" ? (
+          <div className="flex flex-col gap-5">
+            <Card>
+              <Card.Header className="border-b border-separator pb-4">
+                <Card.Title>글꼴·텍스트 위치</Card.Title>
+                <Card.Description>
+                  미리보기·초안·최종에 같은 글자 배치를 씁니다.
+                </Card.Description>
+              </Card.Header>
+              <Card.Content className="grid items-start gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
+                <div className="flex flex-col gap-3 lg:sticky lg:top-6">
+                  <SegmentedTabs
+                    ariaLabel="프레임 미리보기"
+                    value={frameMode}
+                    onChange={setFrameMode}
+                    items={[
+                      { id: "title", label: "제목 프레임" },
+                      { id: "body", label: "본문 프레임" },
+                    ]}
+                  />
+                  <NewsFramePreview
+                    mode={frameMode}
+                    title={previewTitle || "뉴스 핵심을\n두 줄 안에 표시"}
+                    subtitle={
+                      previewSubtitle ||
+                      "본문 자막도 두 줄 안에서\n음성에 맞춰 표시됩니다"
+                    }
+                    sourceCredit={
+                      frameMode === "body" ? "출처 · 예시 방송" : ""
+                    }
+                    settings={settings}
+                    showGuides
+                    className="w-full"
+                  />
+                  {frameMode === "title" && previewTitleOverflow ? (
+                    <p className="text-xs font-medium text-danger">
+                      {previewTitleOverflowLabel} 제목 폭 초과
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="flex min-w-0 flex-col gap-5">
+                  <RangeField
+                    label="안전 여백"
+                    value={settings.safeMarginPercent}
+                    min={5}
+                    max={12}
+                    step={1}
+                    formatValue={(value) => `${Math.round(value)}%`}
+                    onChange={(safeMarginPercent) =>
+                      setSettings({ ...settings, safeMarginPercent })
+                    }
+                  />
+                  <label className="flex flex-col gap-2">
+                    <span className="text-sm">글꼴</span>
+                    <select
+                      value={settings.fontFamily}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          fontFamily:
+                            event.currentTarget.value === "Black Han Sans"
+                              ? "Black Han Sans"
+                              : "Pretendard",
+                        })
+                      }
+                      className={fieldClass}
+                    >
+                      <option value="Pretendard">Pretendard</option>
+                      <option value="Black Han Sans">Black Han Sans</option>
+                    </select>
+                  </label>
+
+                  {frameMode === "title" ? (
+                    <TextLayoutEditor
+                      title="제목 프레임 제목"
+                      value={settings.titleCardText}
+                      maxWidthPercent={100}
+                      secondaryFontSize={settings.titleCardSecondFontSize}
+                      lineHeightPercent={settings.titleCardLineHeightPercent}
+                      color={settings.titleCardColor}
+                      secondaryColor={settings.titleCardSecondColor}
+                      safeMarginPercent={settings.safeMarginPercent}
+                      onChange={(titleCardText) =>
+                        setSettings({ ...settings, titleCardText })
+                      }
+                      onSecondaryFontSizeChange={(titleCardSecondFontSize) =>
+                        setSettings({ ...settings, titleCardSecondFontSize })
+                      }
+                      onLineHeightPercentChange={(titleCardLineHeightPercent) =>
+                        setSettings({ ...settings, titleCardLineHeightPercent })
+                      }
+                      onColorChange={(titleCardColor) =>
+                        setSettings({ ...settings, titleCardColor })
+                      }
+                      onSecondaryColorChange={(titleCardSecondColor) =>
+                        setSettings({ ...settings, titleCardSecondColor })
+                      }
+                    />
+                  ) : (
+                    <>
+                      <SegmentedTabs
+                        ariaLabel="본문 텍스트"
+                        value={bodyTextTab}
+                        onChange={setBodyTextTab}
+                        items={[
+                          { id: "title", label: "제목" },
+                          { id: "subtitle", label: "자막" },
+                          { id: "source", label: "출처" },
+                        ]}
+                      />
+                      {bodyTextTab === "title" ? (
+                        <TextLayoutEditor
+                          title="본문 상단 제목 · 한 줄"
+                          value={settings.bodyTitleText}
+                          maxWidthPercent={100}
+                          color={settings.bodyTitleColor}
+                          safeMarginPercent={settings.safeMarginPercent}
+                          onChange={(bodyTitleText) =>
+                            setSettings({ ...settings, bodyTitleText })
+                          }
+                          onColorChange={(bodyTitleColor) =>
+                            setSettings({ ...settings, bodyTitleColor })
+                          }
+                        />
+                      ) : null}
+                      {bodyTextTab === "subtitle" ? (
+                        <TextLayoutEditor
+                          title="본문 자막"
+                          value={settings.bodySubtitleText}
+                          maxWidthPercent={100}
+                          color={settings.subtitleColor}
+                          safeMarginPercent={settings.safeMarginPercent}
+                          onChange={(bodySubtitleText) =>
+                            setSettings({ ...settings, bodySubtitleText })
+                          }
+                          onColorChange={(subtitleColor) =>
+                            setSettings({ ...settings, subtitleColor })
+                          }
+                        />
+                      ) : null}
+                      {bodyTextTab === "source" ? (
+                        <>
+                          <div className="rounded-xl border border-separator bg-default p-3 text-sm text-muted">
+                            출처 문구는 사용 중인 원본 영상의 채널명을 감지해
+                            자동으로 넣습니다. 여기서는 글꼴·위치·색만 정합니다.
+                          </div>
+                          <TextLayoutEditor
+                            title="본문 출처"
+                            value={settings.bodySourceText}
+                            maxWidthPercent={100}
+                            color={settings.sourceColor}
+                            safeMarginPercent={settings.safeMarginPercent}
+                            onChange={(bodySourceText) =>
+                              setSettings({ ...settings, bodySourceText })
+                            }
+                            onColorChange={(sourceColor) =>
+                              setSettings({ ...settings, sourceColor })
+                            }
+                          />
+                        </>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </Card.Content>
+            </Card>
+          </div>
+        ) : null}
+
+        {settingsTab === "audio" ? (
+          <div className="flex flex-col gap-5">
+            <Card>
+              <Card.Header className="border-b border-separator pb-4">
+                <Card.Title>오디오·자막</Card.Title>
+                <Card.Description>
+                  논평 TTS를 고릅니다. 직접 발언은 원본 음성입니다.
+                </Card.Description>
+              </Card.Header>
+              <Card.Content className="grid gap-5 md:grid-cols-2">
+                <div className="flex flex-col gap-5 md:col-span-2">
+                  <label className="flex max-w-md flex-col gap-2">
+                    <span className="text-sm font-medium">TTS 제공자</span>
+                    <select
+                      value={settings.ttsProvider}
+                      className={fieldClass}
+                      onChange={(event) => {
+                        stopVoicePreview()
+                        setSettings({
+                          ...settings,
+                          ttsProvider: event.currentTarget.value as
+                            "auto" | "free" | "typecast",
+                        })
+                      }}
+                    >
+                      <option value="auto">자동 · Typecast 우선</option>
+                      <option value="free">무료 TTS</option>
+                      <option value="typecast">Typecast</option>
+                    </select>
+                  </label>
+                  {settings.ttsProvider === "typecast" ? (
+                    <div className="flex max-w-md flex-col gap-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium">
+                          Typecast 사용량
+                        </span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          isDisabled={typecastUsagePending}
+                          onPress={() => void loadTypecastUsage()}
+                        >
+                          {typecastUsagePending ? "확인 중" : "새로고침"}
+                        </Button>
+                      </div>
+                      {typecastUsage ? (
+                        <>
+                          <div className="h-2 overflow-hidden rounded-full bg-default">
+                            <div
+                              className={`h-full rounded-full transition-[width] ${
+                                typecastUsage.usedPercent >= 90
+                                  ? "bg-danger"
+                                  : typecastUsage.usedPercent >= 70
+                                    ? "bg-warning"
+                                    : "bg-success"
+                              }`}
+                              style={{
+                                width: `${Math.min(100, typecastUsage.usedPercent)}%`,
+                              }}
+                            />
+                          </div>
+                          <p className="text-sm text-muted">
+                            {typecastUsage.usedCredits.toLocaleString("ko-KR")}{" "}
+                            /{" "}
+                            {typecastUsage.planCredits.toLocaleString("ko-KR")}{" "}
+                            크레딧 · {typecastUsage.usedPercent}% 사용
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted">
+                          {typecastUsagePending
+                            ? "사용량을 확인하는 중…"
+                            : typecastUsageNote || "사용량 정보가 없습니다."}
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+                  {settings.ttsProvider !== "free" ? (
+                    <section className="flex flex-col gap-4 border-t border-separator pt-5">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-sm font-semibold">
+                          Typecast 음성 목록
+                        </h3>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onPress={addTypecastVoice}
+                        >
+                          <Plus className="size-4" /> 음성 추가
+                        </Button>
+                      </div>
+                      <label className="flex max-w-md flex-col gap-2">
+                        <span className="text-sm">기본 Typecast 음성</span>
+                        <select
+                          value={settings.typecastVoiceId}
+                          className={fieldClass}
+                          onChange={(event) => {
+                            stopVoicePreview()
+                            setSettings({
+                              ...settings,
+                              typecastVoiceId: event.currentTarget.value,
+                            })
+                          }}
+                        >
+                          {settings.typecastVoices.map((voice) => (
+                            <option key={voice.id} value={voice.voiceId}>
+                              {voice.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="divide-y divide-separator">
+                        {settings.typecastVoices.map((voice) => (
+                          <div
+                            key={voice.id}
+                            className="grid items-end gap-3 py-4 first:pt-0 last:pb-0 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_9rem_auto]"
+                          >
+                            <label className="flex min-w-0 flex-col gap-2">
+                              <span className="text-sm">음성 이름</span>
+                              <input
+                                value={voice.name}
+                                className={fieldClass}
+                                onChange={(event) =>
+                                  updateTypecastVoice(voice, {
+                                    name: event.currentTarget.value,
+                                  })
+                                }
+                                placeholder="예: 뉴스 앵커"
+                              />
+                            </label>
+                            <label className="flex min-w-0 flex-col gap-2">
+                              <span className="text-sm">음성 코드</span>
+                              <input
+                                value={voice.voiceId}
+                                className={fieldClass}
+                                onChange={(event) =>
+                                  updateTypecastVoice(voice, {
+                                    voiceId: event.currentTarget.value,
+                                  })
+                                }
+                                placeholder="tc_..."
+                              />
+                            </label>
+                            <Button
+                              variant="outline"
+                              className="w-full justify-center"
+                              isDisabled={
+                                voiceBusy !== "" ||
+                                !/^tc_[a-z0-9]{8,96}$/i.test(
+                                  voice.voiceId.trim()
+                                )
+                              }
+                              onPress={() =>
+                                void previewVoice({
+                                  id: voice.id,
+                                  provider: "typecast",
+                                  voiceId: settings.titleVoice,
+                                  typecastVoiceId: voice.voiceId,
+                                })
+                              }
+                            >
+                              {voicePlaying === voice.id ? (
+                                <Square className="size-4 fill-current" />
+                              ) : (
+                                <Play className="size-4" />
+                              )}
+                              {voiceBusy === voice.id
+                                ? "생성 중"
+                                : voicePlaying === voice.id
+                                  ? "멈추기"
+                                  : "미리듣기"}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              isIconOnly
+                              aria-label={`${voice.name} 삭제`}
+                              isDisabled={settings.typecastVoices.length <= 1}
+                              onPress={() => removeTypecastVoice(voice)}
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+                  {settings.ttsProvider !== "typecast" ? (
+                    <section className="grid items-end gap-3 border-t border-separator pt-5 md:grid-cols-[minmax(0,1fr)_9rem]">
+                      <label className="flex min-w-0 flex-col gap-2">
+                        <span className="text-sm font-semibold">
+                          {settings.ttsProvider === "auto"
+                            ? "무료 대체 음성"
+                            : "무료 TTS 목소리"}
+                        </span>
+                        <select
+                          value={newsTtsVoiceById(settings.titleVoice).id}
+                          className={fieldClass}
+                          onChange={(event) => {
+                            stopVoicePreview()
+                            setSettings({
+                              ...settings,
+                              titleVoice: newsTtsVoiceById(
+                                event.currentTarget.value
+                              ).id,
+                            })
+                          }}
+                        >
+                          {NEWS_TTS_VOICES.map((voice) => (
+                            <option key={voice.id} value={voice.id}>
+                              {voice.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <Button
+                        variant="outline"
+                        className="w-full justify-center"
+                        isDisabled={voiceBusy !== ""}
+                        onPress={() =>
+                          void previewVoice({
+                            id: `free-${settings.titleVoice}`,
+                            provider: "free",
+                            voiceId: settings.titleVoice,
+                            typecastVoiceId: settings.typecastVoiceId,
+                          })
+                        }
+                      >
+                        {voicePlaying === `free-${settings.titleVoice}` ? (
+                          <Square className="size-4 fill-current" />
+                        ) : (
+                          <Play className="size-4" />
+                        )}
+                        {voiceBusy === `free-${settings.titleVoice}`
+                          ? "생성 중"
+                          : voicePlaying === `free-${settings.titleVoice}`
+                            ? "멈추기"
+                            : "미리듣기"}
+                      </Button>
+                    </section>
+                  ) : null}
+                </div>
+                <div className="md:col-span-2">
+                  <AssetField
+                    label="고정 BGM"
+                    value={settings.bgmFile}
+                    accept="audio/*"
+                    onFile={(file) => void upload("bgm", file)}
+                  />
+                </div>
+                <RangeField
+                  label="BGM 기본 음량"
+                  value={settings.bgmVolume}
+                  min={0}
+                  max={0.4}
+                  step={0.01}
+                  formatValue={ratioPercent}
+                  onChange={(bgmVolume) =>
+                    setSettings({ ...settings, bgmVolume })
+                  }
+                />
+                <RangeField
+                  label="아나운서 TTS 속도"
+                  value={settings.titleVoiceRate}
+                  min={-15}
+                  max={8}
+                  step={1}
+                  formatValue={signedPercent}
+                  onChange={(titleVoiceRate) =>
+                    setSettings({ ...settings, titleVoiceRate })
+                  }
+                />
+                <RangeField
+                  label="원본 직접 발언 기본 음량"
+                  value={settings.quoteVolume}
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  formatValue={ratioPercent}
+                  onChange={(quoteVolume) =>
+                    setSettings({ ...settings, quoteVolume })
+                  }
+                />
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={settings.removeFillers}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        removeFillers: event.currentTarget.checked,
+                      })
+                    }
+                  />
+                  보도 대본에서 말버릇·반복 표현 제거
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={settings.bgmEnabled}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        bgmEnabled: event.currentTarget.checked,
+                      })
+                    }
+                  />
+                  모든 뉴스 쇼츠에 BGM 기본 적용
+                </label>
+              </Card.Content>
+            </Card>
+          </div>
+        ) : null}
+
+        {settingsTab === "accounts" ? (
+          <div className="flex flex-col gap-5">
+            <AccountsPanel
+              notice={accountNotice}
+              profileId={profileId}
+              returnTo="news"
+              expectedYoutubeChannelId={youtubeChannelId}
             />
-          </label>
-        </div>
-      ) : null}
-
-      <div className="sticky bottom-0 z-20 flex items-center justify-end gap-3 border-t border-separator bg-background/95 py-3 backdrop-blur">
+            <label className="flex items-center justify-between gap-4 rounded-xl border border-separator p-4 text-sm">
+              <span className="font-medium">
+                최종본 완성 후 YouTube 비공개 자동 업로드
+              </span>
+              <input
+                type="checkbox"
+                checked={settings.youtubeAutoUpload}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    youtubeAutoUpload: event.currentTarget.checked,
+                  })
+                }
+              />
+            </label>
+          </div>
+        ) : null}
+      </div>
+      <div className={`${stepActionBarClassName} gap-3`}>
         {note ? <p className="mr-auto text-sm text-muted">{note}</p> : null}
         <Button
           isDisabled={!loaded || (pending ? false : !hasChanges)}

@@ -36,6 +36,14 @@ export function scaleQuoteTimelineSeconds(
   return Math.max(0, seconds / clampPlaybackRate(rate))
 }
 
+/** 출력 타임라인 초를 원본 구간의 상대 초로 되돌린다. */
+export function unscaleQuoteTimelineSeconds(
+  seconds: number,
+  rate = NEWS_SOURCE_PLAYBACK_RATE
+) {
+  return Math.max(0, seconds * clampPlaybackRate(rate))
+}
+
 function clampPlaybackRate(rate: number) {
   if (!Number.isFinite(rate) || rate <= 0) return NEWS_SOURCE_PLAYBACK_RATE
   // ffmpeg atempo 허용 범위

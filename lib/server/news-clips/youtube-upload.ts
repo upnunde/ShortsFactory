@@ -13,8 +13,10 @@ import { applyYoutubeThumbnail } from "@/lib/server/news-clips/youtube-thumbnail
 
 export async function uploadNewsClipToYoutube(
   project: NewsClipProject,
-  scheduledAt = ""
+  scheduledAt = "",
+  onProgress?: (percent: number, label: string) => void | Promise<void>
 ) {
+  await onProgress?.(4, "채널 확인 중")
   const profile = await readNewsChannel(project.profileId)
   if (!profile) throw new Error("news-channel-not-found")
 
@@ -26,6 +28,7 @@ export async function uploadNewsClipToYoutube(
   ) {
     throw new Error("youtube-channel-mismatch")
   }
+  await onProgress?.(10, "채널 확인 완료")
 
   const videoPath = path.join(
     process.cwd(),
@@ -48,8 +51,10 @@ export async function uploadNewsClipToYoutube(
     readFile(thumbnailPath).catch(() => null),
   ])
   if (!video) throw new Error("video-not-found")
+  await onProgress?.(16, "영상 파일 확인 완료")
 
   const token = await youtubeAccessToken(project.profileId)
+  await onProgress?.(20, "YouTube 인증 완료")
   const title = (project.metadata.youtubeTitle || project.title)
     .replace(/\s*\n\s*/g, " ")
     .trim()
@@ -71,6 +76,7 @@ export async function uploadNewsClipToYoutube(
       embeddable: true,
     },
   }
+  await onProgress?.(24, "영상 업로드 중")
   const uploaded = await multipartRequest(
     "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status",
     token,
@@ -83,9 +89,16 @@ export async function uploadNewsClipToYoutube(
       ? String(uploaded.id)
       : ""
   if (!videoId) throw new Error("youtube-upload-failed")
+  await onProgress?.(65, "영상 업로드 완료")
   const thumbnailApplied = thumbnail
-    ? await applyYoutubeThumbnail({ videoId, token, thumbnail })
+    ? await applyYoutubeThumbnail({
+        videoId,
+        token,
+        thumbnail,
+        onProgress,
+      })
     : false
+  await onProgress?.(100, "완료")
   return {
     videoId,
     url: `https://studio.youtube.com/video/${videoId}/edit`,

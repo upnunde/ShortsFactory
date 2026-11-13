@@ -40,3 +40,33 @@ test("직접 선택이 없으면 핵심 직접 발언 장면을 우선한다", (
   assert.equal(range.sceneId, "quote-scene")
   assert.equal(introStillTime(range), 33)
 })
+
+test("첨부한 인트로 소스가 있으면 원본 장면보다 우선한다", () => {
+  const project = {
+    ...freshNewsClipProject("news-channel-test"),
+    introSourceId: "uploaded-intro",
+    supportingSources: [
+      {
+        id: "uploaded-intro",
+        kind: "upload" as const,
+        mediaType: "image" as const,
+        title: "인트로 이미지",
+        channel: "사용자 첨부",
+        publishedAt: "",
+        durationSeconds: 12,
+        viewCount: 0,
+        commentCount: 0,
+        originalUrl: "",
+        summary: "업로드한 이미지",
+        localFile: "/tmp/intro.mp4",
+        approved: true,
+        requiresUpload: false,
+        searchMetrics: null,
+      },
+    ],
+  }
+  const range = selectIntroStillRange(project)
+
+  assert.equal(range.sourceId, "uploaded-intro")
+  assert.equal(introStillTime(range), 6)
+})
