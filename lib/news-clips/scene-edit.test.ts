@@ -68,6 +68,27 @@ test("빌드업형 원본 구간 변경은 원본 음성 시간축을 다시 만
   )
 })
 
+test("빌드업형 서두 자료화면 변경은 TTS·자막 시간축을 유지한다", () => {
+  const leadScene: NewsReportScene = {
+    ...scene,
+    id: "buildup2-lead",
+    narration: "서두 TTS 대본",
+    visual: "source",
+    audioMode: "tts",
+  }
+
+  assert.equal(
+    sceneAudioTimingChanged("buildup2", leadScene, {
+      sourceId: "source-2",
+      sourceStart: 30,
+      sourceEnd: 35,
+      crop: { x: 30, y: 60, zoom: 1.4, faceTracking: false },
+      motion: "zoom-in",
+    }),
+    false
+  )
+})
+
 test("보도형 자료영상은 사용자가 고른 시작·종료 구간을 그대로 쓴다", () => {
   assert.deepEqual(
     clampSceneSourceRange({ sourceStart: 31.25, sourceEnd: 36.8 }, 120),

@@ -123,5 +123,10 @@ export function buildScaleCropFilter({
   // 각 축을 실제 미디어 크기와 최종 캔버스 크기 중 큰 쪽에 먼저 배치한 뒤
   // 넘치는 축만 같은 위치 비율로 crop한다. 브라우저 미리보기의
   // `(frame - media) * position` 배치와 동일하다.
-  return `scale=${zoomedWidth}:${zoomedHeight}:force_original_aspect_ratio=decrease,pad=w='max(iw,${targetWidth})':h='max(ih,${targetHeight})':x='max(0,(ow-iw)*${x})':y='max(0,(oh-ih)*${y})':color=${padColor},crop=${targetWidth}:${targetHeight}:x='max(0,(iw-ow)*${x})':y='max(0,(ih-oh)*${y})',setsar=1`
+  // yuv420 영상은 홀수 크기를 내부에서 짝수로 내림할 수 있다. pad가 iw/ih와
+  // 같은 홀수값이면 결과가 입력보다 1px 작아져 전체 렌더가 중단되므로,
+  // 입력과 캔버스 중 큰 값을 항상 짝수 방향으로 올림한다.
+  const paddedWidth = `ceil(max(iw,${targetWidth})/2)*2`
+  const paddedHeight = `ceil(max(ih,${targetHeight})/2)*2`
+  return `scale=${zoomedWidth}:${zoomedHeight}:force_original_aspect_ratio=decrease,pad=w='${paddedWidth}':h='${paddedHeight}':x='max(0,(ow-iw)*${x})':y='max(0,(oh-ih)*${y})':color=${padColor},crop=${targetWidth}:${targetHeight}:x='max(0,(iw-ow)*${x})':y='max(0,(ih-oh)*${y})',setsar=1`
 }

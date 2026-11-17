@@ -6,6 +6,7 @@ import {
   removeTrailingCtaFromLead,
   removeTrailingPartText,
   splitScenesByClipPart,
+  syncSceneNarrationFromSubtitles,
 } from "./clip-parts.ts"
 
 test("빌드업형은 lead를 서두, quote를 본문으로 나눈다", () => {
@@ -50,6 +51,81 @@ test("빌드업형은 lead를 서두, quote를 본문으로 나눈다", () => {
     parts.outro.map((scene) => scene.id),
     ["end-cta"]
   )
+})
+
+test("원본 구간형 자막 수정은 서두·마무리 대본만 같은 문구로 맞춘다", () => {
+  const scenes = [
+    {
+      id: "buildup2-lead",
+      part: "lead" as const,
+      narration: "기존 서두",
+      visual: "source" as const,
+      sourceStart: 0,
+      sourceEnd: 2,
+    },
+    {
+      id: "buildup2-quote",
+      part: "body" as const,
+      narration: "원본 음성 본문",
+      visual: "quote" as const,
+      sourceStart: 2,
+      sourceEnd: 6,
+    },
+    {
+      id: "end-cta",
+      part: "outro" as const,
+      narration: "기존 마무리",
+      visual: "source" as const,
+      sourceStart: 6,
+      sourceEnd: 8,
+    },
+  ]
+  const synced = syncSceneNarrationFromSubtitles(
+    scenes,
+    [
+      {
+        id: "lead-1",
+        sceneId: "buildup2-lead",
+        start: 0,
+        end: 1,
+        text: "수정한 서두",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "body-1",
+        sceneId: "buildup2-quote",
+        start: 1,
+        end: 2,
+        text: "수정한 본문 자막",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "outro-1",
+        sceneId: "end-cta",
+        start: 2,
+        end: 3,
+        text: "이건 어떻게 생각해?",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+      {
+        id: "outro-2",
+        sceneId: "end-cta",
+        start: 3,
+        end: 4,
+        text: "댓글로 남겨줘.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    "buildup2"
+  )
+
+  assert.equal(synced[0]?.narration, "수정한 서두")
+  assert.equal(synced[1]?.narration, "원본 음성 본문")
+  assert.equal(synced[2]?.narration, "이건 어떻게 생각해? 댓글로 남겨줘.")
 })
 
 test("보도형은 배열 순서가 아니라 명시한 part로 서두와 본문을 나눈다", () => {
@@ -168,6 +244,38 @@ test("마지막 본문 ID로 잘못 저장된 CTA 질문도 마무리 자막으�
   assert.deepEqual(
     parts.outro.map((cue) => cue.id),
     ["legacy-question", "end-cta-2"]
+  )
+})
+
+test("대본 다시 작성 뒤 현재 장면에 없는 이전 자막은 본문에 되살리지 않는다", () => {
+  const parts = partitionSubtitlesByPart(
+    [
+      {
+        id: "fresh-body",
+        sceneId: "report-body-new",
+        start: 2,
+        end: 4,
+        text: "새 본문 자막",
+        emphasis: [],
+        emphasisColor: "yellow" as const,
+      },
+      {
+        id: "stale-body",
+        sceneId: "report-body-old",
+        start: 2,
+        end: 4,
+        text: "이전 본문 자막",
+        emphasis: [],
+        emphasisColor: "yellow" as const,
+      },
+    ],
+    [{ id: "report-lead-new" }],
+    [{ id: "report-body-new" }]
+  )
+
+  assert.deepEqual(
+    parts.body.map((cue) => cue.id),
+    ["fresh-body"]
   )
 })
 

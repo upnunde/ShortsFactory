@@ -1,6 +1,6 @@
 import type { NewsClipSettings } from "./types.ts"
 
-export const NEWS_RENDER_SCHEMA_VERSION = 75
+export const NEWS_RENDER_SCHEMA_VERSION = 77
 
 export function newsRenderSettingsKey(settings: NewsClipSettings) {
   const source = JSON.stringify({

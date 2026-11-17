@@ -559,6 +559,52 @@ test("prepareRenderProject는 end-cta 구간·크롭을 유지한다", () => {
   })
 })
 
+test("마무리 장면에 추가한 문장은 질문·댓글 앞에서도 삭제하지 않는다", () => {
+  const base = sampleProject()
+  const outroText =
+    "마지막으로 이 대목도 기억해 둬. 이건 어떻게 생각해? 댓글로 남겨줘."
+  const draft = {
+    ...base,
+    productionMode: "report" as const,
+    reportScript: `첫 문장이야.\n${outroText}`,
+    reportScenes: [
+      {
+        id: "report-lead-1",
+        narration: "첫 문장이야.",
+        part: "lead" as const,
+        audioMode: "tts" as const,
+        visualMode: "source" as const,
+        visual: "source" as const,
+        sourceId: base.source!.id,
+        sourceStart: 10,
+        sourceEnd: 14,
+      },
+      {
+        id: "end-cta",
+        narration: outroText,
+        part: "outro" as const,
+        audioMode: "tts" as const,
+        visualMode: "source" as const,
+        visual: "source" as const,
+        sourceId: base.source!.id,
+        sourceStart: 14,
+        sourceEnd: 18,
+      },
+    ],
+  }
+
+  const prepared = prepareRenderProject(draft, defaultNewsClipSettings, {
+    rebuildSubtitles: true,
+  })
+  assert.equal(prepared.reason, "")
+  assert.equal(
+    prepared.project.reportScenes.find((scene) => scene.id === "end-cta")
+      ?.narration,
+    outroText
+  )
+  assert.match(prepared.project.reportScript, /마지막으로 이 대목도 기억해 둬/)
+})
+
 test("마무리에 첨부한 기본 이미지가 과도하게 확대되지 않게 원본 비율을 적용한다", () => {
   const base = sampleProject()
   const imageSource = {

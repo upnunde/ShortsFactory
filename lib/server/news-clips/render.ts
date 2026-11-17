@@ -1069,7 +1069,7 @@ async function renderNewsClipExclusive(
   await saveRenderStage({ outroVideoSignature })
   await progress(92, "마무리 영상 완료")
   if (
-    forceAll ||
+    force ||
     renderCache.joinedSignature !== joinedSignature ||
     !(await exists(joinedVideo))
   ) {
@@ -1084,7 +1084,7 @@ async function renderNewsClipExclusive(
   await saveRenderStage({ joinedSignature })
   await progress(96, "영상 합치기 완료")
   if (
-    forceAll ||
+    force ||
     renderCache.outputSignature !== outputSignature ||
     !(await exists(finalVideo))
   ) {
@@ -2262,14 +2262,15 @@ async function makeBodyVideo(
       positionX: crop.x / 100,
       positionY: crop.y / 100,
     })
+    const inputIsStill =
+      sceneSource?.mediaType === "image" ||
+      reportSceneVisualMode(scene) === "still"
     const motionFilter = buildMediaMotionFilter({
       motion: sceneMotion,
       targetWidth: canvasWidth,
       targetHeight: canvasHeight,
       durationSeconds: renderDuration,
-      inputIsStill:
-        sceneSource?.mediaType === "image" ||
-        reportSceneVisualMode(scene) === "still",
+      inputIsStill,
     })
     const animatedScaleCrop = motionFilter
       ? `${scaleCrop},${motionFilter}`
@@ -2886,7 +2887,9 @@ async function runOnce(bin: string, args: string[]) {
           resolve()
           return
         }
-        console.error("FFmpeg failed", { output, stderr: stderr.slice(-4_000) })
+        console.error(
+          `FFmpeg failed for ${output}\n${stderr.slice(-4_000)}`
+        )
         reject(new Error("ffmpeg-failed"))
       })
     })

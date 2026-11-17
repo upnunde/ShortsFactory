@@ -251,6 +251,17 @@ export function layoutTimedSubtitleCues(
 function layoutSubtitleCues(cues: SubtitleCue[], layout: NewsTextLayout) {
   const lineLimit = unitsPerLine(layout)
   return cues.flatMap((cue) => {
+    // 검수 화면에서 저장한 1·2줄 구성은 사용자의 확정값이다. 설정 동기화나
+    // 렌더 준비가 다시 실행돼도 자동 줄바꿈으로 덮어쓰지 않는다.
+    if (cue.edited === true) {
+      return [
+        {
+          ...cue,
+          text: cue.text.replace(/\r\n/g, "\n").trim(),
+          emphasis: [...cue.emphasis],
+        },
+      ]
+    }
     const chunks = splitIntoSubtitleChunks(cue.text, layout, lineLimit)
     if (chunks.length === 0) return []
     const weights = chunks.map((chunk) => Math.max(1, visualUnits(chunk)))
@@ -469,7 +480,10 @@ export function reflowSubtitleTextPreservingContent(
 function mergeSubtitleSentenceCues(cues: SubtitleCue[]) {
   const merged: SubtitleCue[] = []
   for (const cue of cues) {
-    const text = normalizeText(cue.text)
+    const text =
+      cue.edited === true
+        ? cue.text.replace(/\r\n/g, "\n").trim()
+        : normalizeText(cue.text)
     if (!text) continue
     const previous = merged.at(-1)
     // 원본 음성 자막·문구 경계는 타임코드를 유지한다. 문장부호 없으면 합치면 싱크가 깨진다.
@@ -557,6 +571,7 @@ function mergeSubtitleCueSourceRanges(
 
 function cuePreservesTimingBoundary(cue: SubtitleCue) {
   return (
+    cue.edited === true ||
     Boolean(cue.sceneId) ||
     cue.id.startsWith("report-phrase-") ||
     cue.id.startsWith("end-cta") ||

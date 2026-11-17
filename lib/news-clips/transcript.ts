@@ -123,9 +123,29 @@ export function mergeTranscriptSegmentWithNext(
     // 두 구간 사이 경계만 제거하고, 오른쪽 구간 뒤 경계는 그대로 남긴다.
     captionBoundaryAfter: true,
     captionBoundarySource: "manual",
+    mergedFrom: [cloneTranscriptSegment(left), cloneTranscriptSegment(right)],
   }
 
   return [...segments.slice(0, index), merged, ...segments.slice(index + 2)]
+}
+
+export function canUndoTranscriptSegmentMerge(segment: TranscriptSegment) {
+  return Array.isArray(segment.mergedFrom) && segment.mergedFrom.length === 2
+}
+
+/** 합치기 직전 두 원문과 각각의 단어 타임스탬프를 그대로 복원한다. */
+export function undoTranscriptSegmentMerge(
+  segments: TranscriptSegment[],
+  segmentId: string
+) {
+  const index = segments.findIndex((segment) => segment.id === segmentId)
+  const current = segments[index]
+  if (!current || !canUndoTranscriptSegmentMerge(current)) return segments
+  return [
+    ...segments.slice(0, index),
+    ...current.mergedFrom!.map(cloneTranscriptSegment),
+    ...segments.slice(index + 1),
+  ]
 }
 
 /**
@@ -216,36 +236,7 @@ export function splitTranscriptSegmentAtWord(
 export function serializeTranscript(segments: TranscriptSegment[]) {
   return JSON.stringify({
     format: "shortsfactory-word-timestamps-v1",
-    segments: segments.map((segment) => ({
-      start: segment.start,
-      end: segment.end,
-      text: segment.text,
-      ...(segment.originalText ? { original_text: segment.originalText } : {}),
-      ...(segment.captionBoundaryAfter ? { caption_boundary_after: true } : {}),
-      ...(segment.captionBoundarySource
-        ? { caption_boundary_source: segment.captionBoundarySource }
-        : {}),
-      words: segment.words.map((word) => ({
-        word: word.text,
-        start: word.start,
-        end: word.end,
-        ...(word.confidence === undefined
-          ? {}
-          : { probability: word.confidence }),
-      })),
-      ...(segment.originalWords
-        ? {
-            original_words: segment.originalWords.map((word) => ({
-              word: word.text,
-              start: word.start,
-              end: word.end,
-              ...(word.confidence === undefined
-                ? {}
-                : { probability: word.confidence }),
-            })),
-          }
-        : {}),
-    })),
+    segments: segments.map(serializeTranscriptSegment),
   })
 }
 
@@ -423,6 +414,8 @@ function parseTimestampJson(input: string): TranscriptSegment[] {
   try {
     const parsed = JSON.parse(input) as {
       segments?: Array<{
+        id?: unknown
+        speaker?: unknown
         start?: unknown
         end?: unknown
         text?: unknown
@@ -445,6 +438,7 @@ function parseTimestampJson(input: string): TranscriptSegment[] {
           probability?: unknown
           confidence?: unknown
         }>
+        merged_from?: unknown
       }>
     }
     if (!Array.isArray(parsed.segments)) return []
@@ -459,13 +453,20 @@ function parseTimestampJson(input: string): TranscriptSegment[] {
         typeof segment.original_text === "string"
           ? segment.original_text.trim()
           : ""
+      const mergedFrom = parseMergedTranscriptSegments(segment.merged_from)
       return [
         {
-          id: "segment-" + (index + 1),
+          id:
+            typeof segment.id === "string" && segment.id.trim()
+              ? segment.id
+              : "segment-" + (index + 1),
           text,
           start,
           end,
-          speaker: "speaker-1",
+          speaker:
+            typeof segment.speaker === "string" && segment.speaker.trim()
+              ? segment.speaker
+              : "speaker-1",
           words: words.length
             ? words
             : segmentOf(text, start, end, index).words,
@@ -478,12 +479,65 @@ function parseTimestampJson(input: string): TranscriptSegment[] {
           segment.caption_boundary_source === "automatic"
             ? { captionBoundarySource: segment.caption_boundary_source }
             : {}),
+          ...(mergedFrom.length === 2 ? { mergedFrom } : {}),
         },
       ]
     })
   } catch {
     return []
   }
+}
+
+function serializeTranscriptSegment(
+  segment: TranscriptSegment
+): Record<string, unknown> {
+  return {
+    id: segment.id,
+    speaker: segment.speaker,
+    start: segment.start,
+    end: segment.end,
+    text: segment.text,
+    ...(segment.originalText ? { original_text: segment.originalText } : {}),
+    ...(segment.captionBoundaryAfter ? { caption_boundary_after: true } : {}),
+    ...(segment.captionBoundarySource
+      ? { caption_boundary_source: segment.captionBoundarySource }
+      : {}),
+    words: segment.words.map(serializeTranscriptWord),
+    ...(segment.originalWords
+      ? { original_words: segment.originalWords.map(serializeTranscriptWord) }
+      : {}),
+    ...(segment.mergedFrom
+      ? { merged_from: segment.mergedFrom.map(serializeTranscriptSegment) }
+      : {}),
+  }
+}
+
+function serializeTranscriptWord(word: TranscriptWord) {
+  return {
+    word: word.text,
+    start: word.start,
+    end: word.end,
+    ...(word.confidence === undefined ? {} : { probability: word.confidence }),
+  }
+}
+
+function parseMergedTranscriptSegments(value: unknown): TranscriptSegment[] {
+  if (!Array.isArray(value) || value.length !== 2) return []
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== "object") return []
+    const [parsed] = parseTimestampJson(JSON.stringify({ segments: [item] }))
+    if (!parsed) return []
+    const candidate = item as { id?: unknown }
+    return [
+      {
+        ...parsed,
+        id:
+          typeof candidate.id === "string" && candidate.id.trim()
+            ? candidate.id
+            : `${parsed.id}-restored-${index + 1}`,
+      },
+    ]
+  })
 }
 
 function parseJsonWords(
@@ -520,6 +574,19 @@ function parseJsonWords(
       } satisfies TranscriptWord,
     ]
   })
+}
+
+function cloneTranscriptSegment(segment: TranscriptSegment): TranscriptSegment {
+  return {
+    ...segment,
+    words: cloneWords(segment.words),
+    ...(segment.originalWords
+      ? { originalWords: cloneWords(segment.originalWords) }
+      : {}),
+    ...(segment.mergedFrom
+      ? { mergedFrom: segment.mergedFrom.map(cloneTranscriptSegment) }
+      : {}),
+  }
 }
 
 /**

@@ -34,7 +34,14 @@ export function sceneAudioTimingChanged(
   ) {
     return true
   }
-  return productionMode === "buildup2" && sceneTimingChanged(scene, patch)
+  const usesOriginalAudio =
+    scene.audioMode === "original" ||
+    (scene.audioMode === undefined && scene.visual === "quote")
+  return (
+    productionMode === "buildup2" &&
+    usesOriginalAudio &&
+    sceneTimingChanged(scene, patch)
+  )
 }
 
 /** 사용자가 고른 자료영상 구간을 원본 길이 안에서 그대로 보존한다. */

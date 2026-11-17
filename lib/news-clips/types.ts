@@ -137,6 +137,8 @@ export type TranscriptSegment = {
   captionBoundaryAfter?: boolean
   /** 자동 전사 경계와 구분되는 사용자 확정 경계. */
   captionBoundarySource?: "automatic" | "manual"
+  /** 합치기 직전 두 원문 구간. 합치기 취소 시 시간·단어까지 그대로 복원한다. */
+  mergedFrom?: TranscriptSegment[]
 }
 
 export type CandidateScores = {
@@ -207,11 +209,7 @@ export type NewsReportAudioMode = "tts" | "original"
 export type NewsReportVisualMode = "source" | "supporting" | "still" | "quote"
 
 export type NewsMediaMotion =
-  | "none"
-  | "zoom-in"
-  | "zoom-out"
-  | "pan-left"
-  | "pan-right"
+  "none" | "zoom-in" | "zoom-out" | "pan-left" | "pan-right"
 
 export type NewsMediaFit = "cover" | "contain"
 

@@ -41,9 +41,69 @@ test("시간 잠금이 풀려도 동일 ID의 수동 자막 문구는 새 시간
   assert.equal(result[0]?.edited, true)
 })
 
+test("시간을 다시 계산해도 사용자가 합친 자막은 다시 분리하지 않는다", () => {
+  const first: SubtitleCue = {
+    id: "quote-caption-scene-1-1",
+    sceneId: "scene-1",
+    start: 3,
+    end: 4,
+    sourceStart: 30,
+    sourceEnd: 31,
+    text: "첫 구간",
+    emphasis: [],
+    emphasisColor: "yellow",
+  }
+  const second: SubtitleCue = {
+    ...first,
+    id: "quote-caption-scene-1-2",
+    start: 4,
+    end: 5.5,
+    sourceStart: 31,
+    sourceEnd: 32.5,
+    text: "둘째 구간",
+  }
+  const merged: SubtitleCue = {
+    ...first,
+    end: second.end,
+    sourceEnd: second.sourceEnd,
+    text: "첫 구간 둘째 구간",
+    originalText: "첫 구간 둘째 구간",
+    mergedFrom: [first, second],
+    edited: true,
+  }
+  const rendered = [
+    { ...first, start: 3.2, end: 4.1 },
+    { ...second, start: 4.1, end: 5.8 },
+  ]
+
+  const result = preservePreviewSubtitleEdits([merged], rendered, false)
+
+  assert.equal(result.length, 1)
+  assert.equal(result[0]?.text, "첫 구간 둘째 구간")
+  assert.equal(result[0]?.start, 3.2)
+  assert.equal(result[0]?.end, 5.8)
+  assert.deepEqual(result[0]?.mergedFrom, [first, second])
+})
+
 test("잠긴 자막은 렌더 응답과 무관하게 문구와 시간을 모두 유지한다", () => {
   const result = preservePreviewSubtitleEdits(
     [edited],
+    [{ ...edited, start: 20, end: 25, text: "자동 문구" }],
+    true
+  )
+
+  assert.deepEqual(result, [edited])
+})
+
+test("잠긴 본문에서도 현재 장면에서 제외된 이전 자막은 다시 붙이지 않는다", () => {
+  const stale = {
+    ...edited,
+    id: "stale-caption",
+    sceneId: "removed-scene",
+    text: "이전 자막",
+  }
+  const result = preservePreviewSubtitleEdits(
+    [edited, stale],
     [{ ...edited, start: 20, end: 25, text: "자동 문구" }],
     true
   )

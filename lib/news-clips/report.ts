@@ -153,10 +153,43 @@ export function groupReportVisualContinuationSegments<
 
 /** 저장 가능한 전체 대본은 장면 narration에서만 파생한다. */
 export function reportScriptFromScenes(scenes: NewsReportScene[]) {
-  return scenes
+  return dedupeReportNarrationScenes(scenes)
     .map((scene) => scene.narration.trim())
     .filter(Boolean)
     .join("\n")
+}
+
+function reportNarrationKey(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .toLowerCase()
+}
+
+/**
+ * 생성·재작성 과정에서 같은 TTS 문장이 여러 장면에 복제된 경우 뒤 문장을
+ * 제거한다. 원본 음성 장면은 narration이 재생 기준이 아니므로 건드리지 않고,
+ * 댓글 유도 마무리는 본문과 별도 묶음으로 취급한다.
+ */
+export function dedupeReportNarrationScenes(scenes: NewsReportScene[]) {
+  const seenMain = new Set<string>()
+  const seenOutro = new Set<string>()
+  return scenes.flatMap((scene) => {
+    if (reportSceneAudioMode(scene) === "original") return [{ ...scene }]
+    const seen = isEndCtaScene(scene) ? seenOutro : seenMain
+    const sentences = splitReportSentences(scene.narration)
+    const candidates = sentences.length ? sentences : [scene.narration.trim()]
+    const narration = candidates
+      .filter((sentence) => {
+        const key = reportNarrationKey(sentence)
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      .join(" ")
+      .trim()
+    return narration ? [{ ...scene, narration }] : []
+  })
 }
 
 /**
@@ -806,7 +839,13 @@ export function buildReportScenes(
   preferred?: NewsReportScene[],
   defaultSourceId = ""
 ): NewsReportScene[] {
-  const sentences = splitReportSentences(script)
+  const seenNarration = new Set<string>()
+  const sentences = splitReportSentences(script).filter((sentence) => {
+    const key = reportNarrationKey(sentence)
+    if (!key || seenNarration.has(key)) return false
+    seenNarration.add(key)
+    return true
+  })
   const available = Math.max(1, sourceEnd - sourceStart)
   return sentences.map((narration, index) => {
     const saved = preferred?.[index]
@@ -1164,9 +1203,26 @@ export function mergeEditedSubtitleText(
 ) {
   const manual = edited.filter((cue) => cue.edited === true)
   if (!manual.length) return timed
-  const byId = new Map(manual.map((cue) => [cue.id, cue] as const))
+  const preserveTimes = options.preserveTimes === true
+  const mergedManual = manual.filter(
+    (cue) => Array.isArray(cue.mergedFrom) && cue.mergedFrom.length === 2
+  )
+  // 영상 구간 변경 등으로 타임라인을 다시 계산하더라도 사용자가 합친 자막은
+  // 자동 생성된 두 구간으로 되돌리지 않는다. 합치기 전 ID·소스 시간·원문을
+  // 이용해 새 타임라인의 대응 구간을 다시 하나로 묶는다.
+  const restoredMerged = restoreMergedSubtitleEdits(
+    timed,
+    mergedManual,
+    preserveTimes
+  )
+  const groupedTimed = restoredMerged.cues
+  const individualManual = manual.filter(
+    (cue) => !restoredMerged.appliedIds.has(cue.id)
+  )
+  if (!individualManual.length) return groupedTimed
+  const byId = new Map(individualManual.map((cue) => [cue.id, cue] as const))
   const byScene = new Map<string, SubtitleCue[]>()
-  for (const cue of manual) {
+  for (const cue of individualManual) {
     if (!cue.sceneId) continue
     const sceneId = cue.sceneId ?? ""
     const list = byScene.get(sceneId) ?? []
@@ -1175,8 +1231,7 @@ export function mergeEditedSubtitleText(
   }
   const usedEdited = new Set<string>()
   const sceneCursor = new Map<string, number>()
-  const preserveTimes = options.preserveTimes === true
-  return timed.map((cue) => {
+  return groupedTimed.map((cue) => {
     const byExactId = byId.get(cue.id)
     const exactIdStillMatches =
       byExactId &&
@@ -1218,6 +1273,132 @@ export function mergeEditedSubtitleText(
       originalEmphasis: [...cue.emphasis],
     }
   })
+}
+
+function restoreMergedSubtitleEdits(
+  timed: SubtitleCue[],
+  mergedManual: SubtitleCue[],
+  preserveTimes: boolean
+) {
+  let restored = timed
+  const appliedIds = new Set<string>()
+  for (const manual of mergedManual) {
+    const range = mergedSubtitleTimedRange(restored, manual)
+    if (!range) continue
+    const matched = restored.slice(range.startIndex, range.endIndex + 1)
+    const start = preserveTimes
+      ? manual.start
+      : Math.min(...matched.map((cue) => cue.start))
+    const end = preserveTimes
+      ? manual.end
+      : Math.max(...matched.map((cue) => cue.end))
+    const sourceStarts = matched
+      .map((cue) => cue.sourceStart)
+      .filter((value): value is number => Number.isFinite(value))
+    const sourceEnds = matched
+      .map((cue) => cue.sourceEnd)
+      .filter((value): value is number => Number.isFinite(value))
+    const merged: SubtitleCue = {
+      ...matched[0]!,
+      ...manual,
+      start,
+      end,
+      ...(sourceStarts.length && sourceEnds.length
+        ? {
+            sourceStart: preserveTimes
+              ? (manual.sourceStart ?? Math.min(...sourceStarts))
+              : Math.min(...sourceStarts),
+            sourceEnd: preserveTimes
+              ? (manual.sourceEnd ?? Math.max(...sourceEnds))
+              : Math.max(...sourceEnds),
+          }
+        : {}),
+      emphasis: [...manual.emphasis],
+      ...(manual.originalEmphasis
+        ? { originalEmphasis: [...manual.originalEmphasis] }
+        : {}),
+      edited: true,
+    }
+    restored = [
+      ...restored.slice(0, range.startIndex),
+      merged,
+      ...restored.slice(range.endIndex + 1),
+    ]
+    appliedIds.add(manual.id)
+  }
+  return { cues: restored, appliedIds }
+}
+
+function mergedSubtitleTimedRange(
+  timed: SubtitleCue[],
+  manual: SubtitleCue
+): { startIndex: number; endIndex: number } | null {
+  const sameScene = (cue: SubtitleCue) =>
+    !manual.sceneId || cue.sceneId === manual.sceneId
+  const leafIds = new Set(mergedSubtitleLeafIds(manual))
+  let indices = timed.flatMap((cue, index) =>
+    sameScene(cue) &&
+    [...leafIds].some((id) => cue.id === id || cue.id.startsWith(`${id}-`))
+      ? [index]
+      : []
+  )
+
+  if (
+    Number.isFinite(manual.sourceStart) &&
+    Number.isFinite(manual.sourceEnd)
+  ) {
+    const sourceStart = Math.min(manual.sourceStart!, manual.sourceEnd!)
+    const sourceEnd = Math.max(manual.sourceStart!, manual.sourceEnd!)
+    const bySourceRange = timed.flatMap((cue, index) => {
+      if (
+        !sameScene(cue) ||
+        !Number.isFinite(cue.sourceStart) ||
+        !Number.isFinite(cue.sourceEnd)
+      ) {
+        return []
+      }
+      const midpoint = (cue.sourceStart! + cue.sourceEnd!) / 2
+      return midpoint >= sourceStart - 0.02 && midpoint <= sourceEnd + 0.02
+        ? [index]
+        : []
+    })
+    if (bySourceRange.length) indices = bySourceRange
+  }
+
+  if (!indices.length) {
+    const target = captionMatchKey(
+      manual.originalText ||
+        (manual.mergedFrom ?? []).map((cue) => cue.text).join(" ")
+    )
+    if (target) {
+      for (let startIndex = 0; startIndex < timed.length; startIndex += 1) {
+        if (!sameScene(timed[startIndex]!)) continue
+        let combined = ""
+        for (
+          let endIndex = startIndex;
+          endIndex < timed.length && sameScene(timed[endIndex]!);
+          endIndex += 1
+        ) {
+          combined += captionMatchKey(timed[endIndex]!.text)
+          if (combined === target) return { startIndex, endIndex }
+          if (!target.startsWith(combined)) break
+        }
+      }
+    }
+    return null
+  }
+
+  const startIndex = Math.min(...indices)
+  const endIndex = Math.max(...indices)
+  if (!timed.slice(startIndex, endIndex + 1).every((cue) => sameScene(cue))) {
+    return null
+  }
+  return { startIndex, endIndex }
+}
+
+function mergedSubtitleLeafIds(cue: SubtitleCue): string[] {
+  if (!cue.mergedFrom?.length) return [cue.id]
+  return cue.mergedFrom.flatMap(mergedSubtitleLeafIds)
 }
 
 function captionMatchKey(value: string) {

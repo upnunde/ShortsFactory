@@ -15,6 +15,7 @@ import {
   NEWS_TOTAL_GAP_SECONDS,
   appendEndCtaScenes,
   canonicalReportScript,
+  dedupeReportNarrationScenes,
   estimateReportScenesDuration,
   isEndCtaScene,
   mergeEditedSubtitleText,
@@ -254,6 +255,10 @@ export function prepareRenderProject(
     // 기존 end-cta의 구간·크롭을 유지하도록 장면 목록을 그대로 넘긴다.
     reportScenes = appendEndCtaScenes(reportScenes, ctaText, primarySourceId)
   }
+
+  // 저장본이나 AI 재작성 결과에 같은 TTS 문장이 중복된 경우 렌더 전에
+  // 장면 자체를 정리해야 화면 대본뿐 아니라 실제 음성 반복도 사라진다.
+  reportScenes = dedupeReportNarrationScenes(reportScenes)
 
   reportScenes = lockSceneSources(reportScenes, primarySourceId)
 

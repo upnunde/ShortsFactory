@@ -418,9 +418,7 @@ export function NewsClipsApp({
     setProject(restored)
     const restoredStep = visibleWorkflowStep(snapshot.step)
     setStep(restoredStep)
-    setFurthestStep(
-      visibleWorkflowStep(snapshot.furthestStep)
-    )
+    setFurthestStep(visibleWorkflowStep(snapshot.furthestStep))
     setTranscriptDraft(snapshot.transcriptDraft ?? "")
     setIssueSearch(normalizeNewsIssueSearchState(snapshot.issueSearch))
     setSourceSearch(normalizeNewsSourceSearchState(snapshot.sourceSearch))
@@ -1099,13 +1097,15 @@ export function NewsClipsApp({
             body.outputDurationSeconds ?? current.outputDurationSeconds,
           // 빌드업형은 확정한 영상 자막 시간을 유지한다. 보도형은 대본으로
           // 다시 만든 TTS의 실측 단어 시간을 렌더 응답에서 받아들인다.
+          // 대본 저장 직후에는 React 화면 상태에 이전 파트 자막이 잠시 남을 수
+          // 있으므로, 렌더 요청에 실제로 보낸 draft만 수동 편집의 기준으로 쓴다.
+          // current를 쓰면 같은 ID의 이전 서두가 새 서두 위에 다시 덮여 반복된다.
           subtitles: preservePreviewSubtitleEdits(
-            current.subtitles,
+            draft.subtitles,
             Array.isArray(body.subtitles) ? body.subtitles : undefined,
             draft.subtitleTimingsLocked,
             {
-              acceptRenderedLockedTimings:
-                draft.productionMode === "report",
+              acceptRenderedLockedTimings: draft.productionMode === "report",
             }
           ),
           transcript: Array.isArray(body.transcript)
@@ -1923,7 +1923,7 @@ export function NewsClipsApp({
               )
             }}
           >
-            <Select.Trigger className="w-full !border !border-solid !border-separator-tertiary !bg-transparent shadow-none outline-none ring-0 hover:!bg-transparent focus:!border-separator-tertiary focus:!bg-transparent focus:!shadow-none focus:!outline-none focus:!ring-0 focus-visible:!border-separator-tertiary focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:!outline-none focus-visible:!ring-0 data-[hovered=true]:!bg-transparent data-[focus=true]:!border-separator-tertiary data-[focus=true]:!bg-transparent data-[focus=true]:!shadow-none data-[focus-visible=true]:!border-separator-tertiary data-[focus-visible=true]:!bg-transparent data-[focus-visible=true]:!shadow-none data-[focus-visible=true]:!outline-none data-[focus-visible=true]:!ring-0 data-[open=true]:!border-separator-tertiary data-[open=true]:!bg-transparent data-[pressed=true]:!border-separator-tertiary data-[pressed=true]:!bg-transparent">
+            <Select.Trigger className="w-full !border !border-solid !border-separator-tertiary !bg-transparent shadow-none ring-0 outline-none hover:!bg-transparent focus:!border-separator-tertiary focus:!bg-transparent focus:!shadow-none focus:!ring-0 focus:!outline-none focus-visible:!border-separator-tertiary focus-visible:!bg-transparent focus-visible:!shadow-none focus-visible:!ring-0 focus-visible:!outline-none data-[focus-visible=true]:!border-separator-tertiary data-[focus-visible=true]:!bg-transparent data-[focus-visible=true]:!shadow-none data-[focus-visible=true]:!ring-0 data-[focus-visible=true]:!outline-none data-[focus=true]:!border-separator-tertiary data-[focus=true]:!bg-transparent data-[focus=true]:!shadow-none data-[hovered=true]:!bg-transparent data-[open=true]:!border-separator-tertiary data-[open=true]:!bg-transparent data-[pressed=true]:!border-separator-tertiary data-[pressed=true]:!bg-transparent">
               <Select.Value />
               <Select.Indicator />
             </Select.Trigger>
@@ -2125,9 +2125,7 @@ export function NewsClipsApp({
             operationProgress={operationProgress}
             onOperationProgress={updateOperationProgress}
             historySave={historySaveProps}
-            onNext={() =>
-              advanceStep(nextReviewStep(step))
-            }
+            onNext={() => advanceStep(nextReviewStep(step))}
             onPrepareVisualAssets={prepareReportVisualAssets}
             onProject={updateProject}
             onSettings={(patch) => void updateTtsSettings(patch)}
@@ -3119,9 +3117,7 @@ function nextReviewStep(step: NewsClipStep): NewsClipStep {
 
 function visibleNewsClipSteps() {
   return NEWS_CLIP_STEPS.filter(
-    (item) =>
-      item.id !== "source" &&
-      item.id !== "direction"
+    (item) => item.id !== "source" && item.id !== "direction"
   )
 }
 

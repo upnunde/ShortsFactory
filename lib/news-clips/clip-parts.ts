@@ -83,6 +83,38 @@ export function splitScenesByClipPart(
   }
 }
 
+/**
+ * 자막 편집 내용을 장면 대본에 되돌린다. 보도형은 모든 TTS 장면을 갱신하고,
+ * 원본 구간형은 TTS로 읽는 서두·마무리만 갱신한다. 원본 음성 본문은 자막
+ * 문구를 고쳐도 영상의 기준 대본을 바꾸지 않는다.
+ */
+export function syncSceneNarrationFromSubtitles(
+  scenes: NewsReportScene[],
+  cues: SubtitleCue[],
+  productionMode: NewsClipProductionMode
+) {
+  const cuesByScene = new Map<string, SubtitleCue[]>()
+  for (const cue of cues) {
+    if (!cue.sceneId) continue
+    const sceneCues = cuesByScene.get(cue.sceneId) ?? []
+    sceneCues.push(cue)
+    cuesByScene.set(cue.sceneId, sceneCues)
+  }
+
+  return scenes.map((scene) => {
+    const part = reportScenePart(scene, productionMode)
+    if (productionMode === "buildup2" && part === "body") return scene
+    const sceneCues = cuesByScene.get(scene.id)
+    if (!sceneCues?.length) return scene
+    const narration = [...sceneCues]
+      .sort((left, right) => left.start - right.start || left.end - right.end)
+      .map((cue) => cue.text.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join(" ")
+    return narration ? { ...scene, narration } : scene
+  })
+}
+
 export function isLeadSceneId(
   sceneId: string | undefined,
   leadScenes: Array<Pick<NewsReportScene, "id">>
@@ -120,7 +152,9 @@ export function partitionSubtitlesByPart(
       body.push(cue)
       continue
     }
-    body.push(cue)
+    // 대본 다시 작성으로 장면 ID가 바뀐 뒤 남은 이전 자막을 본문에
+    // 되살리지 않는다. 현재 장면에 연결되지 않은 cue는 폐기해야 새 자막과
+    // 같은 시간대에 겹치거나 본문 끝에 다시 붙지 않는다.
   }
 
   return { lead, body, outro }

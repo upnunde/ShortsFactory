@@ -58,13 +58,26 @@ test("원본 비율 이미지를 확대해도 작은 축의 위치값을 유지�
     positionY: 0.2,
   })
   assert.match(filter, /scale=900:1600/)
-  assert.match(filter, /pad=w='max\(iw,720\)'/)
-  assert.match(filter, /h='max\(ih,1280\)'/)
+  assert.match(filter, /pad=w='ceil\(max\(iw,720\)\/2\)\*2'/)
+  assert.match(filter, /h='ceil\(max\(ih,1280\)\/2\)\*2'/)
   assert.match(filter, /\(ow-iw\)\*0\.7000/)
   assert.match(filter, /\(oh-ih\)\*0\.2000/)
   assert.match(filter, /crop=720:1280/)
   assert.match(filter, /\(iw-ow\)\*0\.7000/)
   assert.match(filter, /\(ih-oh\)\*0\.2000/)
+})
+
+test("원본 비율 화면의 패딩은 홀수 입력보다 작아지지 않게 짝수로 올림한다", () => {
+  const filter = buildScaleCropFilter({
+    targetWidth: 360,
+    targetHeight: 640,
+    zoom: 1.53,
+    cropX: "(iw-ow)*0.5",
+    cropY: "(ih-oh)*0.5",
+    fit: "contain",
+  })
+  assert.match(filter, /ceil\(max\(iw,360\)\/2\)\*2/)
+  assert.match(filter, /ceil\(max\(ih,640\)\/2\)\*2/)
 })
 
 test("영상 모션은 장면 길이에 맞춘 확대량을 적용한다", () => {

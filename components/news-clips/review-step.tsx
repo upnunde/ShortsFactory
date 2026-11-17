@@ -81,6 +81,7 @@ import {
   removeTrailingCtaFromLead,
   reportScenePart,
   splitScenesByClipPart,
+  syncSceneNarrationFromSubtitles,
 } from "@/lib/news-clips/clip-parts"
 import {
   NEWS_TOTAL_GAP_SECONDS,
@@ -114,8 +115,10 @@ import {
   updateEditedSubtitleCue,
 } from "@/lib/news-clips/text-layout"
 import {
+  canUndoTranscriptSegmentMerge,
   clearLegacyAutomaticCaptionBoundaries,
   mergeTranscriptSegmentWithNext,
+  undoTranscriptSegmentMerge,
   updateTranscriptSegmentText,
 } from "@/lib/news-clips/transcript"
 import {
@@ -222,19 +225,13 @@ const DEFAULT_SOURCE_SCENE_CROP: CropPosition = {
   faceTracking: false,
 }
 
-function previewFootageZoom(
-  _scene: NewsReportScene | undefined,
-  zoom: number
-) {
+function previewFootageZoom(_scene: NewsReportScene | undefined, zoom: number) {
   // 슬라이더 중앙(1:1)을 기준으로 축소·확대를 그대로 반영한다.
   return Math.max(ZOOM_SLIDER_MIN, Math.min(ZOOM_SLIDER_MAX, zoom))
 }
 
 function narrationFromScenes(scenes: NewsReportScene[]) {
-  return scenes
-    .map((scene) => scene.narration.trim())
-    .filter(Boolean)
-    .join("\n")
+  return reportScriptFromScenes(scenes)
 }
 
 function partScriptTexts(project: NewsClipProject) {
@@ -246,10 +243,9 @@ function partScriptTexts(project: NewsClipProject) {
   const sceneLead = narrationFromScenes(parts.lead)
   const sceneBody = narrationFromScenes(parts.body)
   const sceneOutro = parts.outro
-    .map(
-      (scene) =>
-        splitEndCtaFromScript(scene.narration).cta || scene.narration.trim()
-    )
+    // 이미 마무리로 분류된 장면은 입력 전체가 확정값이다. 마지막 질문·댓글
+    // 문장만 다시 추출하면 사용자가 앞에 추가한 문장이 화면에서 사라진다.
+    .map((scene) => scene.narration.trim())
     .filter(Boolean)
     .join("\n")
   if (project.productionMode === "buildup2") {
@@ -288,36 +284,42 @@ function syncNarrationFromSubtitleEdit(
   project: NewsClipProject,
   subtitles: NewsClipProject["subtitles"]
 ) {
+  const reportScenes = syncSceneNarrationFromSubtitles(
+    project.reportScenes,
+    subtitles,
+    project.productionMode
+  )
+  const sceneScript = reportScriptFromScenes(reportScenes)
+  const parts = partScriptTexts({
+    ...project,
+    reportScenes,
+    reportScript: sceneScript,
+  })
+  const reportScript = composePartScripts(
+    project.productionMode,
+    parts.lead,
+    parts.body,
+    parts.outro
+  )
   if (project.productionMode === "report") {
-    const cuesByScene = new Map<string, typeof subtitles>()
-    for (const cue of subtitles) {
-      if (!cue.sceneId) continue
-      const cues = cuesByScene.get(cue.sceneId) ?? []
-      cues.push(cue)
-      cuesByScene.set(cue.sceneId, cues)
-    }
-    const reportScenes = project.reportScenes.map((scene) => {
-      const cues = cuesByScene.get(scene.id)
-      if (!cues?.length) return scene
-      const narration = [...cues]
-        .sort((left, right) => left.start - right.start || left.end - right.end)
-        .map((cue) => cue.text.replace(/\s+/g, " ").trim())
-        .filter(Boolean)
-        .join(" ")
-      return narration ? { ...scene, narration } : scene
-    })
     return {
       subtitles,
       reportScenes,
-      reportScript: reportScriptFromScenes(reportScenes),
+      reportScript,
       // 보도형은 대본 → TTS → 단어 타임스탬프가 기준이다.
       // 자막 시간을 먼저 잠그지 않고 다시 만든 TTS에서 매번 계산한다.
       subtitleTimingsLocked: false,
     }
   }
   // 4번은 확정된 음성·영상 타임라인 위의 자막 오버레이 편집 단계다.
-  // 빌드업형은 원본 영상이 기준이므로 승인한 시간을 유지한다.
-  return { subtitles, subtitleTimingsLocked: true }
+  // 빌드업형 본문은 원본 영상이 기준이지만 서두·마무리는 TTS 대본과 자막을
+  // 같은 문구로 유지한다.
+  return {
+    subtitles,
+    reportScenes,
+    reportScript,
+    subtitleTimingsLocked: true,
+  }
 }
 
 const EDITOR_TABS: Record<
@@ -431,6 +433,20 @@ export function NewsClipReviewStep({
   )
   const [supplementOpen, setSupplementOpen] = useState(false)
   const [deletedBodyCutsOpen, setDeletedBodyCutsOpen] = useState(false)
+  /** 합치기·합치기 취소 후 저장으로 확정해야 하는 본문 원문 구간. */
+  const [pendingTranscriptConfirmIds, setPendingTranscriptConfirmIds] =
+    useState<Record<string, true>>({})
+  /** 합치기·합치기 취소 후 저장으로 확정해야 하는 자막. */
+  const [pendingSubtitleConfirmIds, setPendingSubtitleConfirmIds] = useState<
+    Record<string, true>
+  >({})
+  /** 초기화·합치기 취소가 저장 문구를 바꿔도 입력 초안을 그 값으로 되돌린다. */
+  const [subtitleFieldNonce, setSubtitleFieldNonce] = useState<
+    Record<string, number>
+  >({})
+  const [subtitleFieldSaveStates, setSubtitleFieldSaveStates] = useState<
+    Record<string, { dirty: boolean; valid: boolean }>
+  >({})
   const [supplementDraft, setSupplementDraft] = useState(
     project.supplementalContext
   )
@@ -450,9 +466,9 @@ export function NewsClipReviewStep({
   const [sourcePanelOpen, setSourcePanelOpen] = useState(false)
   const [audioPanelOpen, setAudioPanelOpen] = useState(false)
   const [youtubeBusy, setYoutubeBusy] = useState(false)
-  const [downloadBusy, setDownloadBusy] = useState<
-    "video" | "thumbnail" | ""
-  >("")
+  const [downloadBusy, setDownloadBusy] = useState<"video" | "thumbnail" | "">(
+    ""
+  )
   const [finalPlaybackChoice, setFinalPlaybackChoice] = useState(() => ({
     projectId: project.id,
     rate: normalizeFinalPlaybackRate(project.finalPlaybackRate),
@@ -491,8 +507,7 @@ export function NewsClipReviewStep({
     (scene) => scene.id === selectedDirectionSceneId
   )
   // 미리보기 seek용 폴백. 보정 패널 노출은 selectedDirectionScene만 사용.
-  const previewContentScene =
-    selectedDirectionScene ?? project.reportScenes[0]
+  const previewContentScene = selectedDirectionScene ?? project.reportScenes[0]
   const previewDirectionScene =
     project.productionMode === "report" && previewContentScene
       ? (reportVisualContinuationAnchor(
@@ -558,9 +573,7 @@ export function NewsClipReviewStep({
       savedValue: savedSourceCredit,
       value,
     })
-  const commonSourceCreditText = projectSourceCreditText(
-    sourceCreditDraft
-  )
+  const commonSourceCreditText = projectSourceCreditText(sourceCreditDraft)
   const sourceCreditDirty =
     sourceCreditDraft.trim() !== savedSourceCredit.trim()
   const directionSourceVideoUrl = sourceVideoUrlFor(
@@ -1261,14 +1274,55 @@ export function NewsClipReviewStep({
       (target !== "outro" && outroScriptDraft !== savedParts.outro)
 
     if (project.productionMode !== "buildup2") {
-      finishReportScript(
-        composePartScripts(
-          project.productionMode,
-          leadText,
-          bodyText,
-          outroText
-        )
+      const candidate = project.candidates.find(
+        (item) => item.id === project.selectedCandidateId
       )
+      if (!candidate) {
+        onNote("선택된 후보 구간이 없습니다.")
+        return
+      }
+      const mainScript = [leadText, bodyText].filter(Boolean).join("\n")
+      const completeReportScript = composePartScripts(
+        project.productionMode,
+        leadText,
+        bodyText,
+        outroText
+      )
+      const reportScenes = appendEndCtaScenes(
+        buildReportScenes(
+          mainScript,
+          project.transcript,
+          candidate.sourceStart,
+          candidate.sourceEnd,
+          project.reportScenes.filter((scene) => !isEndCtaScene(scene)),
+          project.source?.id ?? ""
+        ),
+        outroText,
+        project.source?.id ?? ""
+      )
+      const prepared = prepareRenderProject(
+        {
+          ...project,
+          reportScript: completeReportScript,
+          reportScenes,
+          subtitles: [],
+        },
+        settings,
+        { rebuildSubtitles: true }
+      )
+      if (prepared.reason) {
+        onNote("수정한 구간을 저장하지 못했습니다.")
+        return
+      }
+      onProject({
+        reportScript: prepared.project.reportScript,
+        reportScenes: prepared.project.reportScenes,
+        subtitles: prepared.project.subtitles,
+        subtitleTimingsLocked: false,
+        outputDurationSeconds: prepared.project.outputDurationSeconds,
+        titleCardDurationSeconds: 0,
+        renderSignature: "",
+      })
       onNote(
         target === "lead"
           ? "서두 TTS 대본을 저장했습니다."
@@ -1695,11 +1749,12 @@ export function NewsClipReviewStep({
         source.mediaType === "image" ? "contain" : "cover"
 
       if (target.type === "intro") {
-        setIntroVisualBaseline((current) =>
-          current ?? {
-            introSourceId: project.introSourceId,
-            layout: snapshotIntroLayout(project),
-          }
+        setIntroVisualBaseline(
+          (current) =>
+            current ?? {
+              introSourceId: project.introSourceId,
+              layout: snapshotIntroLayout(project),
+            }
         )
         onProject((current) => ({
           supportingSources: appendSupportingSource(
@@ -1941,8 +1996,7 @@ export function NewsClipReviewStep({
           body.subtitles,
           project.subtitleTimingsLocked,
           {
-            acceptRenderedLockedTimings:
-              project.productionMode === "report",
+            acceptRenderedLockedTimings: project.productionMode === "report",
           }
         ),
         subtitleTimingsLocked: project.productionMode !== "report",
@@ -2041,10 +2095,7 @@ export function NewsClipReviewStep({
     }
   }
 
-  function downloadOutputAsset(
-    type: "video" | "thumbnail",
-    url: string
-  ) {
+  async function downloadOutputAsset(type: "video" | "thumbnail", url: string) {
     if (!url || downloadBusy) return
     setDownloadBusy(type)
     onNote("")
@@ -2054,9 +2105,18 @@ export function NewsClipReviewStep({
     const downloadUrl = `/api/news-clips/download?projectId=${encodeURIComponent(
       project.id
     )}&type=${type}&name=${encodeURIComponent(fileName)}`
-    triggerBrowserDownload(downloadUrl, fileName)
-    onNote(`${suffix} 다운로드를 시작했습니다.`)
-    window.setTimeout(() => setDownloadBusy(""), 600)
+    try {
+      const response = await fetch(downloadUrl, { cache: "no-store" })
+      if (!response.ok) throw new Error("download failed")
+      const objectUrl = URL.createObjectURL(await response.blob())
+      triggerBrowserDownload(objectUrl, fileName)
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000)
+      onNote(`${suffix} 다운로드를 시작했습니다.`)
+    } catch {
+      onNote(`${suffix}을 내려받지 못했습니다. 다시 시도해 주세요.`)
+    } finally {
+      setDownloadBusy("")
+    }
   }
 
   async function uploadFinalToYoutube() {
@@ -2122,26 +2182,18 @@ export function NewsClipReviewStep({
           : compositionPane === "body"
             ? project.previewBodyUrl
             : project.previewOutroUrl
-  const leadCaptions = project.subtitles.filter(
-    (cue) =>
-      cue.sceneId &&
-      project.reportScenes.some(
-        (scene) =>
-          scene.id === cue.sceneId &&
-          (project.productionMode === "buildup2"
-            ? scene.id === "buildup2-lead"
-            : project.reportScenes.filter((item) => !isEndCtaScene(item))[0]
-                ?.id === scene.id)
-      )
+  const previewSceneParts = splitScenesByClipPart(
+    project.reportScenes,
+    project.productionMode
   )
-  const bodyCaptions = project.subtitles.filter((cue) => {
-    if (!cue.sceneId || isEndCtaScene({ id: cue.sceneId })) return false
-    if (leadCaptions.some((item) => item.id === cue.id)) return false
-    return true
-  })
-  const outroCaptions = project.subtitles.filter(
-    (cue) => cue.sceneId && isEndCtaScene({ id: cue.sceneId })
+  const previewSubtitleParts = partitionSubtitlesByPart(
+    project.subtitles,
+    previewSceneParts.lead,
+    previewSceneParts.body
   )
+  const leadCaptions = previewSubtitleParts.lead
+  const bodyCaptions = previewSubtitleParts.body
+  const outroCaptions = previewSubtitleParts.outro
   const paneCaptions =
     compositionPane === "all"
       ? project.subtitles
@@ -2525,8 +2577,8 @@ export function NewsClipReviewStep({
         onChange={(event) => void uploadVisualFile(event)}
       />
       <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
-          <header className={stepHeaderClassName}>
-            <div className={stepHeaderContentClassName}>
+        <header className={stepHeaderClassName}>
+          <div className={stepHeaderContentClassName}>
             <h2 className="truncate text-xl leading-7 font-semibold">
               {heading.title}
             </h2>
@@ -2653,9 +2705,7 @@ export function NewsClipReviewStep({
                   <LoadingButtonLabel
                     loading={youtubeBusy}
                     label={
-                      project.youtubeUploadUrl
-                        ? "다시 올리기"
-                        : "유튜브 올리기"
+                      project.youtubeUploadUrl ? "다시 올리기" : "유튜브 올리기"
                     }
                     loadingLabel="업로드 중"
                     progress={youtubeProgress}
@@ -2663,268 +2713,103 @@ export function NewsClipReviewStep({
                 </Button>
               ) : null}
             </div>
-            </div>
-          </header>
-          <div className={`${stepBodyClassName} lg:overflow-hidden`}>
-            <div className={`${workspacePageContentClassName} flex h-full flex-col gap-4`}>
-              {mode === "preview" ? (
-                <div className="flex flex-col gap-4">
-                  <div className="flex flex-wrap items-center justify-end gap-2">
+          </div>
+        </header>
+        <div className={`${stepBodyClassName} lg:overflow-hidden`}>
+          <div
+            className={`${workspacePageContentClassName} flex h-full flex-col gap-4`}
+          >
+            {mode === "preview" ? (
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <Button
+                    size="sm"
+                    variant={sourcePanelOpen ? "secondary" : "outline"}
+                    onPress={() => setSourcePanelOpen((open) => !open)}
+                  >
+                    출처
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={audioPanelOpen ? "secondary" : "outline"}
+                    onPress={() => setAudioPanelOpen((open) => !open)}
+                  >
+                    음향 설정
+                  </Button>
+                  {project.productionMode === "report" ? (
                     <Button
                       size="sm"
-                      variant={sourcePanelOpen ? "secondary" : "outline"}
-                      onPress={() => setSourcePanelOpen((open) => !open)}
+                      variant="outline"
+                      isDisabled={buttonBusyDisabled(busy, "reselect")}
+                      onPress={() => void onReselect("all")}
                     >
-                      출처
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={audioPanelOpen ? "secondary" : "outline"}
-                      onPress={() => setAudioPanelOpen((open) => !open)}
-                    >
-                      음향 설정
-                    </Button>
-                    {project.productionMode === "report" ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        isDisabled={buttonBusyDisabled(busy, "reselect")}
-                        onPress={() => void onReselect("all")}
-                      >
-                        <LoadingButtonLabel
-                          loading={busyMatches(busy, "reselect")}
-                          label="전체 재작성"
-                          loadingLabel="재작성 중"
-                          progress={busyProgress}
-                        />
-                      </Button>
-                    ) : null}
-                  </div>
-                  {sourcePanelOpen ? commonSourceCreditField : null}
-                  {audioPanelOpen ? audioSettingsCard : null}
-                </div>
-              ) : null}
-              {mode === "preview" ? (
-                <SegmentedTabs
-                  ariaLabel="미리보기 구간"
-                  className="shrink-0"
-                  value={compositionPane}
-                  onChange={setCompositionPane}
-                  items={[
-                    { id: "all", label: "전체" },
-                    { id: "intro", label: "인트로" },
-                    { id: "lead", label: "서두" },
-                    { id: "body", label: "본문" },
-                    { id: "outro", label: "마무리" },
-                  ]}
-                />
-              ) : null}
-              {mode === "script" && !reportScriptOnly ? (
-                <SegmentedTabs
-                  ariaLabel="프레임 미리보기"
-                  className="shrink-0"
-                  value={frameMode}
-                  onChange={setFrameMode}
-                  items={[
-                    { id: "title", label: "제목 프레임" },
-                    { id: "body", label: "자막 프레임" },
-                  ]}
-                />
-              ) : null}
-              <div
-                className={`grid min-h-0 w-full flex-1 gap-5 lg:grid-rows-[minmax(0,1fr)] ${
-                  reportScriptOnly
-                    ? "lg:grid-cols-1"
-                    : "lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]"
-                }`}
-              >
-              {!reportScriptOnly ? (
-              <div className="flex w-full min-h-0 flex-col gap-4 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
-                {mode === "script" ? (
-                  <NewsFramePreview
-                    mode={frameMode}
-                    title={titleDraft}
-                    subtitle={
-                      selectedSubtitle?.text ||
-                      "아나운서 음성에 맞춰 자막이 표시됩니다"
-                    }
-                    sourceCredit={
-                      frameMode === "body" ? commonSourceCreditText : ""
-                    }
-                    settings={settings}
-                    zoom={bodyPreviewCrop.zoom}
-                    className="w-full"
-                    backgroundContent={
-                      frameMode === "title" && introVideoUrl ? (
-                        <PositionedMediaVideo
-                          videoRef={scriptFrameVideoRef}
-                          src={introVideoUrl}
-                          fit={introLayout.introStillFit}
-                          positionX={introLayout.introStillX}
-                          positionY={introLayout.introStillY}
-                          mediaStyle={introMotionPreviewStyle}
-                          muted
-                          playsInline
-                          preload="metadata"
-                          onLoadedMetadata={(event) => {
-                            event.currentTarget.currentTime = introCursor
-                          }}
-                        />
-                      ) : undefined
-                    }
-                    videoContent={
-                      frameMode === "body" && scriptBodyVideoUrl ? (
-                        <BodySourceVideo
-                          videoRef={scriptFrameVideoRef}
-                          src={scriptBodyVideoUrl}
-                          zoom={previewFootageZoom(
-                            previewDirectionScene,
-                            bodyPreviewCrop.zoom
-                          )}
-                          fit={previewSceneLayout?.fit ?? "cover"}
-                          cropX={bodyPreviewCrop.x}
-                          cropY={bodyPreviewCrop.y}
-                          currentTime={Math.max(
-                            0,
-                            previewSceneLayout?.sourceStart ??
-                              previewDirectionScene?.sourceStart ??
-                              0
-                          )}
-                        />
-                      ) : undefined
-                    }
-                  />
-                ) : mode === "direction" && directionSourceVideoUrl ? (
-                  <div className="flex flex-col gap-3">
-                    <NewsFramePreview
-                      mode="body"
-                      title={titleDraft}
-                      subtitle={
-                        project.subtitles.find(
-                          (cue) => cue.sceneId === previewContentScene?.id
-                        )?.text ||
-                        selectedSubtitle?.text ||
-                        "본문 자막 미리보기"
-                      }
-                      sourceCredit={commonSourceCreditText}
-                      settings={settings}
-                      zoom={bodyPreviewCrop.zoom}
-                      className="w-full"
-                      videoContent={
-                        <DirectionBodySourceVideo
-                          key={`${directionSourceVideoUrl}-${previewDirectionScene?.id ?? "scene"}`}
-                          videoRef={directionVideoRef}
-                          src={directionSourceVideoUrl}
-                          zoom={previewFootageZoom(
-                            previewDirectionScene,
-                            bodyPreviewCrop.zoom
-                          )}
-                          fit={previewSceneLayout?.fit ?? "cover"}
-                          cropX={bodyPreviewCrop.x}
-                          cropY={bodyPreviewCrop.y}
-                          sourceStart={Math.max(
-                            0,
-                            previewSceneLayout?.sourceStart ??
-                              previewDirectionScene?.sourceStart ??
-                              0
-                          )}
-                          sourceEnd={
-                            previewSceneLayout?.sourceEnd ??
-                            previewDirectionScene?.sourceEnd
-                          }
-                          onDuration={(duration) =>
-                            setDirectionSourceMetadata({
-                              url: directionSourceVideoUrl,
-                              duration,
-                            })
-                          }
-                          onPlayingChange={setDirectionPlaying}
-                          onTimeChange={setDirectionCurrentTime}
-                        />
-                      }
-                    />
-                    <div className="flex items-center gap-3 rounded-xl border border-separator bg-default p-3">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        aria-label={
-                          directionPlaying
-                            ? "미리보기 일시정지"
-                            : "미리보기 재생"
-                        }
-                        onPress={() => {
-                          const video = directionVideoRef.current
-                          if (!video) return
-                          if (video.paused) {
-                            void video.play().catch(() => undefined)
-                          } else {
-                            video.pause()
-                          }
-                        }}
-                      >
-                        {directionPlaying ? (
-                          <Pause className="size-4" />
-                        ) : (
-                          <Play className="size-4" />
-                        )}
-                      </Button>
-                      <input
-                        aria-label="화면 미리보기 재생 위치"
-                        type="range"
-                        min={0}
-                        max={Math.max(0.1, directionSourceMetadata.duration)}
-                        step={0.1}
-                        value={Math.min(
-                          directionCurrentTime,
-                          Math.max(0.1, directionSourceMetadata.duration)
-                        )}
-                        onChange={(event) => {
-                          const value = Number(event.currentTarget.value)
-                          if (directionVideoRef.current) {
-                            directionVideoRef.current.currentTime = value
-                          }
-                          setDirectionCurrentTime(value)
-                        }}
-                        className="min-w-0 flex-1"
+                      <LoadingButtonLabel
+                        loading={busyMatches(busy, "reselect")}
+                        label="전체 재작성"
+                        loadingLabel="재작성 중"
+                        progress={busyProgress}
                       />
-                      <span className="shrink-0 text-xs text-muted tabular-nums">
-                        {time(directionCurrentTime)}
-                      </span>
-                    </div>
-                  </div>
-                ) : mode === "final" || showPartPreview ? (
-                  renderedVideoUrl ? (
-                    <video
-                      ref={renderedVideoRef}
-                      // 서명 변경(내용 수정)으로 플레이어를 리마운트하지 않는다. URL이 바뀔 때만 교체.
-                      key={`${renderedVideoUrl}-${compositionPane}`}
-                      src={renderedVideoUrl}
-                      controls
-                      playsInline
-                      className="aspect-[9/16] w-full rounded-2xl bg-black shadow-xl"
-                    />
-                  ) : mode === "preview" && directionSourceVideoUrl ? (
+                    </Button>
+                  ) : null}
+                </div>
+                {sourcePanelOpen ? commonSourceCreditField : null}
+                {audioPanelOpen ? audioSettingsCard : null}
+              </div>
+            ) : null}
+            {mode === "preview" ? (
+              <SegmentedTabs
+                ariaLabel="미리보기 구간"
+                className="shrink-0"
+                value={compositionPane}
+                onChange={setCompositionPane}
+                items={[
+                  { id: "all", label: "전체" },
+                  { id: "intro", label: "인트로" },
+                  { id: "lead", label: "서두" },
+                  { id: "body", label: "본문" },
+                  { id: "outro", label: "마무리" },
+                ]}
+              />
+            ) : null}
+            {mode === "script" && !reportScriptOnly ? (
+              <SegmentedTabs
+                ariaLabel="프레임 미리보기"
+                className="shrink-0"
+                value={frameMode}
+                onChange={setFrameMode}
+                items={[
+                  { id: "title", label: "제목 프레임" },
+                  { id: "body", label: "자막 프레임" },
+                ]}
+              />
+            ) : null}
+            <div
+              className={`grid min-h-0 w-full flex-1 gap-5 lg:grid-rows-[minmax(0,1fr)] ${
+                reportScriptOnly
+                  ? "lg:grid-cols-1"
+                  : "lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]"
+              }`}
+            >
+              {!reportScriptOnly ? (
+                <div className="flex min-h-0 w-full flex-col gap-4 lg:overflow-y-auto lg:overscroll-contain lg:pr-1">
+                  {mode === "script" ? (
                     <NewsFramePreview
-                      mode={compositionPane === "intro" ? "title" : "body"}
+                      mode={frameMode}
                       title={titleDraft}
                       subtitle={
                         selectedSubtitle?.text ||
-                        (busy.includes(":preview") || busy === "preview"
-                          ? "초안 영상 만드는 중…"
-                          : "초안이 없으면 원본 화면을 보여 줍니다")
+                        "아나운서 음성에 맞춰 자막이 표시됩니다"
                       }
                       sourceCredit={
-                        compositionPane === "intro"
-                          ? ""
-                          : commonSourceCreditText
+                        frameMode === "body" ? commonSourceCreditText : ""
                       }
                       settings={settings}
                       zoom={bodyPreviewCrop.zoom}
                       className="w-full"
                       backgroundContent={
-                        compositionPane === "intro" && introVideoUrl ? (
+                        frameMode === "title" && introVideoUrl ? (
                           <PositionedMediaVideo
-                            videoRef={sourceVideoRef}
+                            videoRef={scriptFrameVideoRef}
                             src={introVideoUrl}
                             fit={introLayout.introStillFit}
                             positionX={introLayout.introStillX}
@@ -2940,10 +2825,10 @@ export function NewsClipReviewStep({
                         ) : undefined
                       }
                       videoContent={
-                        compositionPane !== "intro" ? (
+                        frameMode === "body" && scriptBodyVideoUrl ? (
                           <BodySourceVideo
                             videoRef={scriptFrameVideoRef}
-                            src={directionSourceVideoUrl}
+                            src={scriptBodyVideoUrl}
                             zoom={previewFootageZoom(
                               previewDirectionScene,
                               bodyPreviewCrop.zoom
@@ -2961,96 +2846,262 @@ export function NewsClipReviewStep({
                         ) : undefined
                       }
                     />
-                  ) : (
-                    <div className="flex aspect-[9/16] w-full items-center justify-center rounded-2xl border border-dashed border-separator bg-default px-6 text-center text-sm text-muted">
-                      {mode === "preview"
-                        ? `${partPreviewLabel} 초안이 준비되면 여기에 재생됩니다.`
-                        : "초안 영상이 준비되면 여기에 재생됩니다."}
-                    </div>
-                  )
-                ) : (
-                  <NewsFramePreview
-                    mode={frameMode}
-                    title={titleDraft}
-                    subtitle={
-                      selectedSubtitle?.text ||
-                      "아나운서 음성에 맞춰 자막이 표시됩니다"
-                    }
-                    sourceCredit={
-                      frameMode === "body" ? commonSourceCreditText : ""
-                    }
-                    settings={settings}
-                    zoom={bodyPreviewCrop.zoom}
-                    className="w-full"
-                      backgroundContent={
-                      frameMode === "title" && introVideoUrl ? (
-                        <PositionedMediaVideo
-                          videoRef={sourceVideoRef}
-                          src={introVideoUrl}
-                          fit={introLayout.introStillFit}
-                          positionX={introLayout.introStillX}
-                          positionY={introLayout.introStillY}
-                          mediaStyle={introMotionPreviewStyle}
-                          muted
-                          playsInline
-                          preload="metadata"
-                          onLoadedMetadata={(event) => {
-                            event.currentTarget.currentTime = introCursor
+                  ) : mode === "direction" && directionSourceVideoUrl ? (
+                    <div className="flex flex-col gap-3">
+                      <NewsFramePreview
+                        mode="body"
+                        title={titleDraft}
+                        subtitle={
+                          project.subtitles.find(
+                            (cue) => cue.sceneId === previewContentScene?.id
+                          )?.text ||
+                          selectedSubtitle?.text ||
+                          "본문 자막 미리보기"
+                        }
+                        sourceCredit={commonSourceCreditText}
+                        settings={settings}
+                        zoom={bodyPreviewCrop.zoom}
+                        className="w-full"
+                        videoContent={
+                          <DirectionBodySourceVideo
+                            key={`${directionSourceVideoUrl}-${previewDirectionScene?.id ?? "scene"}`}
+                            videoRef={directionVideoRef}
+                            src={directionSourceVideoUrl}
+                            zoom={previewFootageZoom(
+                              previewDirectionScene,
+                              bodyPreviewCrop.zoom
+                            )}
+                            fit={previewSceneLayout?.fit ?? "cover"}
+                            cropX={bodyPreviewCrop.x}
+                            cropY={bodyPreviewCrop.y}
+                            sourceStart={Math.max(
+                              0,
+                              previewSceneLayout?.sourceStart ??
+                                previewDirectionScene?.sourceStart ??
+                                0
+                            )}
+                            sourceEnd={
+                              previewSceneLayout?.sourceEnd ??
+                              previewDirectionScene?.sourceEnd
+                            }
+                            onDuration={(duration) =>
+                              setDirectionSourceMetadata({
+                                url: directionSourceVideoUrl,
+                                duration,
+                              })
+                            }
+                            onPlayingChange={setDirectionPlaying}
+                            onTimeChange={setDirectionCurrentTime}
+                          />
+                        }
+                      />
+                      <div className="flex items-center gap-3 rounded-xl border border-separator bg-default p-3">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-label={
+                            directionPlaying
+                              ? "미리보기 일시정지"
+                              : "미리보기 재생"
+                          }
+                          onPress={() => {
+                            const video = directionVideoRef.current
+                            if (!video) return
+                            if (video.paused) {
+                              void video.play().catch(() => undefined)
+                            } else {
+                              video.pause()
+                            }
                           }}
-                        />
-                      ) : undefined
-                    }
-                    videoContent={
-                      frameMode === "body" && scriptBodyVideoUrl ? (
-                        <BodySourceVideo
-                          videoRef={scriptFrameVideoRef}
-                          src={scriptBodyVideoUrl}
-                          zoom={previewFootageZoom(
-                            previewDirectionScene,
-                            bodyPreviewCrop.zoom
+                        >
+                          {directionPlaying ? (
+                            <Pause className="size-4" />
+                          ) : (
+                            <Play className="size-4" />
                           )}
-                          fit={previewSceneLayout?.fit ?? "cover"}
-                          cropX={bodyPreviewCrop.x}
-                          cropY={bodyPreviewCrop.y}
-                          currentTime={Math.max(
-                            0,
-                            previewSceneLayout?.sourceStart ??
-                              previewDirectionScene?.sourceStart ??
-                              0
+                        </Button>
+                        <input
+                          aria-label="화면 미리보기 재생 위치"
+                          type="range"
+                          min={0}
+                          max={Math.max(0.1, directionSourceMetadata.duration)}
+                          step={0.1}
+                          value={Math.min(
+                            directionCurrentTime,
+                            Math.max(0.1, directionSourceMetadata.duration)
                           )}
+                          onChange={(event) => {
+                            const value = Number(event.currentTarget.value)
+                            if (directionVideoRef.current) {
+                              directionVideoRef.current.currentTime = value
+                            }
+                            setDirectionCurrentTime(value)
+                          }}
+                          className="min-w-0 flex-1"
                         />
-                      ) : undefined
-                    }
-                  />
-                )}
-                <div className="rounded-xl border border-separator bg-default p-3 text-sm">
-                  {mode === "final" ? (
-                    <span>
-                      {finalStageLabel} · 예상 길이{" "}
-                      {project.outputDurationSeconds.toFixed(1)}초
-                    </span>
-                  ) : mode === "preview" ? (
-                    <span>
-                      {partPreviewLabel} 미리보기
-                      {compositionPane !== "intro" && compositionPane !== "all"
-                        ? ` · 자막 ${paneCaptions.length}칸`
-                        : ""}
-                      {project.subtitleTimingsLocked ? " · 구간 잠김" : ""}
-                    </span>
+                        <span className="shrink-0 text-xs text-muted tabular-nums">
+                          {time(directionCurrentTime)}
+                        </span>
+                      </div>
+                    </div>
+                  ) : mode === "final" || showPartPreview ? (
+                    renderedVideoUrl ? (
+                      <video
+                        ref={renderedVideoRef}
+                        // 서명 변경(내용 수정)으로 플레이어를 리마운트하지 않는다. URL이 바뀔 때만 교체.
+                        key={`${renderedVideoUrl}-${compositionPane}`}
+                        src={renderedVideoUrl}
+                        controls
+                        playsInline
+                        className="aspect-[9/16] w-full rounded-2xl bg-black shadow-xl"
+                      />
+                    ) : mode === "preview" && directionSourceVideoUrl ? (
+                      <NewsFramePreview
+                        mode={compositionPane === "intro" ? "title" : "body"}
+                        title={titleDraft}
+                        subtitle={
+                          selectedSubtitle?.text ||
+                          (busy.includes(":preview") || busy === "preview"
+                            ? "초안 영상 만드는 중…"
+                            : "초안이 없으면 원본 화면을 보여 줍니다")
+                        }
+                        sourceCredit={
+                          compositionPane === "intro"
+                            ? ""
+                            : commonSourceCreditText
+                        }
+                        settings={settings}
+                        zoom={bodyPreviewCrop.zoom}
+                        className="w-full"
+                        backgroundContent={
+                          compositionPane === "intro" && introVideoUrl ? (
+                            <PositionedMediaVideo
+                              videoRef={sourceVideoRef}
+                              src={introVideoUrl}
+                              fit={introLayout.introStillFit}
+                              positionX={introLayout.introStillX}
+                              positionY={introLayout.introStillY}
+                              mediaStyle={introMotionPreviewStyle}
+                              muted
+                              playsInline
+                              preload="metadata"
+                              onLoadedMetadata={(event) => {
+                                event.currentTarget.currentTime = introCursor
+                              }}
+                            />
+                          ) : undefined
+                        }
+                        videoContent={
+                          compositionPane !== "intro" ? (
+                            <BodySourceVideo
+                              videoRef={scriptFrameVideoRef}
+                              src={directionSourceVideoUrl}
+                              zoom={previewFootageZoom(
+                                previewDirectionScene,
+                                bodyPreviewCrop.zoom
+                              )}
+                              fit={previewSceneLayout?.fit ?? "cover"}
+                              cropX={bodyPreviewCrop.x}
+                              cropY={bodyPreviewCrop.y}
+                              currentTime={Math.max(
+                                0,
+                                previewSceneLayout?.sourceStart ??
+                                  previewDirectionScene?.sourceStart ??
+                                  0
+                              )}
+                            />
+                          ) : undefined
+                        }
+                      />
+                    ) : (
+                      <div className="flex aspect-[9/16] w-full items-center justify-center rounded-2xl border border-dashed border-separator bg-default px-6 text-center text-sm text-muted">
+                        {mode === "preview"
+                          ? `${partPreviewLabel} 초안이 준비되면 여기에 재생됩니다.`
+                          : "초안 영상이 준비되면 여기에 재생됩니다."}
+                      </div>
+                    )
                   ) : (
-                    <span>
-                      예상 길이 {project.outputDurationSeconds.toFixed(1)}초
-                    </span>
+                    <NewsFramePreview
+                      mode={frameMode}
+                      title={titleDraft}
+                      subtitle={
+                        selectedSubtitle?.text ||
+                        "아나운서 음성에 맞춰 자막이 표시됩니다"
+                      }
+                      sourceCredit={
+                        frameMode === "body" ? commonSourceCreditText : ""
+                      }
+                      settings={settings}
+                      zoom={bodyPreviewCrop.zoom}
+                      className="w-full"
+                      backgroundContent={
+                        frameMode === "title" && introVideoUrl ? (
+                          <PositionedMediaVideo
+                            videoRef={sourceVideoRef}
+                            src={introVideoUrl}
+                            fit={introLayout.introStillFit}
+                            positionX={introLayout.introStillX}
+                            positionY={introLayout.introStillY}
+                            mediaStyle={introMotionPreviewStyle}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            onLoadedMetadata={(event) => {
+                              event.currentTarget.currentTime = introCursor
+                            }}
+                          />
+                        ) : undefined
+                      }
+                      videoContent={
+                        frameMode === "body" && scriptBodyVideoUrl ? (
+                          <BodySourceVideo
+                            videoRef={scriptFrameVideoRef}
+                            src={scriptBodyVideoUrl}
+                            zoom={previewFootageZoom(
+                              previewDirectionScene,
+                              bodyPreviewCrop.zoom
+                            )}
+                            fit={previewSceneLayout?.fit ?? "cover"}
+                            cropX={bodyPreviewCrop.x}
+                            cropY={bodyPreviewCrop.y}
+                            currentTime={Math.max(
+                              0,
+                              previewSceneLayout?.sourceStart ??
+                                previewDirectionScene?.sourceStart ??
+                                0
+                            )}
+                          />
+                        ) : undefined
+                      }
+                    />
                   )}
+                  <div className="rounded-xl border border-separator bg-default p-3 text-sm">
+                    {mode === "final" ? (
+                      <span>
+                        {finalStageLabel} · 예상 길이{" "}
+                        {project.outputDurationSeconds.toFixed(1)}초
+                      </span>
+                    ) : mode === "preview" ? (
+                      <span>
+                        {partPreviewLabel} 미리보기
+                        {compositionPane !== "intro" &&
+                        compositionPane !== "all"
+                          ? ` · 자막 ${paneCaptions.length}칸`
+                          : ""}
+                        {project.subtitleTimingsLocked ? " · 구간 잠김" : ""}
+                      </span>
+                    ) : (
+                      <span>
+                        예상 길이 {project.outputDurationSeconds.toFixed(1)}초
+                      </span>
+                    )}
+                  </div>
                 </div>
-              </div>
               ) : null}
 
               <div
                 className={`flex min-h-0 min-w-0 flex-col gap-4 pb-20 lg:overflow-y-auto lg:overscroll-contain ${
-                  reportScriptOnly
-                    ? "mx-auto w-full max-w-4xl"
-                    : "lg:pl-1"
+                  reportScriptOnly ? "mx-auto w-full max-w-4xl" : "lg:pl-1"
                 }`}
               >
                 {mode !== "preview" && editorTabs.length > 1 ? (
@@ -3263,148 +3314,206 @@ export function NewsClipReviewStep({
                           </section>
 
                           {project.productionMode === "buildup2" ? (
-                          <section className="flex flex-col gap-3 border-t border-separator pt-5">
-                            <div className={sectionHeaderClass}>
-                              <h3 className={sectionTitleClass}>본문</h3>
-                              {bodyReviewBounds ? (
-                                <span className="text-xs text-muted tabular-nums">
-                                  {time(bodyReviewBounds.start)} →{" "}
-                                  {time(bodyReviewBounds.end)}
-                                </span>
-                              ) : null}
-                            </div>
-                            <div className="flex flex-col divide-y divide-separator">
-                              {visibleBodyReviewSegments.length ? (
-                                visibleBodyReviewSegments.map(
-                                  (segment, index) => (
-                                    <ReviewTranscriptSegment
-                                      key={`${segment.id}:${segment.start}:${segment.text}`}
-                                      segment={segment}
-                                      disabled={busy !== ""}
-                                      canDelete={
-                                        visibleBodyReviewSegments.length > 1
-                                      }
-                                      canMergeNext={
-                                        index <
-                                          visibleBodyReviewSegments.length -
-                                            1 &&
-                                        !sourceRangeOverlapsManualCut(
-                                          transcriptSegmentSpeechBounds(segment)
-                                            .end,
-                                          transcriptSegmentSpeechBounds(
-                                            visibleBodyReviewSegments[
-                                              index + 1
-                                            ]!
-                                          ).start,
-                                          activeBodyCuts
-                                        )
-                                      }
-                                      onDelete={() =>
-                                        deleteBodyTranscriptRange(segment)
-                                      }
-                                      onSave={(text) => {
-                                        onProject((current) => ({
-                                          transcript: current.transcript.map(
-                                            (item) =>
-                                              item.id === segment.id
-                                                ? {
-                                                    ...updateTranscriptSegmentText(
-                                                      item,
-                                                      text
-                                                    ),
-                                                    captionBoundaryAfter: true,
-                                                    captionBoundarySource:
-                                                      "manual",
-                                                  }
-                                                : item
-                                          ),
-                                          subtitles: [],
-                                          subtitleTimingsLocked: false,
-                                        }))
-                                        onNote("본문 원문을 저장했습니다.")
-                                      }}
-                                      onMergeNext={() => {
-                                        const nextSegment =
-                                          visibleBodyReviewSegments[index + 1]
-                                        if (!nextSegment) return
-                                        onProject((current) => ({
-                                          transcript:
-                                            mergeTranscriptSegmentWithNext(
-                                              current.transcript,
-                                              segment.id,
-                                              nextSegment.id
-                                            ),
-                                          subtitles: [],
-                                          subtitleTimingsLocked: false,
-                                          renderSignature: "",
-                                        }))
-                                        onNote(
-                                          "다음 원문과 시간 구간을 함께 합쳤습니다."
-                                        )
-                                      }}
-                                    />
-                                  )
-                                )
-                              ) : (
-                                <p className="py-3 text-sm text-muted">
-                                  표시할 본문 구간이 없습니다.
-                                </p>
-                              )}
-                            </div>
-                            {activeBodyCuts.length ? (
-                              <div className="flex flex-col gap-2 border-t border-separator pt-4">
-                                <button
-                                  type="button"
-                                  aria-expanded={deletedBodyCutsOpen}
-                                  className="flex items-center gap-1.5 text-left text-sm font-medium"
-                                  onClick={() =>
-                                    setDeletedBodyCutsOpen((open) => !open)
-                                  }
-                                >
-                                  <ChevronDown
-                                    className={`size-4 shrink-0 text-muted transition-transform ${
-                                      deletedBodyCutsOpen ? "" : "-rotate-90"
-                                    }`}
-                                  />
-                                  <span>삭제된 구간</span>
-                                  <span className="font-normal text-muted tabular-nums">
-                                    {activeBodyCuts.length}
+                            <section className="flex flex-col gap-3 border-t border-separator pt-5">
+                              <div className={sectionHeaderClass}>
+                                <h3 className={sectionTitleClass}>본문</h3>
+                                {bodyReviewBounds ? (
+                                  <span className="text-xs text-muted tabular-nums">
+                                    {time(bodyReviewBounds.start)} →{" "}
+                                    {time(bodyReviewBounds.end)}
                                   </span>
-                                </button>
-                                {deletedBodyCutsOpen
-                                  ? activeBodyCuts.map((range) => (
-                                      <div
-                                        key={range.id}
-                                        className="flex items-center justify-between gap-4 rounded-xl bg-default/50 px-3 py-2"
-                                      >
-                                        <div className="min-w-0">
-                                          <p className="text-xs text-muted tabular-nums">
-                                            {time(range.start)}–
-                                            {time(range.end)}
-                                          </p>
-                                          <p className="truncate text-sm text-muted">
-                                            {transcriptTextInsideRange(
-                                              project.transcript,
-                                              range
-                                            ) || "삭제한 본문 구간"}
-                                          </p>
-                                        </div>
-                                        <Button
-                                          size="sm"
-                                          variant="outline"
-                                          isDisabled={busy !== ""}
-                                          onPress={() =>
-                                            restoreBodyTranscriptRange(range.id)
-                                          }
-                                        >
-                                          복원
-                                        </Button>
-                                      </div>
-                                    ))
-                                  : null}
+                                ) : null}
                               </div>
-                            ) : null}
-                          </section>
+                              <div className="flex flex-col divide-y divide-separator">
+                                {visibleBodyReviewSegments.length ? (
+                                  visibleBodyReviewSegments.map(
+                                    (segment, index) => (
+                                      <ReviewTranscriptSegment
+                                        key={`${segment.id}:${segment.start}:${segment.text}`}
+                                        segment={segment}
+                                        disabled={busy !== ""}
+                                        needsConfirm={Boolean(
+                                          pendingTranscriptConfirmIds[
+                                            segment.id
+                                          ]
+                                        )}
+                                        canDelete={
+                                          visibleBodyReviewSegments.length > 1
+                                        }
+                                        canMergeNext={
+                                          index <
+                                            visibleBodyReviewSegments.length -
+                                              1 &&
+                                          !sourceRangeOverlapsManualCut(
+                                            transcriptSegmentSpeechBounds(
+                                              segment
+                                            ).end,
+                                            transcriptSegmentSpeechBounds(
+                                              visibleBodyReviewSegments[
+                                                index + 1
+                                              ]!
+                                            ).start,
+                                            activeBodyCuts
+                                          )
+                                        }
+                                        canUndoMerge={canUndoTranscriptSegmentMerge(
+                                          segment
+                                        )}
+                                        onDelete={() =>
+                                          deleteBodyTranscriptRange(segment)
+                                        }
+                                        onUndoMerge={() => {
+                                          const restored = segment.mergedFrom
+                                          onProject((current) => ({
+                                            transcript:
+                                              undoTranscriptSegmentMerge(
+                                                current.transcript,
+                                                segment.id
+                                              ),
+                                            subtitles: [],
+                                            subtitleTimingsLocked: false,
+                                            renderSignature: "",
+                                          }))
+                                          setPendingTranscriptConfirmIds(
+                                            (current) => {
+                                              const next = { ...current }
+                                              delete next[segment.id]
+                                              for (const item of restored ??
+                                                []) {
+                                                next[item.id] = true
+                                              }
+                                              return next
+                                            }
+                                          )
+                                          onNote(
+                                            "합치기 전 두 원문 구간으로 되돌렸습니다. 저장을 눌러 확정하세요."
+                                          )
+                                        }}
+                                        onSave={(text) => {
+                                          onProject((current) => ({
+                                            transcript: current.transcript.map(
+                                              (item) =>
+                                                item.id === segment.id
+                                                  ? {
+                                                      ...updateTranscriptSegmentText(
+                                                        item,
+                                                        text
+                                                      ),
+                                                      captionBoundaryAfter: true,
+                                                      captionBoundarySource:
+                                                        "manual",
+                                                    }
+                                                  : item
+                                            ),
+                                            subtitles: [],
+                                            subtitleTimingsLocked: false,
+                                          }))
+                                          setPendingTranscriptConfirmIds(
+                                            (current) => {
+                                              if (!current[segment.id]) {
+                                                return current
+                                              }
+                                              const next = { ...current }
+                                              delete next[segment.id]
+                                              return next
+                                            }
+                                          )
+                                          onNote("본문 원문을 저장했습니다.")
+                                        }}
+                                        onMergeNext={() => {
+                                          const nextSegment =
+                                            visibleBodyReviewSegments[index + 1]
+                                          if (!nextSegment) return
+                                          onProject((current) => ({
+                                            transcript:
+                                              mergeTranscriptSegmentWithNext(
+                                                current.transcript,
+                                                segment.id,
+                                                nextSegment.id
+                                              ),
+                                            subtitles: [],
+                                            subtitleTimingsLocked: false,
+                                            renderSignature: "",
+                                          }))
+                                          setPendingTranscriptConfirmIds(
+                                            (current) => {
+                                              const next = {
+                                                ...current,
+                                                [segment.id]: true as const,
+                                              }
+                                              delete next[nextSegment.id]
+                                              return next
+                                            }
+                                          )
+                                          onNote(
+                                            "다음 원문과 시간 구간을 합쳤습니다. 저장을 눌러 확정하세요."
+                                          )
+                                        }}
+                                      />
+                                    )
+                                  )
+                                ) : (
+                                  <p className="py-3 text-sm text-muted">
+                                    표시할 본문 구간이 없습니다.
+                                  </p>
+                                )}
+                              </div>
+                              {activeBodyCuts.length ? (
+                                <div className="flex flex-col gap-2 border-t border-separator pt-4">
+                                  <button
+                                    type="button"
+                                    aria-expanded={deletedBodyCutsOpen}
+                                    className="flex items-center gap-1.5 text-left text-sm font-medium"
+                                    onClick={() =>
+                                      setDeletedBodyCutsOpen((open) => !open)
+                                    }
+                                  >
+                                    <ChevronDown
+                                      className={`size-4 shrink-0 text-muted transition-transform ${
+                                        deletedBodyCutsOpen ? "" : "-rotate-90"
+                                      }`}
+                                    />
+                                    <span>삭제된 구간</span>
+                                    <span className="font-normal text-muted tabular-nums">
+                                      {activeBodyCuts.length}
+                                    </span>
+                                  </button>
+                                  {deletedBodyCutsOpen
+                                    ? activeBodyCuts.map((range) => (
+                                        <div
+                                          key={range.id}
+                                          className="flex items-center justify-between gap-4 rounded-xl bg-default/50 px-3 py-2"
+                                        >
+                                          <div className="min-w-0">
+                                            <p className="text-xs text-muted tabular-nums">
+                                              {time(range.start)}–
+                                              {time(range.end)}
+                                            </p>
+                                            <p className="truncate text-sm text-muted">
+                                              {transcriptTextInsideRange(
+                                                project.transcript,
+                                                range
+                                              ) || "삭제한 본문 구간"}
+                                            </p>
+                                          </div>
+                                          <Button
+                                            size="sm"
+                                            variant="outline"
+                                            isDisabled={busy !== ""}
+                                            onPress={() =>
+                                              restoreBodyTranscriptRange(
+                                                range.id
+                                              )
+                                            }
+                                          >
+                                            복원
+                                          </Button>
+                                        </div>
+                                      ))
+                                    : null}
+                                </div>
+                              ) : null}
+                            </section>
                           ) : (
                             <section className="flex flex-col gap-3 border-t border-separator pt-5">
                               <div className={sectionHeaderClass}>
@@ -3474,8 +3583,8 @@ export function NewsClipReviewStep({
                                 className={`${field} [field-sizing:content] min-h-48 resize-none overflow-hidden`}
                               />
                               <p className="text-xs leading-5 text-muted">
-                                확정한 대본 전체를 TTS로 읽고, 자료 영상은
-                                무음 화면으로만 사용합니다.
+                                확정한 대본 전체를 TTS로 읽고, 자료 영상은 무음
+                                화면으로만 사용합니다.
                               </p>
                             </section>
                           )}
@@ -4046,11 +4155,9 @@ export function NewsClipReviewStep({
                                   partScenes.findIndex(
                                     (item) => item.id === visualScene.id
                                   )
-                                let visualGroupEndIndex =
-                                  visualGroupStartIndex
+                                let visualGroupEndIndex = visualGroupStartIndex
                                 while (
-                                  visualGroupEndIndex + 1 <
-                                    partScenes.length &&
+                                  visualGroupEndIndex + 1 < partScenes.length &&
                                   partScenes[visualGroupEndIndex + 1]
                                     ?.continuePreviousVisual === true
                                 ) {
@@ -4465,7 +4572,9 @@ export function NewsClipReviewStep({
                                                   cue.sceneId === scene.id
                                               )?.text || "본문 자막 미리보기"
                                             }
-                                            sourceCredit={commonSourceCreditText}
+                                            sourceCredit={
+                                              commonSourceCreditText
+                                            }
                                             muted={
                                               project.productionMode ===
                                               "report"
@@ -4763,12 +4872,26 @@ export function NewsClipReviewStep({
                                         size="sm"
                                         variant="outline"
                                         isDisabled={
+                                          Boolean(busy) ||
+                                          Boolean(
+                                            pendingSubtitleConfirmIds[
+                                              caption.id
+                                            ]
+                                          ) ||
                                           !canMergeSubtitleCueWithNext(
                                             project.subtitles,
                                             caption.id
                                           )
                                         }
                                         onPress={() => {
+                                          const nextCaption =
+                                            project.subtitles[
+                                              project.subtitles.findIndex(
+                                                (item) => item.id === caption.id
+                                              ) + 1
+                                            ]
+                                          editingReportScriptRef.current = false
+                                          scriptReviewDirtyRef.current = false
                                           onProject((current) => {
                                             const subtitles =
                                               mergeSubtitleCueWithNext(
@@ -4781,8 +4904,20 @@ export function NewsClipReviewStep({
                                               subtitles
                                             )
                                           })
+                                          setPendingSubtitleConfirmIds(
+                                            (current) => {
+                                              const next = {
+                                                ...current,
+                                                [caption.id]: true as const,
+                                              }
+                                              if (nextCaption) {
+                                                delete next[nextCaption.id]
+                                              }
+                                              return next
+                                            }
+                                          )
                                           onNote(
-                                            `자막 ${index + 1}과 다음 자막을 합쳤습니다.`
+                                            `자막 ${index + 1}과 다음 자막을 합쳤습니다. 저장을 눌러 확정하세요.`
                                           )
                                         }}
                                       >
@@ -4794,6 +4929,9 @@ export function NewsClipReviewStep({
                                           variant="outline"
                                           isDisabled={Boolean(busy)}
                                           onPress={() => {
+                                            const restored = caption.mergedFrom
+                                            editingReportScriptRef.current = false
+                                            scriptReviewDirtyRef.current = false
                                             onProject((current) => {
                                               const subtitles =
                                                 undoSubtitleCueMerge(
@@ -4805,8 +4943,28 @@ export function NewsClipReviewStep({
                                                 subtitles
                                               )
                                             })
+                                            setPendingSubtitleConfirmIds(
+                                              (current) => {
+                                                const next = { ...current }
+                                                delete next[caption.id]
+                                                for (const cue of restored ??
+                                                  []) {
+                                                  next[cue.id] = true
+                                                }
+                                                return next
+                                              }
+                                            )
+                                            setSubtitleFieldNonce((current) => {
+                                              const next = { ...current }
+                                              for (const cue of restored ??
+                                                []) {
+                                                next[cue.id] =
+                                                  (next[cue.id] ?? 0) + 1
+                                              }
+                                              return next
+                                            })
                                             onNote(
-                                              "합치기 전 두 자막으로 되돌렸습니다."
+                                              "합치기 전 두 자막으로 되돌렸습니다. 저장을 눌러 확정하세요."
                                             )
                                           }}
                                         >
@@ -4816,8 +4974,13 @@ export function NewsClipReviewStep({
                                       <Button
                                         size="sm"
                                         variant="outline"
-                                        isDisabled={!caption.edited}
+                                        isDisabled={
+                                          !caption.edited &&
+                                          !pendingSubtitleConfirmIds[caption.id]
+                                        }
                                         onPress={() => {
+                                          editingReportScriptRef.current = false
+                                          scriptReviewDirtyRef.current = false
                                           onProject((current) => {
                                             const subtitles =
                                               resetEditedSubtitleCue(
@@ -4829,12 +4992,61 @@ export function NewsClipReviewStep({
                                               subtitles
                                             )
                                           })
+                                          setPendingSubtitleConfirmIds(
+                                            (current) => {
+                                              if (!current[caption.id]) {
+                                                return current
+                                              }
+                                              const next = { ...current }
+                                              delete next[caption.id]
+                                              return next
+                                            }
+                                          )
+                                          setSubtitleFieldNonce((current) => ({
+                                            ...current,
+                                            [caption.id]:
+                                              (current[caption.id] ?? 0) + 1,
+                                          }))
+                                          setSubtitleFieldSaveStates(
+                                            (current) => ({
+                                              ...current,
+                                              [caption.id]: {
+                                                dirty: false,
+                                                valid: false,
+                                              },
+                                            })
+                                          )
                                           onNote(
                                             "자막을 초기화했습니다. 다시 만들면 자동 자막과 타이밍이 적용됩니다."
                                           )
                                         }}
                                       >
                                         초기화
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        isDisabled={
+                                          Boolean(busy) ||
+                                          !(
+                                            subtitleFieldSaveStates[caption.id]
+                                              ?.valid ||
+                                            Boolean(
+                                              pendingSubtitleConfirmIds[
+                                                caption.id
+                                              ]
+                                            )
+                                          )
+                                        }
+                                        onPress={() => {
+                                          const form = document.getElementById(
+                                            `subtitle-edit-${caption.id}`
+                                          )
+                                          if (form instanceof HTMLFormElement) {
+                                            form.requestSubmit()
+                                          }
+                                        }}
+                                      >
+                                        저장
                                       </Button>
                                     </div>
                                   </div>
@@ -4843,15 +5055,37 @@ export function NewsClipReviewStep({
                                     className="border-b border-separator"
                                   />
                                   <SubtitleLineFields
+                                    key={`${caption.id}:${subtitleFieldNonce[caption.id] ?? 0}:${caption.text}:${caption.emphasis.join(",")}`}
+                                    formId={`subtitle-edit-${caption.id}`}
                                     value={caption.text}
                                     emphasis={caption.emphasis}
                                     characterLimit={subtitleLineCharacterLimit(
                                       settings.bodySubtitleText
                                     )}
+                                    needsConfirm={Boolean(
+                                      pendingSubtitleConfirmIds[caption.id]
+                                    )}
                                     onFocus={() =>
                                       setSelectedSubtitleId(caption.id)
                                     }
+                                    onSaveStateChange={(nextState) => {
+                                      setSubtitleFieldSaveStates((current) => {
+                                        const previous = current[caption.id]
+                                        if (
+                                          previous?.dirty === nextState.dirty &&
+                                          previous.valid === nextState.valid
+                                        ) {
+                                          return current
+                                        }
+                                        return {
+                                          ...current,
+                                          [caption.id]: nextState,
+                                        }
+                                      })
+                                    }}
                                     onCommit={(text, emphasis) => {
+                                      editingReportScriptRef.current = false
+                                      scriptReviewDirtyRef.current = false
                                       onProject((current) => {
                                         const withText =
                                           updateEditedSubtitleCue(
@@ -4879,6 +5113,16 @@ export function NewsClipReviewStep({
                                           subtitles
                                         )
                                       })
+                                      setPendingSubtitleConfirmIds(
+                                        (current) => {
+                                          if (!current[caption.id]) {
+                                            return current
+                                          }
+                                          const next = { ...current }
+                                          delete next[caption.id]
+                                          return next
+                                        }
+                                      )
                                       onNote(
                                         `자막 ${index + 1}을 저장했습니다. 다시 만들면 영상에 반영됩니다.`
                                       )
@@ -5053,12 +5297,10 @@ export function NewsClipReviewStep({
                     </Button>
                   </div>
                 ) : null}
-
-              </div>
               </div>
             </div>
           </div>
-
+        </div>
       </div>
       <Modal isOpen={supplementOpen} onOpenChange={setSupplementOpen}>
         <Modal.Backdrop isDismissable>
@@ -5159,17 +5401,23 @@ function transcriptTextInsideRange(
 function ReviewTranscriptSegment({
   segment,
   disabled,
+  needsConfirm = false,
   canDelete,
   canMergeNext,
+  canUndoMerge,
   onDelete,
+  onUndoMerge,
   onSave,
   onMergeNext,
 }: {
   segment: TranscriptSegment
   disabled: boolean
+  needsConfirm?: boolean
   canDelete: boolean
   canMergeNext: boolean
+  canUndoMerge: boolean
   onDelete: () => void
+  onUndoMerge: () => void
   onSave: (text: string) => void
   onMergeNext: () => void
 }) {
@@ -5177,6 +5425,7 @@ function ReviewTranscriptSegment({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const normalized = draft.replace(/\s+/g, " ").trim()
   const changed = Boolean(normalized) && normalized !== segment.text
+  const dirty = changed || needsConfirm
 
   useLayoutEffect(() => {
     resizeTextareaToContent(textareaRef.current)
@@ -5198,10 +5447,15 @@ function ReviewTranscriptSegment({
           className={`${field} min-h-11 resize-none overflow-hidden leading-6`}
         />
         <div className="flex justify-end gap-2">
+          {dirty ? (
+            <span className="mr-auto self-center text-xs text-warning">
+              저장 전
+            </span>
+          ) : null}
           <Button
             size="sm"
             variant="outline"
-            isDisabled={disabled || changed || !canDelete}
+            isDisabled={disabled || dirty || !canDelete}
             onPress={onDelete}
           >
             구간 삭제
@@ -5210,16 +5464,26 @@ function ReviewTranscriptSegment({
             <Button
               size="sm"
               variant="outline"
-              isDisabled={disabled || changed}
+              isDisabled={disabled || dirty}
               onPress={onMergeNext}
             >
               다음 구간과 합치기
             </Button>
           ) : null}
+          {canUndoMerge ? (
+            <Button
+              size="sm"
+              variant="outline"
+              isDisabled={disabled || changed}
+              onPress={onUndoMerge}
+            >
+              합치기 취소
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="outline"
-            isDisabled={disabled || !changed}
+            isDisabled={disabled || !dirty || !normalized}
             onPress={() => onSave(normalized)}
           >
             저장
@@ -5231,23 +5495,28 @@ function ReviewTranscriptSegment({
 }
 
 function SubtitleLineFields({
+  formId,
   value,
   emphasis,
   characterLimit,
+  needsConfirm = false,
   onFocus,
+  onSaveStateChange,
   onCommit,
 }: {
+  formId: string
   value: string
   emphasis: string[]
   characterLimit: number
+  needsConfirm?: boolean
   onFocus: () => void
+  onSaveStateChange: (state: { dirty: boolean; valid: boolean }) => void
   onCommit: (value: string, emphasis: string[]) => void
 }) {
   const [draft, setDraft] = useState<[string, string]>(() =>
     splitSubtitleLines(value)
   )
   const [emphasisDraft, setEmphasisDraft] = useState(() => emphasis.join(", "))
-  const editingRef = useRef(false)
   const safeLimit = Math.max(1, characterLimit)
   const firstLineLength = subtitleCharacterCount(draft[0])
   const secondLineLength = subtitleCharacterCount(draft[1])
@@ -5260,42 +5529,53 @@ function SubtitleLineFields({
     .map((word) => word.trim())
     .filter(Boolean)
   const savedEmphasis = emphasis.map((word) => word.trim()).filter(Boolean)
-  const dirty =
-    committedText !== savedText ||
-    committedEmphasis.join("\n") !== savedEmphasis.join("\n")
-
-  useEffect(() => {
-    if (editingRef.current) return
-    setDraft(splitSubtitleLines(value))
-    setEmphasisDraft(emphasis.join(", "))
-  }, [emphasis, value])
-
+  function saveStateFor(
+    nextDraft: [string, string],
+    nextEmphasisDraft: string
+  ) {
+    const nextText = commitSubtitleLines(nextDraft[0], nextDraft[1])
+    const nextEmphasis = nextEmphasisDraft
+      .split(",")
+      .map((word) => word.trim())
+      .filter(Boolean)
+    const textDirty =
+      nextText !== savedText ||
+      nextEmphasis.join("\n") !== savedEmphasis.join("\n")
+    const dirty = textDirty || needsConfirm
+    const widthValid =
+      subtitleCharacterCount(nextDraft[0]) <= safeLimit &&
+      subtitleCharacterCount(nextDraft[1]) <= safeLimit
+    return {
+      dirty,
+      valid: dirty && Boolean(nextText) && (needsConfirm || widthValid),
+    }
+  }
+  const { dirty, valid } = saveStateFor(draft, emphasisDraft)
   function updateLine(index: 0 | 1, nextValue: string) {
     const next: [string, string] = [draft[0], draft[1]]
     next[index] = nextValue
     setDraft(next)
+    onSaveStateChange(saveStateFor(next, emphasisDraft))
   }
 
   function commit() {
-    editingRef.current = false
     const nextValue = committedText
     setDraft(splitSubtitleLines(nextValue || value))
     setEmphasisDraft(committedEmphasis.join(", "))
     onCommit(nextValue, committedEmphasis)
+    onSaveStateChange({ dirty: false, valid: false })
   }
 
   return (
-    <div
+    <form
+      id={formId}
       className="grid min-w-0 items-start gap-3 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]"
-      onFocusCapture={() => {
-        editingRef.current = true
-        onFocus()
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (valid) commit()
       }}
-      onBlurCapture={(event) => {
-        const nextTarget = event.relatedTarget as Node | null
-        if (event.currentTarget.contains(nextTarget)) return
-        // 저장 전 초안이 있으면 외부 value 동기화로 덮어쓰지 않는다.
-        if (!dirty) editingRef.current = false
+      onFocusCapture={() => {
+        onFocus()
       }}
     >
       <div className="grid min-w-0 gap-3">
@@ -5346,21 +5626,18 @@ function SubtitleLineFields({
         <span className="text-sm">강조 단어</span>
         <input
           value={emphasisDraft}
-          onChange={(event) => setEmphasisDraft(event.currentTarget.value)}
+          onChange={(event) => {
+            const nextValue = event.currentTarget.value
+            setEmphasisDraft(nextValue)
+            onSaveStateChange(saveStateFor(draft, nextValue))
+          }}
           className={field}
         />
       </label>
       <div className="flex min-h-8 items-center justify-end gap-2 sm:col-span-2">
         {dirty ? <span className="text-xs text-warning">저장 전</span> : null}
-        <Button
-          size="sm"
-          isDisabled={!dirty || firstLineOver || secondLineOver}
-          onPress={commit}
-        >
-          저장
-        </Button>
       </div>
-    </div>
+    </form>
   )
 }
 
@@ -5618,6 +5895,7 @@ function SceneCropPreview({
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(sourceStart)
+  const [motionStartOffset, setMotionStartOffset] = useState(0)
   const safeStart = Math.max(0, sourceStart)
   const safeEnd = Math.max(safeStart + 0.1, sourceEnd)
   const resolvedFit = fit
@@ -5629,9 +5907,23 @@ function SceneCropPreview({
   useEffect(() => {
     const video = videoRef.current
     if (!video?.readyState) return
+    video.pause()
     video.currentTime = safeStart
     setCurrentTime(safeStart)
-  }, [safeStart, sourceUrl])
+    setPlaying(false)
+    setMotionStartOffset(0)
+  }, [motion, safeStart, sourceUrl])
+
+  const motionPreviewStyle = mediaMotionStyle(
+    motion,
+    previewScale,
+    safeEnd - safeStart
+  )
+  if (motion !== "none") {
+    motionPreviewStyle.animationDelay = `-${motionStartOffset}s`
+    motionPreviewStyle.animationPlayState = playing ? "running" : "paused"
+    motionPreviewStyle.animationFillMode = "both"
+  }
 
   return (
     <div className="flex flex-col gap-3 rounded-xl bg-default p-3">
@@ -5656,11 +5948,7 @@ function SceneCropPreview({
             fit={resolvedFit}
             positionX={crop.x}
             positionY={crop.y}
-            mediaStyle={mediaMotionStyle(
-              motion,
-              previewScale,
-              safeEnd - safeStart
-            )}
+            mediaStyle={motionPreviewStyle}
             muted={muted}
             playsInline
             preload="metadata"
@@ -5668,14 +5956,24 @@ function SceneCropPreview({
               event.currentTarget.playbackRate = NEWS_SOURCE_PLAYBACK_RATE
               event.currentTarget.currentTime = safeStart
               setCurrentTime(safeStart)
+              setMotionStartOffset(0)
             }}
-            onPlay={() => setPlaying(true)}
+            onPlay={(event) => {
+              setMotionStartOffset(
+                Math.max(0, event.currentTarget.currentTime - safeStart)
+              )
+              setPlaying(true)
+            }}
             onPause={() => setPlaying(false)}
-            onEnded={() => setPlaying(false)}
+            onEnded={() => {
+              setPlaying(false)
+              setMotionStartOffset(0)
+            }}
             onTimeUpdate={(event) => {
               if (event.currentTarget.currentTime >= safeEnd) {
                 event.currentTarget.pause()
                 event.currentTarget.currentTime = safeStart
+                setMotionStartOffset(0)
               }
               setCurrentTime(event.currentTarget.currentTime)
             }}
@@ -5696,6 +5994,7 @@ function SceneCropPreview({
                 video.currentTime >= safeEnd
               ) {
                 video.currentTime = safeStart
+                setMotionStartOffset(0)
               }
               void video.play().catch(() => undefined)
             } else {

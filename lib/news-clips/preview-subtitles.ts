@@ -28,7 +28,10 @@ export function localizeLockedSubtitleCues(
     overflow > 0.12 && earliestStart >= overflow - 0.2 ? overflow : 0
 
   return local.map((cue) => {
-    const start = Math.max(0, Math.min(duration - 0.04, cue.start - legacyOffset))
+    const start = Math.max(
+      0,
+      Math.min(duration - 0.04, cue.start - legacyOffset)
+    )
     const end = Math.max(
       start + 0.04,
       Math.min(duration, cue.end - legacyOffset)
@@ -56,7 +59,11 @@ export function preservePreviewSubtitleEdits(
   if (timingsLocked) {
     // 보도형은 렌더 서버가 기존 문구·줄바꿈을 보존한 채 실제 TTS 단어
     // 시각만 갱신한다. 이 경우 예전 잠긴 시간을 다시 덮어쓰지 않는다.
-    return options.acceptRenderedLockedTimings === true ? rendered : current
+    if (options.acceptRenderedLockedTimings === true) return rendered
+    // 원본 음성형은 현재 문구와 시간을 유지하되, 서버가 현재 장면에서
+    // 제외한 이전 장면의 자막까지 다시 살리지는 않는다.
+    const renderedIds = new Set(rendered.map((cue) => cue.id))
+    return current.filter((cue) => renderedIds.has(cue.id))
   }
   return mergeEditedSubtitleText(rendered, current, { trustExactId: true })
 }

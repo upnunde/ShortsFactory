@@ -4,6 +4,7 @@ import test from "node:test"
 import { buildSubtitles } from "./subtitles.ts"
 import {
   automaticSubtitleLineCharacterLimit,
+  canUndoSubtitleCueMerge,
   fitTitleToLineLayouts,
   fitTitleToTwoLines,
   layoutTimedSubtitleCues,
@@ -24,6 +25,7 @@ import {
   undoSubtitleCueMerge,
 } from "./text-layout.ts"
 import {
+  canUndoTranscriptSegmentMerge,
   clearLegacyAutomaticCaptionBoundaries,
   mergeTranscriptSegmentWithNext,
   normalizeKoreanRecognitionText,
@@ -34,6 +36,7 @@ import {
   splitTranscriptSegmentAtWord,
   transcriptRangeIsReviewed,
   transcriptRangeLooksHallucinated,
+  undoTranscriptSegmentMerge,
   updateTranscriptSegmentText,
 } from "./transcript.ts"
 import { defaultNewsClipSettings } from "./types.ts"
@@ -430,6 +433,85 @@ test("인접 원문을 합치면 두 구간의 전체 시간과 단어 시간을
   assert.equal(merged[0]?.words[1]?.start, 11.1)
   assert.equal(merged[0]?.words[2]?.end, 12.8)
   assert.equal(merged[0]?.captionBoundaryAfter, true)
+})
+
+test("합친 원문은 합치기 직전 문구와 단어 시간을 정확히 복원한다", () => {
+  const segments = parseTranscript(
+    JSON.stringify({
+      segments: [
+        {
+          start: 10,
+          end: 11,
+          text: "고친 앞문장",
+          original_text: "원래 앞문장",
+          words: [{ word: "고친 앞문장", start: 10.1, end: 10.8 }],
+          original_words: [{ word: "원래 앞문장", start: 10.1, end: 10.8 }],
+        },
+        {
+          start: 11,
+          end: 13,
+          text: "고친 뒷문장",
+          original_text: "원래 뒷문장",
+          words: [{ word: "고친 뒷문장", start: 11.1, end: 12.8 }],
+          original_words: [{ word: "원래 뒷문장", start: 11.1, end: 12.8 }],
+        },
+      ],
+    })
+  )
+  const beforeMerge = structuredClone(segments)
+  const merged = mergeTranscriptSegmentWithNext(segments, segments[0]!.id)
+
+  assert.equal(canUndoTranscriptSegmentMerge(merged[0]!), true)
+  assert.deepEqual(
+    undoTranscriptSegmentMerge(merged, merged[0]!.id),
+    beforeMerge
+  )
+})
+
+test("합친 문구를 고친 뒤에도 합치기 취소는 합치기 직전 두 구간을 복원한다", () => {
+  const segments = parseTranscript(
+    JSON.stringify({
+      segments: [
+        {
+          start: 20,
+          end: 21,
+          text: "앞 구간",
+          words: [{ word: "앞 구간", start: 20.1, end: 20.8 }],
+        },
+        {
+          start: 21,
+          end: 22.5,
+          text: "뒤 구간",
+          words: [{ word: "뒤 구간", start: 21.1, end: 22.3 }],
+        },
+      ],
+    })
+  )
+  const beforeMerge = structuredClone(segments)
+  const [merged] = mergeTranscriptSegmentWithNext(segments, segments[0]!.id)
+  const edited = updateTranscriptSegmentText(merged!, "합친 뒤 고친 문구")
+
+  assert.deepEqual(undoTranscriptSegmentMerge([edited], edited.id), beforeMerge)
+})
+
+test("합치기 복원 정보는 직렬화 후에도 유지된다", () => {
+  const segments = parseTranscript(
+    JSON.stringify({
+      segments: [
+        { start: 1, end: 2, text: "첫 구간" },
+        { start: 2, end: 3, text: "둘째 구간" },
+      ],
+    })
+  )
+  const beforeMerge = structuredClone(segments)
+  const merged = mergeTranscriptSegmentWithNext(segments, segments[0]!.id)
+  const restoredFromStorage = parseTranscript(serializeTranscript(merged))
+
+  assert.equal(canUndoTranscriptSegmentMerge(restoredFromStorage[0]!), true)
+  assert.deepEqual(
+    undoTranscriptSegmentMerge(restoredFromStorage, restoredFromStorage[0]!.id),
+    beforeMerge
+  )
 })
 
 test("3번과 4번을 합쳐도 5번 구간의 시작과 끝은 바뀌지 않는다", () => {
@@ -1200,6 +1282,192 @@ test("자막 수정 시 사용자가 넣은 줄바꿈을 유지한다", () => {
     layout
   )
   assert.equal(updated[0]?.text, "예산은 늘었다는데,\n현장 얘기는 정반대야.")
+})
+
+test("저장한 수동 한 줄은 이후 자동 정렬에서도 다시 두 줄로 바뀌지 않는다", () => {
+  const layout = {
+    ...defaultNewsClipSettings.bodySubtitleText,
+    width: 699,
+    fontSize: 50,
+    letterSpacing: 0,
+  }
+  const saved = updateEditedSubtitleCue(
+    [
+      {
+        id: "caption-manual-one-line",
+        sceneId: "body-scene",
+        start: 3,
+        end: 5,
+        text: "자동 첫째 줄\n자동 둘째 줄",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    "caption-manual-one-line",
+    "가나다라 마바사 아자차카타파",
+    layout
+  )
+
+  assert.equal(subtitleLineCharacterLimit(layout), 13)
+  assert.equal(saved[0]?.edited, true)
+  assert.equal(saved[0]?.text.includes("\n"), false)
+  assert.equal(normalizeSubtitleCues(saved, layout)[0]?.text, saved[0]?.text)
+})
+
+test("합치기를 취소한 자막도 초기화하면 자동 문구로 돌아간다", () => {
+  const layout = defaultNewsClipSettings.bodySubtitleText
+  const merged = mergeSubtitleCueWithNext(
+    [
+      {
+        id: "caption-merge-reset",
+        sceneId: "scene-1",
+        start: 8.6,
+        end: 10,
+        text: "자동 앞문장",
+        emphasis: ["자동"],
+        emphasisColor: "yellow" as const,
+      },
+      {
+        id: "caption-merge-reset-next",
+        sceneId: "scene-1",
+        start: 10,
+        end: 11.1,
+        text: "자동 뒷문장",
+        emphasis: [],
+        emphasisColor: "yellow" as const,
+      },
+    ],
+    "caption-merge-reset",
+    layout
+  )
+  const edited = updateEditedSubtitleCue(
+    merged,
+    "caption-merge-reset",
+    "사용자가 합친 뒤 고친 아주 긴 자막 문구",
+    layout
+  )
+  const restored = undoSubtitleCueMerge(edited, "caption-merge-reset")
+  const reset = resetEditedSubtitleCue(restored, "caption-merge-reset")
+
+  assert.equal(
+    reset.find((cue) => cue.id === "caption-merge-reset")?.text,
+    "자동 앞문장"
+  )
+  assert.deepEqual(
+    reset.find((cue) => cue.id === "caption-merge-reset")?.emphasis,
+    ["자동"]
+  )
+  assert.equal(
+    reset.find((cue) => cue.id === "caption-merge-reset")?.edited,
+    false
+  )
+  assert.equal(
+    reset.find((cue) => cue.id === "caption-merge-reset-next")?.text,
+    "자동 뒷문장"
+  )
+})
+
+test("합친 자막을 초기화해도 합친 구간은 유지하고 합친 자동 문구만 복원한다", () => {
+  const layout = defaultNewsClipSettings.bodySubtitleText
+  const original = [
+    {
+      id: "caption-merged-reset",
+      sceneId: "scene-merged-reset",
+      start: 3,
+      end: 4,
+      text: "자동 앞문장",
+      emphasis: ["자동"],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "caption-merged-reset-next",
+      sceneId: "scene-merged-reset",
+      start: 4,
+      end: 5.5,
+      text: "자동 뒷문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const editedFirst = updateEditedSubtitleCue(
+    original,
+    original[0].id,
+    "수정한 앞문장",
+    layout
+  )
+  const editedBoth = updateEditedSubtitleCue(
+    editedFirst,
+    original[1].id,
+    "수정한 뒷문장",
+    layout
+  )
+  const merged = mergeSubtitleCueWithNext(editedBoth, original[0].id, layout)
+  const editedMerged = updateEditedSubtitleCue(
+    merged,
+    original[0].id,
+    "합친 뒤 다시 수정한 문장",
+    layout
+  )
+  const reset = resetEditedSubtitleCue(editedMerged, original[0].id)
+
+  assert.equal(reset.length, 1)
+  assert.equal(reset[0]?.text.replace(/\n/g, " "), "자동 앞문장 자동 뒷문장")
+  assert.equal(reset[0]?.start, 3)
+  assert.equal(reset[0]?.end, 5.5)
+  assert.equal(canUndoSubtitleCueMerge(reset[0]!), true)
+})
+
+test("분리한 자막은 각각 초기화해 합치기 전 자동 문구와 시간을 복원한다", () => {
+  const layout = defaultNewsClipSettings.bodySubtitleText
+  const original = [
+    {
+      id: "caption-split-reset",
+      sceneId: "scene-split-reset",
+      start: 12,
+      end: 13,
+      text: "원래 앞문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+    {
+      id: "caption-split-reset-next",
+      sceneId: "scene-split-reset",
+      start: 13,
+      end: 14.7,
+      text: "원래 뒷문장",
+      emphasis: [],
+      emphasisColor: "yellow" as const,
+    },
+  ]
+  const editedFirst = updateEditedSubtitleCue(
+    original,
+    original[0].id,
+    "수정한 앞문장",
+    layout
+  )
+  const editedBoth = updateEditedSubtitleCue(
+    editedFirst,
+    original[1].id,
+    "수정한 뒷문장",
+    layout
+  )
+  const merged = mergeSubtitleCueWithNext(editedBoth, original[0].id, layout)
+  const split = undoSubtitleCueMerge(merged, original[0].id)
+  const resetFirst = resetEditedSubtitleCue(split, original[0].id)
+  const resetBoth = resetEditedSubtitleCue(resetFirst, original[1].id)
+
+  assert.deepEqual(
+    resetBoth.map(({ text, start, end, edited }) => ({
+      text,
+      start,
+      end,
+      edited,
+    })),
+    [
+      { text: "원래 앞문장", start: 12, end: 13, edited: false },
+      { text: "원래 뒷문장", start: 13, end: 14.7, edited: false },
+    ]
+  )
 })
 
 test("자막별 초기화는 자동 생성 문구와 강조를 복원한다", () => {

@@ -92,6 +92,27 @@ test("보도 대본은 장면 narration에서 한 방향으로 복원한다", ()
   assert.equal(canonicalReportScript("레거시 대본", []), "레거시 대본")
 })
 
+test("보도형 본문에 복제된 동일 나레이션 문장은 한 번만 유지한다", () => {
+  const scenes = buildReportScenes(
+    "반복되면 안 되는 문장이야. 반복되면 안 되는 문장이야. 새로운 문장이야.",
+    transcript,
+    10,
+    30
+  )
+
+  assert.deepEqual(
+    scenes.map((scene) => scene.narration),
+    ["반복되면 안 되는 문장이야.", "새로운 문장이야."]
+  )
+  assert.equal(
+    reportScriptFromScenes([
+      ...scenes,
+      { ...scenes[0]!, id: "report-body-duplicate", part: "body" },
+    ]),
+    "반복되면 안 되는 문장이야.\n새로운 문장이야."
+  )
+})
+
 test("보도형 재구성은 레거시 quote 장면도 풀 TTS 자료화면으로 정규화한다", () => {
   const [scene] = buildReportScenes("첫 문장입니다.", transcript, 10, 30, [
     {
@@ -1036,6 +1057,51 @@ test("락된 자막은 문구만 덮고 start/end를 유지한다", () => {
   assert.equal(merged[0]?.end, 1.2)
   assert.deepEqual(merged[0]?.emphasis, ["오타"])
   assert.equal(merged[0]?.edited, true)
+})
+
+test("새 음성 타임라인에도 사용자가 합친 자막 구간을 한 덩어리로 복원한다", () => {
+  const first = {
+    id: "quote-caption-scene-1-1",
+    sceneId: "scene-1",
+    start: 1,
+    end: 2,
+    sourceStart: 41,
+    sourceEnd: 42,
+    text: "자동 첫 구간",
+    emphasis: [] as string[],
+    emphasisColor: "yellow" as const,
+  }
+  const second = {
+    ...first,
+    id: "quote-caption-scene-1-2",
+    start: 2,
+    end: 3,
+    sourceStart: 42,
+    sourceEnd: 43,
+    text: "자동 둘째 구간",
+  }
+  const manual = {
+    ...first,
+    end: 3,
+    sourceEnd: 43,
+    text: "내가 합친 문구",
+    originalText: "자동 첫 구간 자동 둘째 구간",
+    mergedFrom: [first, second],
+    edited: true,
+  }
+  const retimed = [
+    { ...first, start: 1.1, end: 2.2 },
+    { ...second, start: 2.2, end: 3.4 },
+  ]
+
+  const result = mergeEditedSubtitleText(retimed, [manual])
+
+  assert.equal(result.length, 1)
+  assert.equal(result[0]?.text, "내가 합친 문구")
+  assert.equal(result[0]?.start, 1.1)
+  assert.equal(result[0]?.end, 3.4)
+  assert.equal(result[0]?.sourceStart, 41)
+  assert.equal(result[0]?.sourceEnd, 43)
 })
 
 test("음성 단어 타임스탬프는 읽기 좋은 자막 칸으로 묶는다", () => {
