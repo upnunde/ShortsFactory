@@ -5,10 +5,22 @@ import path from "node:path"
 import { cookies } from "next/headers"
 
 import {
+  AUTH_COOKIE_NAME,
+  getAuthConfig,
+  isValidSessionToken,
+} from "@/lib/auth"
+import {
   CLAUDE_KEY_COOKIE_NAME,
   sealClaudeKey,
   unsealClaudeKey,
 } from "@/lib/claude-key-cookie"
+import {
+  CREDENTIAL_COOKIE_MAX_AGE_SECONDS,
+  CREDENTIAL_COOKIE_NAMES,
+  sealProviderCredential,
+  unsealProviderCredential,
+  type ProviderCredentialCookie,
+} from "@/lib/credential-cookie"
 
 const dir = path.join(process.cwd(), "config", "credentials")
 const claudePath = path.join(dir, "anthropic.json")
@@ -25,14 +37,26 @@ export type CredentialStatus = {
   youtubeData: { saved: boolean }
 }
 
+export type SavedCredentialCookie = {
+  name: string
+  value: string
+}
+
+type CredentialCookieContext = {
+  cookieStore: Awaited<ReturnType<typeof cookies>>
+  username: string
+  secret: string
+}
+
 export async function credentialStatus(): Promise<CredentialStatus> {
+  const cookieContext = await readCredentialCookieContext()
   const [claude, higgsfield, azureSpeech, typecast, youtubeData] =
     await Promise.all([
-      readClaudeKey(),
-      readHiggsfield(),
-      readAzureSpeech(),
-      readTypecastKey(),
-      readYouTubeDataKey(),
+      readClaudeKey(cookieContext),
+      readHiggsfield(cookieContext),
+      readAzureSpeech(cookieContext),
+      readTypecastKey(cookieContext),
+      readYouTubeDataKey(cookieContext),
     ])
   return {
     claude: { saved: claude !== null },
@@ -43,8 +67,10 @@ export async function credentialStatus(): Promise<CredentialStatus> {
   }
 }
 
-export async function readClaudeKey() {
-  const cookieKey = await readClaudeKeyCookie()
+export async function readClaudeKey(context?: CredentialCookieContext | null) {
+  const cookieContext =
+    context === undefined ? await readCredentialCookieContext() : context
+  const cookieKey = readClaudeKeyCookie(cookieContext)
   if (cookieKey) return cookieKey
 
   try {
@@ -59,7 +85,12 @@ export async function readClaudeKey() {
   return process.env.ANTHROPIC_API_KEY?.trim() || null
 }
 
-export async function readHiggsfield() {
+export async function readHiggsfield(context?: CredentialCookieContext | null) {
+  const cookieContext =
+    context === undefined ? await readCredentialCookieContext() : context
+  const cookieKey = readProviderCredentialCookie("higgsfield", cookieContext)
+  if (cookieKey) return cookieKey
+
   try {
     const parsed = JSON.parse(await readFile(higgsfieldPath, "utf8")) as {
       apiKey?: string
@@ -81,7 +112,26 @@ export async function readHiggsfield() {
   }
 }
 
-export async function readAzureSpeech() {
+export async function readAzureSpeech(
+  context?: CredentialCookieContext | null
+) {
+  const cookieContext =
+    context === undefined ? await readCredentialCookieContext() : context
+  const cookieValue = readProviderCredentialCookie("azureSpeech", cookieContext)
+  if (cookieValue) {
+    try {
+      const parsed = JSON.parse(cookieValue) as {
+        apiKey?: string
+        region?: string
+      }
+      const apiKey = parsed.apiKey?.trim() ?? ""
+      const region = parsed.region?.trim().toLowerCase() ?? ""
+      if (apiKey && validAzureRegion(region)) return { apiKey, region }
+    } catch {
+      // Fall through to local files and environment variables.
+    }
+  }
+
   try {
     const parsed = JSON.parse(await readFile(azureSpeechPath, "utf8")) as {
       apiKey?: string
@@ -98,7 +148,14 @@ export async function readAzureSpeech() {
   return apiKey && validAzureRegion(region) ? { apiKey, region } : null
 }
 
-export async function readYouTubeDataKey() {
+export async function readYouTubeDataKey(
+  context?: CredentialCookieContext | null
+) {
+  const cookieContext =
+    context === undefined ? await readCredentialCookieContext() : context
+  const cookieKey = readProviderCredentialCookie("youtubeData", cookieContext)
+  if (cookieKey) return cookieKey
+
   try {
     const parsed = JSON.parse(await readFile(youtubeDataPath, "utf8")) as {
       apiKey?: string
@@ -111,7 +168,14 @@ export async function readYouTubeDataKey() {
   return process.env.YOUTUBE_DATA_API_KEY?.trim() || null
 }
 
-export async function readTypecastKey() {
+export async function readTypecastKey(
+  context?: CredentialCookieContext | null
+) {
+  const cookieContext =
+    context === undefined ? await readCredentialCookieContext() : context
+  const cookieKey = readProviderCredentialCookie("typecast", cookieContext)
+  if (cookieKey) return cookieKey
+
   try {
     const parsed = JSON.parse(await readFile(typecastPath, "utf8")) as {
       apiKey?: string
@@ -134,10 +198,13 @@ export async function saveClaudeKey(apiKey: string) {
   }
 
   if (process.env.VERCEL === "1") {
-    const username = process.env.APP_LOGIN_ID?.trim() ?? ""
+    const config = getAuthConfig()
     const secret = process.env.APP_CREDENTIALS_SECRET ?? ""
-    if (!username || !secret) throw new Error("config")
-    return sealClaudeKey(key, username, secret)
+    if (!config || secret.length < 32) throw new Error("config")
+    return {
+      name: CLAUDE_KEY_COOKIE_NAME,
+      value: sealClaudeKey(key, config.username, secret),
+    } satisfies SavedCredentialCookie
   }
 
   await writeSecret(claudePath, { apiKey: key })
@@ -146,44 +213,63 @@ export async function saveClaudeKey(apiKey: string) {
 
 export async function saveHiggsfieldKey(apiKey: string) {
   const key = apiKey.trim()
-  if (!key) {
+  if (!key || key.length > 512) {
     throw new Error("invalid")
   }
   if (!(await higgsfieldKeyWorks(key))) {
     throw new Error("invalid")
   }
+  const cookie = createProviderCredentialCookie("higgsfield", key)
+  if (cookie) return cookie
+
   await writeSecret(higgsfieldPath, { apiKey: key })
+  return null
 }
 
 export async function saveAzureSpeech(apiKey: string, region: string) {
   const key = apiKey.trim()
   const normalizedRegion = region.trim().toLowerCase()
-  if (!key || !validAzureRegion(normalizedRegion)) {
+  if (!key || key.length > 256 || !validAzureRegion(normalizedRegion)) {
     throw new Error("invalid")
   }
   if (!(await azureSpeechWorks(key, normalizedRegion))) {
     throw new Error("invalid")
   }
+  const cookie = createProviderCredentialCookie(
+    "azureSpeech",
+    JSON.stringify({ apiKey: key, region: normalizedRegion })
+  )
+  if (cookie) return cookie
+
   await writeSecret(azureSpeechPath, {
     apiKey: key,
     region: normalizedRegion,
   })
+  return null
 }
 
 export async function saveYouTubeDataKey(apiKey: string) {
   const key = apiKey.trim()
-  if (!key || !(await youtubeDataKeyWorks(key))) {
+  if (!key || key.length > 128 || !(await youtubeDataKeyWorks(key))) {
     throw new Error("invalid")
   }
+  const cookie = createProviderCredentialCookie("youtubeData", key)
+  if (cookie) return cookie
+
   await writeSecret(youtubeDataPath, { apiKey: key })
+  return null
 }
 
 export async function saveTypecastKey(apiKey: string) {
   const key = apiKey.trim()
-  if (!key || !(await typecastKeyWorks(key))) {
+  if (!key || key.length > 512 || !(await typecastKeyWorks(key))) {
     throw new Error("invalid")
   }
+  const cookie = createProviderCredentialCookie("typecast", key)
+  if (cookie) return cookie
+
   await writeSecret(typecastPath, { apiKey: key })
+  return null
 }
 
 async function claudeKeyWorks(apiKey: string) {
@@ -283,15 +369,61 @@ async function writeSecret(filePath: string, value: unknown) {
   })
 }
 
-async function readClaudeKeyCookie() {
-  const username = process.env.APP_LOGIN_ID?.trim() ?? ""
+function readClaudeKeyCookie(context: CredentialCookieContext | null) {
+  if (!context) return null
+  const token = context.cookieStore.get(CLAUDE_KEY_COOKIE_NAME)?.value
+  return unsealClaudeKey(token, context.username, context.secret)
+}
+
+function readProviderCredentialCookie(
+  provider: ProviderCredentialCookie,
+  context: CredentialCookieContext | null
+) {
+  if (!context) return null
+  const token = context.cookieStore.get(
+    CREDENTIAL_COOKIE_NAMES[provider]
+  )?.value
+  return unsealProviderCredential(
+    provider,
+    token,
+    context.username,
+    context.secret
+  )
+}
+
+async function readCredentialCookieContext(): Promise<CredentialCookieContext | null> {
+  const config = getAuthConfig()
   const secret = process.env.APP_CREDENTIALS_SECRET ?? ""
-  if (!username || !secret) return null
+  if (!config || secret.length < 32) return null
 
   try {
-    const token = (await cookies()).get(CLAUDE_KEY_COOKIE_NAME)?.value
-    return unsealClaudeKey(token, username, secret)
+    const cookieStore = await cookies()
+    const sessionToken = cookieStore.get(AUTH_COOKIE_NAME)?.value
+    if (!isValidSessionToken(sessionToken, config)) return null
+    return { cookieStore, username: config.username, secret }
   } catch {
     return null
+  }
+}
+
+function createProviderCredentialCookie(
+  provider: ProviderCredentialCookie,
+  value: string
+): SavedCredentialCookie | null {
+  if (process.env.VERCEL !== "1") return null
+
+  const config = getAuthConfig()
+  const secret = process.env.APP_CREDENTIALS_SECRET ?? ""
+  if (!config || secret.length < 32) throw new Error("config")
+
+  return {
+    name: CREDENTIAL_COOKIE_NAMES[provider],
+    value: sealProviderCredential(
+      provider,
+      value,
+      config.username,
+      secret,
+      CREDENTIAL_COOKIE_MAX_AGE_SECONDS
+    ),
   }
 }

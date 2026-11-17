@@ -102,8 +102,8 @@ export function PlatformSettings() {
           <ShieldCheck className="mt-0.5 size-5 shrink-0 text-success" />
           <p className="text-sm leading-6 text-muted">
             저장된 키 원문은 브라우저로 다시 보내지 않고 연결 여부만 표시합니다.
-            현재 Claude 키는 이 브라우저에 암호화해 7일간 임시 보관합니다.
-            유튜브 업로드 로그인은 API 키와 성격이 다르므로 각 채널의 계정 연결
+            현재 API 키는 이 브라우저에 암호화해 7일간 임시 보관합니다. 유튜브
+            업로드 로그인은 API 키와 성격이 다르므로 각 채널의 계정 연결
             메뉴에서 별도로 관리합니다.
           </p>
         </div>

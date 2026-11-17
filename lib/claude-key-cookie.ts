@@ -5,8 +5,14 @@ import {
   randomBytes,
 } from "node:crypto"
 
-export const CLAUDE_KEY_COOKIE_NAME = "shorts_factory_claude_key"
-export const CLAUDE_KEY_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+import {
+  CREDENTIAL_COOKIE_MAX_AGE_SECONDS,
+  CREDENTIAL_COOKIE_NAMES,
+} from "./credential-cookie.ts"
+
+export const CLAUDE_KEY_COOKIE_NAME = CREDENTIAL_COOKIE_NAMES.claude
+export const CLAUDE_KEY_COOKIE_MAX_AGE_SECONDS =
+  CREDENTIAL_COOKIE_MAX_AGE_SECONDS
 
 const VERSION = "v1"
 const AAD = Buffer.from(`${CLAUDE_KEY_COOKIE_NAME}:${VERSION}`)

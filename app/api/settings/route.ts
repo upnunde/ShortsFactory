@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server"
 
-import {
-  CLAUDE_KEY_COOKIE_MAX_AGE_SECONDS,
-  CLAUDE_KEY_COOKIE_NAME,
-} from "@/lib/claude-key-cookie"
+import { CREDENTIAL_COOKIE_MAX_AGE_SECONDS } from "@/lib/credential-cookie"
 import {
   credentialStatus,
   saveAzureSpeech,
@@ -11,6 +8,8 @@ import {
   saveHiggsfieldKey,
   saveTypecastKey,
   saveYouTubeDataKey,
+  type CredentialStatus,
+  type SavedCredentialCookie,
 } from "@/lib/server/credentials"
 
 export async function GET() {
@@ -20,7 +19,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  let claudeCookie: string | null = null
+  let credentialCookie: SavedCredentialCookie | null = null
+  let savedProvider: keyof CredentialStatus | null = null
   const body = (await request.json().catch(() => null)) as {
     provider?: string
     apiKey?: string
@@ -40,7 +40,8 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
-      claudeCookie = await saveClaudeKey(body.apiKey)
+      credentialCookie = await saveClaudeKey(body.apiKey)
+      savedProvider = "claude"
     } else if (body.provider === "higgsfield") {
       if (typeof body.apiKey !== "string" || body.apiKey.trim() === "") {
         return NextResponse.json(
@@ -48,7 +49,8 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
-      await saveHiggsfieldKey(body.apiKey)
+      credentialCookie = await saveHiggsfieldKey(body.apiKey)
+      savedProvider = "higgsfield"
     } else if (body.provider === "azureSpeech") {
       if (
         typeof body.apiKey !== "string" ||
@@ -61,7 +63,8 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
-      await saveAzureSpeech(body.apiKey, body.region)
+      credentialCookie = await saveAzureSpeech(body.apiKey, body.region)
+      savedProvider = "azureSpeech"
     } else if (body.provider === "youtubeData") {
       if (typeof body.apiKey !== "string" || body.apiKey.trim() === "") {
         return NextResponse.json(
@@ -69,7 +72,8 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
-      await saveYouTubeDataKey(body.apiKey)
+      credentialCookie = await saveYouTubeDataKey(body.apiKey)
+      savedProvider = "youtubeData"
     } else if (body.provider === "typecast") {
       if (typeof body.apiKey !== "string" || body.apiKey.trim() === "") {
         return NextResponse.json(
@@ -77,7 +81,8 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
-      await saveTypecastKey(body.apiKey)
+      credentialCookie = await saveTypecastKey(body.apiKey)
+      savedProvider = "typecast"
     } else {
       return NextResponse.json(
         { message: "요청을 읽을 수 없습니다." },
@@ -85,16 +90,16 @@ export async function POST(request: Request) {
       )
     }
     const status = await credentialStatus()
-    if (claudeCookie) status.claude.saved = true
+    if (savedProvider) status[savedProvider].saved = true
     const response = NextResponse.json(status, {
       headers: { "Cache-Control": "no-store" },
     })
-    if (claudeCookie) {
-      response.cookies.set(CLAUDE_KEY_COOKIE_NAME, claudeCookie, {
+    if (credentialCookie) {
+      response.cookies.set(credentialCookie.name, credentialCookie.value, {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "strict",
-        maxAge: CLAUDE_KEY_COOKIE_MAX_AGE_SECONDS,
+        maxAge: CREDENTIAL_COOKIE_MAX_AGE_SECONDS,
         path: "/api",
         priority: "high",
       })
