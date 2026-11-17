@@ -15,7 +15,7 @@ import {
 import { newsTtsErrorMessage } from "@/lib/server/news-clips/tts-provider"
 
 export const runtime = "nodejs"
-export const maxDuration = 900
+export const maxDuration = 300
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
