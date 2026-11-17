@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server"
 
 import {
+  CLAUDE_KEY_COOKIE_MAX_AGE_SECONDS,
+  CLAUDE_KEY_COOKIE_NAME,
+} from "@/lib/claude-key-cookie"
+import {
   credentialStatus,
   saveAzureSpeech,
   saveClaudeKey,
@@ -10,10 +14,13 @@ import {
 } from "@/lib/server/credentials"
 
 export async function GET() {
-  return NextResponse.json(await credentialStatus())
+  return NextResponse.json(await credentialStatus(), {
+    headers: { "Cache-Control": "no-store" },
+  })
 }
 
 export async function POST(request: Request) {
+  let claudeCookie: string | null = null
   const body = (await request.json().catch(() => null)) as {
     provider?: string
     apiKey?: string
@@ -33,7 +40,7 @@ export async function POST(request: Request) {
           { status: 400 }
         )
       }
-      await saveClaudeKey(body.apiKey)
+      claudeCookie = await saveClaudeKey(body.apiKey)
     } else if (body.provider === "higgsfield") {
       if (typeof body.apiKey !== "string" || body.apiKey.trim() === "") {
         return NextResponse.json(
@@ -77,7 +84,22 @@ export async function POST(request: Request) {
         { status: 400 }
       )
     }
-    return NextResponse.json(await credentialStatus())
+    const status = await credentialStatus()
+    if (claudeCookie) status.claude.saved = true
+    const response = NextResponse.json(status, {
+      headers: { "Cache-Control": "no-store" },
+    })
+    if (claudeCookie) {
+      response.cookies.set(CLAUDE_KEY_COOKIE_NAME, claudeCookie, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: CLAUDE_KEY_COOKIE_MAX_AGE_SECONDS,
+        path: "/api",
+        priority: "high",
+      })
+    }
+    return response
   } catch (error) {
     const code = error instanceof Error ? error.message : ""
     if (code === "invalid") {

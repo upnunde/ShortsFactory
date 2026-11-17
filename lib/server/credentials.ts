@@ -2,6 +2,13 @@ import "server-only"
 
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
+import { cookies } from "next/headers"
+
+import {
+  CLAUDE_KEY_COOKIE_NAME,
+  sealClaudeKey,
+  unsealClaudeKey,
+} from "@/lib/claude-key-cookie"
 
 const dir = path.join(process.cwd(), "config", "credentials")
 const claudePath = path.join(dir, "anthropic.json")
@@ -37,15 +44,19 @@ export async function credentialStatus(): Promise<CredentialStatus> {
 }
 
 export async function readClaudeKey() {
+  const cookieKey = await readClaudeKeyCookie()
+  if (cookieKey) return cookieKey
+
   try {
     const parsed = JSON.parse(await readFile(claudePath, "utf8")) as {
       apiKey?: string
     }
     const apiKey = parsed.apiKey?.trim() ?? ""
-    return apiKey || null
+    if (apiKey) return apiKey
   } catch {
-    return null
+    // Fall through to the environment variable for existing installations.
   }
+  return process.env.ANTHROPIC_API_KEY?.trim() || null
 }
 
 export async function readHiggsfield() {
@@ -115,13 +126,22 @@ export async function readTypecastKey() {
 
 export async function saveClaudeKey(apiKey: string) {
   const key = apiKey.trim()
-  if (!key.startsWith("sk-ant-")) {
+  if (!key.startsWith("sk-ant-") || key.length > 512) {
     throw new Error("invalid")
   }
   if (!(await claudeKeyWorks(key))) {
     throw new Error("invalid")
   }
+
+  if (process.env.VERCEL === "1") {
+    const username = process.env.APP_LOGIN_ID?.trim() ?? ""
+    const secret = process.env.APP_CREDENTIALS_SECRET ?? ""
+    if (!username || !secret) throw new Error("config")
+    return sealClaudeKey(key, username, secret)
+  }
+
   await writeSecret(claudePath, { apiKey: key })
+  return null
 }
 
 export async function saveHiggsfieldKey(apiKey: string) {
@@ -261,4 +281,17 @@ async function writeSecret(filePath: string, value: unknown) {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, {
     mode: 0o600,
   })
+}
+
+async function readClaudeKeyCookie() {
+  const username = process.env.APP_LOGIN_ID?.trim() ?? ""
+  const secret = process.env.APP_CREDENTIALS_SECRET ?? ""
+  if (!username || !secret) return null
+
+  try {
+    const token = (await cookies()).get(CLAUDE_KEY_COOKIE_NAME)?.value
+    return unsealClaudeKey(token, username, secret)
+  } catch {
+    return null
+  }
 }
