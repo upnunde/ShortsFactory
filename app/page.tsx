@@ -40,14 +40,14 @@ export default function Page() {
             href="/studio/character"
             icon={<Clapperboard className="size-6" />}
             eyebrow="character"
-            title="캐릭터·AI 생성형 쇼츠"
+            title="캐릭터 생성 콘텐츠"
             description="주제를 대본과 화면 연출로 바꾸고 캐릭터, TTS, 생성 영상으로 제작합니다."
           />
           <ModeCard
             href="/studio/news-clips"
             icon={<Newspaper className="size-6" />}
             eyebrow="news_clip"
-            title="아나운서 뉴스 리포트 제작"
+            title="뉴스 콘텐츠"
             description="뉴스 자료를 분석해 아나운서 보도 대본을 만들고, TTS와 근거 영상을 교차 편집합니다."
           />
         </section>
@@ -72,19 +72,14 @@ function ModeCard({
   return (
     <Link
       href={href}
-      className="group flex min-h-64 flex-col justify-between rounded-2xl border border-separator bg-surface p-6 transition hover:-translate-y-0.5 hover:border-foreground/25 hover:shadow-lg"
+      className="group flex min-h-64 flex-col rounded-2xl border border-separator bg-surface p-6 transition hover:-translate-y-0.5 hover:border-foreground/25 hover:shadow-lg"
     >
-      <div>
-        <div className="flex size-12 items-center justify-center rounded-xl bg-default text-foreground">
-          {icon}
-        </div>
-        <p className="mt-6 text-xs tracking-[0.18em] text-muted">{eyebrow}</p>
-        <h2 className="mt-2 text-xl font-semibold">{title}</h2>
-        <p className="mt-3 text-sm leading-6 text-muted">{description}</p>
+      <div className="flex size-12 items-center justify-center rounded-xl bg-default text-foreground">
+        {icon}
       </div>
-      <p className="mt-6 text-sm font-medium group-hover:underline">
-        작업실 열기 →
-      </p>
+      <p className="mt-6 text-xs tracking-[0.18em] text-muted">{eyebrow}</p>
+      <h2 className="mt-2 text-xl font-semibold">{title}</h2>
+      <p className="mt-3 text-sm leading-6 text-muted">{description}</p>
     </Link>
   )
 }
