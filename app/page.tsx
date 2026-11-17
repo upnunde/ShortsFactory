@@ -1,6 +1,6 @@
 import Link from "next/link"
 
-import { Clapperboard, Newspaper, Settings } from "lucide-react"
+import { Clapperboard, LogOut, Newspaper, Settings } from "lucide-react"
 
 export default function Page() {
   return (
@@ -17,12 +17,22 @@ export default function Page() {
               완전히 분리됩니다.
             </p>
           </div>
-          <Link
-            href="/settings"
-            className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-separator bg-surface px-4 py-2.5 text-sm font-medium transition hover:border-foreground/25 hover:bg-default"
-          >
-            <Settings className="size-4" /> 플랫폼 설정
-          </Link>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Link
+              href="/settings"
+              className="inline-flex items-center gap-2 rounded-xl border border-separator bg-surface px-4 py-2.5 text-sm font-medium transition hover:border-foreground/25 hover:bg-default"
+            >
+              <Settings className="size-4" /> 플랫폼 설정
+            </Link>
+            <form action="/api/auth/logout" method="post">
+              <button
+                type="submit"
+                className="inline-flex items-center gap-2 rounded-xl border border-separator bg-surface px-4 py-2.5 text-sm font-medium text-muted transition hover:border-foreground/25 hover:bg-default hover:text-foreground"
+              >
+                <LogOut className="size-4" /> 로그아웃
+              </button>
+            </form>
+          </div>
         </header>
 
         <section className="grid gap-5 md:grid-cols-2">

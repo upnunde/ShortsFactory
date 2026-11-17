@@ -101,7 +101,7 @@ export function NewsClipAnglesStep({
             <Button
               className={stepHeaderActionButtonClassName}
               isDisabled={analyzing}
-              onPress={onRetry}
+              onPress={() => onRetry()}
             >
               <LoadingButtonLabel
                 loading={analyzing}
