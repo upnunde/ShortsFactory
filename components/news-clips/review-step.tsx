@@ -2841,28 +2841,30 @@ export function NewsClipReviewStep({
                   ]}
                 />
                 {optionalPane ? (
-                  <Switch
-                    aria-label={`${partPreviewLabel} 사용`}
-                    isSelected={optionalPaneEnabled}
-                    isDisabled={
-                      busy !== "" ||
-                      (optionalPane === "hook" && !coldOpenAvailable)
-                    }
-                    onChange={(enabled) =>
-                      setOptionalPaneEnabled(optionalPane, enabled)
-                    }
-                  >
-                    <Switch.Content>
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                      {optionalPane === "hook" && !coldOpenAvailable
-                        ? "적합한 훅 없음"
-                        : optionalPaneEnabled
-                          ? "사용"
-                          : "사용 안 함"}
-                    </Switch.Content>
-                  </Switch>
+                  <div className="ml-auto">
+                    <Switch
+                      aria-label={`${partPreviewLabel} 사용`}
+                      isSelected={optionalPaneEnabled}
+                      isDisabled={
+                        busy !== "" ||
+                        (optionalPane === "hook" && !coldOpenAvailable)
+                      }
+                      onChange={(enabled) =>
+                        setOptionalPaneEnabled(optionalPane, enabled)
+                      }
+                    >
+                      <Switch.Content>
+                        <Switch.Control>
+                          <Switch.Thumb />
+                        </Switch.Control>
+                        {optionalPane === "hook" && !coldOpenAvailable
+                          ? "적합한 훅 없음"
+                          : optionalPaneEnabled
+                            ? "사용"
+                            : "사용 안 함"}
+                      </Switch.Content>
+                    </Switch>
+                  </div>
                 ) : null}
               </div>
             ) : null}
