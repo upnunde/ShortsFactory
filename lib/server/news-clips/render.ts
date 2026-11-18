@@ -797,41 +797,42 @@ async function renderNewsClipExclusive(
       hookDurationSeconds + leadDurationSeconds + bodyDurationSeconds,
     phrases: endCtaScript,
   })
+  const offsetCues = (cues: typeof hookSubtitles, offsetSeconds: number) =>
+    cues.map((cue) => ({
+      ...cue,
+      start: roundDuration(cue.start + offsetSeconds),
+      end: roundDuration(cue.end + offsetSeconds),
+    }))
   const combinedSubtitles = snapSubtitleCueTimes([
     ...hookSubtitles,
-    ...leadSubtitles.map((cue) => ({
-      ...cue,
-      start: roundDuration(cue.start + hookDurationSeconds),
-      end: roundDuration(cue.end + hookDurationSeconds),
-    })),
-    ...bodySubtitles.map((cue) => ({
-      ...cue,
-      start: roundDuration(
-        cue.start + hookDurationSeconds + leadDurationSeconds
-      ),
-      end: roundDuration(cue.end + hookDurationSeconds + leadDurationSeconds),
-    })),
-    ...outroSubtitlesLocal.map((cue) => ({
-      ...cue,
-      start: roundDuration(
-        cue.start +
-          hookDurationSeconds +
-          leadDurationSeconds +
-          bodyDurationSeconds
-      ),
-      end: roundDuration(
-        cue.end +
-          hookDurationSeconds +
-          leadDurationSeconds +
-          bodyDurationSeconds
-      ),
-    })),
+    ...offsetCues(leadSubtitles, hookDurationSeconds),
+    ...offsetCues(bodySubtitles, hookDurationSeconds + leadDurationSeconds),
+    ...offsetCues(
+      outroSubtitlesLocal,
+      hookDurationSeconds + leadDurationSeconds + bodyDurationSeconds
+    ),
   ])
-  const exportSubtitles = combinedSubtitles.map((cue) => ({
-    ...cue,
-    start: roundDuration(cue.start + titleCardDurationSeconds),
-    end: roundDuration(cue.end + titleCardDurationSeconds),
-  }))
+  // 전체 영상은 핵심 훅 다음에 인트로가 들어간다. 편집용 자막 시간축은
+  // 인트로를 제외한 본편 기준으로 유지하고, 외부 SRT에만 인트로 길이를
+  // 훅 이후 구간의 오프셋으로 반영한다.
+  const exportSubtitles = snapSubtitleCueTimes([
+    ...hookSubtitles,
+    ...offsetCues(
+      leadSubtitles,
+      hookDurationSeconds + titleCardDurationSeconds
+    ),
+    ...offsetCues(
+      bodySubtitles,
+      hookDurationSeconds + titleCardDurationSeconds + leadDurationSeconds
+    ),
+    ...offsetCues(
+      outroSubtitlesLocal,
+      hookDurationSeconds +
+        titleCardDurationSeconds +
+        leadDurationSeconds +
+        bodyDurationSeconds
+    ),
+  ])
 
   const effectiveProject: NewsClipProject = {
     ...project,
@@ -956,6 +957,7 @@ async function renderNewsClipExclusive(
       )
     : "none"
   const joinedSignature = digest({
+    playbackOrder: ["hook", "intro", "lead", "body", "outro"],
     introVideoSignature: introEnabled ? introVideoSignature : "disabled",
     hookVideoSignature,
     leadVideoSignature,
@@ -1194,8 +1196,8 @@ async function renderNewsClipExclusive(
     !(await exists(joinedVideo))
   ) {
     const parts = [
-      ...(introEnabled ? [introVideo] : []),
       ...(hookReport ? [hookVideo] : []),
+      ...(introEnabled ? [introVideo] : []),
       ...(leadReport ? [leadVideo] : []),
       ...(bodyReport ? [bodyVideo] : []),
       ...(outroReport ? [outroVideo] : []),

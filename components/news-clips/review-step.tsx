@@ -2831,10 +2831,10 @@ export function NewsClipReviewStep({
                   onChange={setCompositionPane}
                   items={[
                     { id: "all", label: "전체" },
-                    { id: "intro", label: "인트로" },
                     ...(project.productionMode === "buildup2"
                       ? [{ id: "hook" as const, label: "핵심 훅" }]
                       : []),
+                    { id: "intro", label: "인트로" },
                     { id: "lead", label: "서두" },
                     { id: "body", label: "본문" },
                     { id: "outro", label: "마무리" },
