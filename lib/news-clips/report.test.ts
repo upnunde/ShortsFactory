@@ -1822,6 +1822,30 @@ test("짧은 호흡이어도 조사와 의존 서술어 사이를 가르지 않�
   assert.equal(cues.map((cue) => cue.text).join(" "), words.join(" "))
 })
 
+test("관형어와 피수식어는 한 줄 칸에서 가르지 않는다", () => {
+  const words = "당장 마땅한 해결책이 없다는 이유로 내놓은 해법이,".split(" ")
+  const cues = subtitleCuesFromSpeechAlignment(
+    {
+      id: "adnominal-lead",
+      narration: "",
+      visual: "broll",
+      sourceStart: 0,
+      sourceEnd: 6,
+      start: 0,
+      end: 6,
+      alignment: words.map((text, index) => ({
+        text,
+        start: index * 0.4,
+        end: index * 0.4 + 0.32,
+      })),
+    },
+    { maxCharacters: 16, preferredCharacters: 16 }
+  )
+  assert.ok(cues.every((cue) => !/마땅한$/u.test(cue.text)))
+  assert.ok(cues.some((cue) => /마땅한 해결책/.test(cue.text)))
+  assert.equal(cues.map((cue) => cue.text).join(" "), words.join(" "))
+})
+
 test("장면 정보가 없는 기존 자막도 문장 순서로 장면 싱크를 복원한다", () => {
   const scenes = buildReportScenes(
     "첫 장면은 두 자막으로 설명합니다. 직접 발언은 길게 이어집니다.",

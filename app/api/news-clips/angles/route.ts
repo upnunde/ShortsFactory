@@ -105,6 +105,7 @@ export async function POST(request: Request) {
       const plan = await extractVideoSummaryPlan(transcript, {
         sourceId: source.id,
         sourceTitle: source.title,
+        focus,
       })
       const angles = videoSummaryPlanToAngleOptions(plan)
       if (angles.length === 0) {

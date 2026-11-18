@@ -1791,7 +1791,15 @@ function partitionSpeechTokens(
       const token = tokens[end]!
       text = joinSpokenTokens(text, cleanPhrase(token.text))
       const length = captionVisualUnits(text)
-      if (end > start && length > maxChars) break
+      const remainingText = spokenTextUntilBoundary(tokens, end + 1)
+      // 짧은 서술 끝(`있어!`, `거야.`)만 남았으면 한 줄 폭을 조금 넘겨서라도 붙인다.
+      const trailingPredicateSlack =
+        remainingText &&
+        captionVisualUnits(remainingText) <= preferredChars * 0.55 &&
+        looksLikeSpokenPredicateEnd(remainingText)
+          ? Math.ceil(preferredChars * 0.35)
+          : 0
+      if (end > start && length > maxChars + trailingPredicateSlack) break
 
       const next = tokens[end + 1]
       const following = tokens[end + 2]
@@ -1800,9 +1808,7 @@ function partitionSpeechTokens(
       const hardBoundary =
         token.boundaryAfter === true ||
         /[,;:，；：–—.!?。！？]["'”’)]*$/.test(text)
-      const remainingLength = captionVisualUnits(
-        spokenTextUntilBoundary(tokens, end + 1)
-      )
+      const remainingLength = captionVisualUnits(remainingText)
       let score =
         spokenCaptionBoundaryScore({
           text,
@@ -1816,6 +1822,14 @@ function partitionSpeechTokens(
           remainingLength,
           isLast: end === tokens.length - 1,
         }) + continuation.score
+      if (
+        remainingText &&
+        remainingLength > 0 &&
+        remainingLength <= preferredChars * 0.55 &&
+        looksLikeSpokenPredicateEnd(remainingText)
+      ) {
+        score -= 220
+      }
 
       // 자막 수를 필요 이상 늘리지 않되, 날짜·문장 끝은 독립 의미 단위로 둔다.
       score -= 8
@@ -1834,7 +1848,9 @@ function partitionSpeechTokens(
           following?.text ?? ""
         )
       ) {
-        score -= 180
+        // 관형+명사는 한 줄에 안 들어가도 관형어 뒤에서 끊지 않고
+        // 앞에서 끊어 `아까운 수험생들에게`를 유지한다.
+        score -= splitsAdnominalModifier(token.text, next.text) ? 360 : 180
       }
 
       if (!selected || score > selected.score) {
@@ -1877,12 +1893,24 @@ function splitsFixedExpression(left: string, right: string) {
     (/(?:기|함)$/u.test(current) &&
       /^(?:위한|위해|위해서|위하여)(?:\s|$)/u.test(next)) ||
     (/(?:위한|대한|따른)$/u.test(current) && /^[가-힣A-Za-z0-9]/u.test(next)) ||
+    splitsAdnominalModifier(current, next) ||
     splitsNominalCompound(current, next) ||
     (/(?:있어야|해야|되어야|돼야)$/u.test(current) &&
       /^(?:할|될|하는|되는)(?:\s|$)/u.test(next)) ||
     (/(?:오로지|바로|딱|절대|결코)$/u.test(current) &&
       /^[가-힣0-9]/u.test(next))
   )
+}
+
+/** `마땅한 해결책`, `아까운 수험생`처럼 관형어+피수식어는 한 칸으로 둔다. */
+function splitsAdnominalModifier(left: string, right: string) {
+  const current = cleanPhrase(left).replace(/[,.;:!?。！？]+$/u, "")
+  const next = cleanPhrase(right).replace(/[,.;:!?。！？]+$/u, "")
+  if (!/(?:한|운|러운|로운|스런|된)$/u.test(current)) return false
+  if (/^(?:것|수|줄|듯|만큼|대로|뿐|지|듯이)(?:은|는|이|가|을|를|도|만)?$/u.test(next)) {
+    return false
+  }
+  return /^[가-힣A-Za-z0-9]{2,}/u.test(next)
 }
 
 function splitsNominalCompound(left: string, right: string) {

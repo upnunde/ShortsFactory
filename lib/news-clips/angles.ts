@@ -41,6 +41,41 @@ export function angleHasLockedRange(
   )
 }
 
+/**
+ * 각도 분석 프롬프트용 전사. 앞부분만 자르지 않고 영상 전체에서
+ * 시간순으로 고르게 뽑아 토큰 한도 안에서 초·중·후반 핵심을 모두 보게 한다.
+ */
+export function selectTranscriptForAnglePrompt<T extends AngleTranscriptSegment>(
+  transcript: T[],
+  options: { maxSegments?: number } = {}
+) {
+  const maxSegments = Math.max(24, Math.floor(options.maxSegments ?? 160))
+  const ordered = transcript
+    .filter(
+      (segment) =>
+        segment.text.trim().length > 0 &&
+        Number.isFinite(segment.start) &&
+        Number.isFinite(segment.end) &&
+        segment.end > segment.start
+    )
+    .toSorted(
+      (left, right) => left.start - right.start || left.end - right.end
+    )
+  if (ordered.length <= maxSegments) return ordered
+
+  const selected: T[] = []
+  const seen = new Set<number>()
+  for (let slot = 0; slot < maxSegments; slot += 1) {
+    const index = Math.round(
+      (slot * (ordered.length - 1)) / Math.max(1, maxSegments - 1)
+    )
+    if (seen.has(index)) continue
+    seen.add(index)
+    selected.push(ordered[index]!)
+  }
+  return selected
+}
+
 /** 실제 사용할 원본 구간과 겹치는 전사 문장을 빠짐없이 시간순으로 반환한다. */
 export function transcriptForAngle<T extends AngleTranscriptSegment>(
   angle: Pick<NewsAngleOption, "sourceStart" | "sourceEnd">,

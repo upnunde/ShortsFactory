@@ -2354,16 +2354,21 @@ export function NewsClipReviewStep({
     if (!draft) return
     setRemakingPreviewPart(part)
     try {
-      await onPreview(
-        true,
-        {
-          ...draft,
-          subtitleTimingsLocked: Boolean(
-            draft.subtitleTimingsLocked && draft.subtitles.length
-          ),
-        },
-        part
-      )
+    // 서두·마무리는 TTS라 다시 만들면 새 자막 칸이 생긴다. 잠금을 유지하면
+    // 예전 ID만 남겨 서두 자막 목록이 비거나 옛 칸이 남는다. 본문(원본 음성)
+    // 다시 만들기만 잠긴 자막 시간을 유지한다.
+    await onPreview(
+      true,
+      {
+        ...draft,
+        subtitleTimingsLocked: Boolean(
+          draft.subtitleTimingsLocked &&
+            draft.subtitles.length &&
+            part === "body"
+        ),
+      },
+      part
+    )
     } finally {
       setRemakingPreviewPart(null)
     }

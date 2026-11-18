@@ -60,10 +60,27 @@ export function preservePreviewSubtitleEdits(
     // 보도형은 렌더 서버가 기존 문구·줄바꿈을 보존한 채 실제 TTS 단어
     // 시각만 갱신한다. 이 경우 예전 잠긴 시간을 다시 덮어쓰지 않는다.
     if (options.acceptRenderedLockedTimings === true) return rendered
-    // 원본 음성형은 현재 문구와 시간을 유지하되, 서버가 현재 장면에서
-    // 제외한 이전 장면의 자막까지 다시 살리지는 않는다.
+    // 빌드업형: 원본 음성(quote) 자동 칸은 잠긴 시간·문구를 유지하고,
+    // TTS 서두·마무리(speech-caption)는 다시 만든 렌더 결과를 받는다.
+    // 예전처럼 current를 ID로만 걸러 쓰면 서두를 다시 만들 때 새
+    // speech-caption ID가 전부 버려져 자막 목록이 비게 된다.
     const renderedIds = new Set(rendered.map((cue) => cue.id))
-    return current.filter((cue) => renderedIds.has(cue.id))
+    const lockedQuotes = new Map(
+      current
+        .filter(
+          (cue) =>
+            !cue.edited &&
+            cue.id.startsWith("quote-caption") &&
+            renderedIds.has(cue.id)
+        )
+        .map((cue) => [cue.id, cue] as const)
+    )
+    const withEdits = mergeEditedSubtitleText(rendered, current, {
+      trustExactId: true,
+      preserveTimes: true,
+    })
+    if (!lockedQuotes.size) return withEdits
+    return withEdits.map((cue) => lockedQuotes.get(cue.id) ?? cue)
   }
   return mergeEditedSubtitleText(rendered, current, { trustExactId: true })
 }

@@ -198,9 +198,18 @@ export async function youtubeAccessToken(profileId = "default") {
     throw new Error("youtube-refresh-failed")
   }
   const refreshed = { ...token, accessToken: json.access_token }
-  await writeFile(tokenPath("youtube", profileId), JSON.stringify(refreshed), {
-    mode: 0o600,
-  })
+  // Vercel은 로컬 파일을 유지하지 않으므로 환경변수 토큰은 메모리만 갱신한다.
+  if (!tokenFromEnv("youtube", profileId)) {
+    try {
+      await writeFile(
+        tokenPath("youtube", profileId),
+        JSON.stringify(refreshed),
+        { mode: 0o600 }
+      )
+    } catch {
+      // 읽기 전용/일시 파일시스템에서도 새 access token은 반환한다.
+    }
+  }
   return refreshed.accessToken
 }
 
@@ -243,14 +252,58 @@ async function readApp(
   platform: AccountPlatform,
   profileId: string
 ): Promise<AppCredentials | null> {
-  return readJson<AppCredentials>(appPath(platform, profileId))
+  const fromFile = await readJson<AppCredentials>(appPath(platform, profileId))
+  if (fromFile?.clientId && fromFile?.clientSecret) return fromFile
+  return appFromEnv(platform, profileId)
 }
 
 async function readToken(
   platform: AccountPlatform,
   profileId: string
 ): Promise<StoredToken | null> {
-  return readJson<StoredToken>(tokenPath(platform, profileId))
+  const fromFile = await readJson<StoredToken>(tokenPath(platform, profileId))
+  if (fromFile?.accessToken || fromFile?.refreshToken) return fromFile
+  return tokenFromEnv(platform, profileId)
+}
+
+/** Vercel 등 파일 저장이 없는 환경에서 YouTube 업로드 연결을 유지한다. */
+function appFromEnv(
+  platform: AccountPlatform,
+  profileId: string
+): AppCredentials | null {
+  if (platform !== "youtube" || !envProfileMatches(profileId)) return null
+  const clientId = process.env.YOUTUBE_OAUTH_CLIENT_ID?.trim() ?? ""
+  const clientSecret = process.env.YOUTUBE_OAUTH_CLIENT_SECRET?.trim() ?? ""
+  if (!clientId || !clientSecret) return null
+  return { clientId, clientSecret }
+}
+
+function tokenFromEnv(
+  platform: AccountPlatform,
+  profileId: string
+): StoredToken | null {
+  if (platform !== "youtube" || !envProfileMatches(profileId)) return null
+  const refreshToken = process.env.YOUTUBE_OAUTH_REFRESH_TOKEN?.trim() ?? ""
+  const accessToken = process.env.YOUTUBE_OAUTH_ACCESS_TOKEN?.trim() ?? ""
+  if (!refreshToken && !accessToken) return null
+  const accountId = process.env.YOUTUBE_OAUTH_CHANNEL_ID?.trim() ?? ""
+  const accountName =
+    process.env.YOUTUBE_OAUTH_CHANNEL_NAME?.trim() || "YouTube"
+  return {
+    accessToken: accessToken || "env-pending-refresh",
+    ...(refreshToken ? { refreshToken } : {}),
+    ...(accountId ? { accountId } : {}),
+    accountName,
+    connectedAt:
+      process.env.YOUTUBE_OAUTH_CONNECTED_AT?.trim() ||
+      new Date(0).toISOString(),
+  }
+}
+
+function envProfileMatches(profileId: string) {
+  const configured = process.env.YOUTUBE_OAUTH_PROFILE_ID?.trim()
+  if (!configured) return true
+  return configured === safeProfileId(profileId)
 }
 
 function safeProfileId(value: string) {

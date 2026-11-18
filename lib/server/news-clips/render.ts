@@ -48,6 +48,7 @@ import {
   continuousSpeechWordBoundaries,
   mergeEditedSubtitleText,
   retimeLockedSubtitleCuesToSpeech,
+  subtitleCuesFromSpeechAlignment,
   groupReportVisualContinuationSegments,
   reportSceneAudioMode,
   reportSceneVisualMode,
@@ -455,14 +456,21 @@ async function renderNewsClipExclusive(
   const sources = await resolveProjectSources(project)
   const source = sources.get(project.source!.id)
   if (!source) throw new Error("source-upload-required")
-  const freshSilences = await detectAudioSilence(source.localFile).catch(
-    () => project.detectedSilences
-  )
-  project = {
-    ...project,
-    detectedSilences: freshSilences,
+  // 이미 분석·각도 단계에서 잡은 무음 구간이 있으면 긴 ffmpeg 전수 검사를 다시
+  // 돌리지 않는다. 긴 원본에서 진행률이 2%에 멈춘 것처럼 보이는 주원인이다.
+  if (project.detectedSilences.length) {
+    await progress(8, "원본 확인 완료")
+  } else {
+    await progress(4, "원본 무음 구간 확인 중")
+    const freshSilences = await detectAudioSilence(source.localFile).catch(
+      () => [] as typeof project.detectedSilences
+    )
+    project = {
+      ...project,
+      detectedSilences: freshSilences,
+    }
+    await progress(8, "원본 확인 완료")
   }
-  await progress(8, "원본 확인 완료")
   const sourceFiles = new Map(
     [...sources].map(([sourceId, item]) => [sourceId, item.localFile])
   )
@@ -641,6 +649,26 @@ async function renderNewsClipExclusive(
     const preferSingleLine =
       options.part === "lead" ||
       (project.productionMode === "report" && options.part === "body")
+    // 서두는 잠긴 자동 칸·글자 수 재분할보다 TTS 단어 정렬을 정본으로 쓴다.
+    // 사용자가 직접 고친 칸만 그 위에 얹는다.
+    if (options.part === "lead") {
+      const lineCharacters = subtitleLineCharacterLimit(
+        settings.bodySubtitleText
+      )
+      const speechCues = options.report.scenes.flatMap((scene) =>
+        subtitleCuesFromSpeechAlignment(scene, {
+          maxCharacters: lineCharacters,
+          preferredCharacters: lineCharacters,
+        })
+      )
+      if (speechCues.length) {
+        return snapSubtitleCueTimes(
+          mergeEditedSubtitleText(speechCues, lockedEdited, {
+            trustExactId: true,
+          })
+        )
+      }
+    }
     if (
       project.productionMode === "report" &&
       options.edited.length &&
@@ -668,10 +696,8 @@ async function renderNewsClipExclusive(
       options.edited.length &&
       !transcriptWasRefreshed
     ) {
-      // 4번에서 확정한 문구·줄바꿈·개수·시간을 그대로 렌더한다.
-      // 폭 검증은 입력 UI에서 끝났으므로 서버가 다시 줄바꿈하지 않는다.
-      // 다만 자동 생성된 서두만 한 줄 우선 규칙으로 정리한다. 사용자가
-      // 직접 줄바꿈한 edited 자막은 그대로 보존한다.
+      // 서두는 위에서 TTS 정렬로 이미 처리했다. 여기선 본문·마무리만
+      // 잠긴 칸을 유지하되, 한 줄 재분할 후에는 단어 시간에 다시 붙인다.
       const lockedForRender = preferSingleLine
         ? lockedEdited.flatMap((cue) =>
             cue.edited
@@ -683,7 +709,12 @@ async function renderNewsClipExclusive(
                 )
           )
         : lockedEdited
-      return lockedForRender
+      return snapSubtitleCueTimes(
+        retimeLockedSubtitleCuesToSpeech(
+          lockedForRender,
+          options.report.scenes
+        )
+      )
     }
     const localEdited = options.edited.map((cue) => ({
       ...cue,
@@ -691,26 +722,31 @@ async function renderNewsClipExclusive(
       end: Math.max(0.04, cue.end - options.offsetSeconds),
     }))
     const lineCharacters = subtitleLineCharacterLimit(settings.bodySubtitleText)
+    // 음성 실측으로 칸을 만든 뒤 한 줄 폭에 맞게 다시 나누면 시간이
+    // 글자 비율로 바뀐다. 최종적으로 TTS 단어 경계에 다시 붙인다.
     const measured = snapSubtitleCueTimes(
-      layoutTimedSubtitleCues(
-        applySubtitleTimingForRender(
-          localEdited,
-          options.planned,
-          options.report.scenes,
-          {
-            lockTimings:
-              project.subtitleTimingsLocked && !transcriptWasRefreshed,
-            captionPhrases: reportCaptionPhrases(options.phrases),
-            transcript: project.transcript,
-            maxCaptionCharacters:
-              preferSingleLine
-                ? lineCharacters
-                : automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
-            preferredCaptionCharacters: lineCharacters,
-          }
+      retimeLockedSubtitleCuesToSpeech(
+        layoutTimedSubtitleCues(
+          applySubtitleTimingForRender(
+            localEdited,
+            options.planned,
+            options.report.scenes,
+            {
+              lockTimings:
+                project.subtitleTimingsLocked && !transcriptWasRefreshed,
+              captionPhrases: reportCaptionPhrases(options.phrases),
+              transcript: project.transcript,
+              maxCaptionCharacters:
+                preferSingleLine
+                  ? lineCharacters
+                  : automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
+              preferredCaptionCharacters: lineCharacters,
+            }
+          ),
+          settings.bodySubtitleText,
+          { maxLines: preferSingleLine ? 1 : 2 }
         ),
-        settings.bodySubtitleText,
-        { maxLines: preferSingleLine ? 1 : 2 }
+        options.report.scenes
       )
     )
     // 영상 경계를 복구해 타임코드를 다시 만들더라도 사용자가 직접 고친 문구는

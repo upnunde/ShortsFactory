@@ -6,6 +6,7 @@ import {
   includeLeadingContext,
   lockAngleRangeToTranscript,
   normalizeAngleOptions,
+  selectTranscriptForAnglePrompt,
   transcriptForAngle,
 } from "./angles.ts"
 
@@ -167,4 +168,43 @@ test("주어와 내용이 완결된 시작 문장은 앞 구간을 추가하지 
   )
 
   assert.equal(angle.sourceStart, 12)
+})
+
+test("각도 프롬프트 전사는 앞부분만 자르지 않고 전체 구간을 고르게 고른다", () => {
+  const transcript = Array.from({ length: 400 }, (_, index) => ({
+    id: `seg-${index + 1}`,
+    text: `발언 ${index + 1}`,
+    start: index * 2,
+    end: index * 2 + 1.5,
+  }))
+
+  const selected = selectTranscriptForAnglePrompt(transcript, {
+    maxSegments: 160,
+  })
+
+  assert.equal(selected.length, 160)
+  assert.equal(selected[0]?.id, "seg-1")
+  assert.equal(selected.at(-1)?.id, "seg-400")
+  assert.ok(selected.some((segment) => segment.start >= 300))
+  assert.ok(selected.some((segment) => segment.start >= 150 && segment.start < 250))
+  assert.ok(
+    selected.every((segment, index) => {
+      if (index === 0) return true
+      return segment.start >= selected[index - 1]!.start
+    })
+  )
+})
+
+test("짧은 전사는 각도 프롬프트용으로 전부 유지한다", () => {
+  const transcript = Array.from({ length: 40 }, (_, index) => ({
+    id: `short-${index + 1}`,
+    text: `짧은 발언 ${index + 1}`,
+    start: index,
+    end: index + 0.8,
+  }))
+  const selected = selectTranscriptForAnglePrompt(transcript, {
+    maxSegments: 160,
+  })
+  assert.equal(selected.length, 40)
+  assert.equal(selected.at(-1)?.id, "short-40")
 })

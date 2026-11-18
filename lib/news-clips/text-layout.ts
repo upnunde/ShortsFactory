@@ -744,6 +744,16 @@ function subtitleLineBreakPenalty(
   ) {
     penalty += lineLimit * 14
   }
+  // `마땅한 해결책`, `아까운 수험생` 관형 수식은 칸·줄 경계에서 가르지 않는다.
+  if (
+    /(?:한|운|러운|로운|스런|된)$/u.test(left.split(" ").at(-1) ?? "") &&
+    /^[가-힣A-Za-z0-9]{2,}/u.test(right.split(" ")[0] ?? "") &&
+    !/^(?:것|수|줄|듯|만큼|대로|뿐|지|듯이)(?:은|는|이|가|을|를|도|만)?(?:\s|$)/u.test(
+      right
+    )
+  ) {
+    penalty += lineLimit * 14
+  }
   if (splitsSubtitleNominalCompound(left, right)) {
     penalty += lineLimit * 12
   }
@@ -786,9 +796,7 @@ function splitsSubtitleNominalCompound(left: string, right: string) {
     /(?:사고|원고|피고|선고|광고|경고|해고|최고|재고|참고|보고서|문서|순서|질서|부서)$/u.test(
       current
     ) &&
-    /^[가-힣A-Za-z0-9]+(?:은|는|이|가|을|를|의|에|에서|로|으로|와|과|도|만)[,.;:!?。！？]?$/u.test(
-      next
-    )
+    looksLikeParticleMarkedNoun(next)
   ) {
     return true
   }
@@ -807,10 +815,16 @@ function splitsSubtitleNominalCompound(left: string, right: string) {
     return false
   }
   return (
-    /^[가-힣A-Za-z0-9]+$/u.test(current) &&
-    /^[가-힣A-Za-z0-9]+(?:은|는|이|가|을|를|의|에|에서|로|으로|와|과|도|만)[,.;:!?。！？]?$/u.test(
-      next
-    )
+    /^[가-힣A-Za-z0-9]+$/u.test(current) && looksLikeParticleMarkedNoun(next)
+  )
+}
+
+/** `바로`처럼 끝이 조사형인 부사를 명사+조사로 오인하지 않는다. */
+function looksLikeParticleMarkedNoun(value: string) {
+  const token = normalizeText(value)
+  if (/^(?:바로|서로|모두|따로)[,.;:!?。！？]?$/u.test(token)) return false
+  return /^[가-힣A-Za-z0-9]+(?:은|는|이|가|을|를|의|에|에서|로|으로|와|과|도|만)[,.;:!?。！？]?$/u.test(
+    token
   )
 }
 
@@ -1038,10 +1052,12 @@ function pairScore(
     : /[,;:，；：–—]$/.test(left)
       ? limit * 0.18
       : 0
+  // 한 줄 폭은 유지하되, 길이 반반보다 의미 경계를 조금 더 우선한다.
   return (
-    Math.abs(leftUnits - rightUnits) +
+    Math.abs(leftUnits - rightUnits) * 0.45 +
     shortPenalty -
-    naturalBreakBonus +
+    naturalBreakBonus -
+    leftUnits * 0.08 +
     subtitleLineBreakPenalty(left, right, limit)
   )
 }

@@ -17,6 +17,8 @@ type VideoSummaryTextGenerator = (
 type ExtractVideoSummaryOptions = {
   sourceId: string
   sourceTitle?: string
+  /** 사용자가 지정한 핵심 키워드·문장. 있으면 관련 moment·주제를 우선한다. */
+  focus?: string
   maxChunkCharacters?: number
   concurrency?: number
   /** 테스트나 다른 LLM 연결에서도 같은 순수 파이프라인을 쓴다. */
@@ -54,11 +56,17 @@ export async function extractVideoSummaryPlan(
   if (!chunks.length) throw new Error("empty-video-transcript")
 
   const generateText = options.generateText ?? defaultVideoSummaryTextGenerator
+  const focus = options.focus?.trim() ?? ""
   const chunkAnalyses = await mapWithConcurrency(
     chunks,
     Math.max(1, Math.min(4, Math.floor(options.concurrency ?? 2))),
     async (chunk) =>
-      analyzeTranscriptChunk(chunk, options.sourceTitle ?? "", generateText)
+      analyzeTranscriptChunk(
+        chunk,
+        options.sourceTitle ?? "",
+        generateText,
+        focus
+      )
   )
   const moments = chunkAnalyses.flatMap((analysis) => analysis.moments)
   // 짧은 영상이나 모델이 일부 moment를 누락한 경우에도 실제 전사에서
@@ -77,11 +85,17 @@ export async function extractVideoSummaryPlan(
         "같은 발언을 반복하지 말고, sourceRanges는 원본 시간순으로 배치한다.",
         "rangeId는 아래 moments에 있는 id만 사용한다. 시간과 내용을 새로 만들지 않는다.",
         "role은 hook, context, evidence, conclusion 중 하나다.",
+        focus
+          ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. focus와 의미가 가까운 moment를 최우선으로 고르고, topics의 제목·요약도 focus 논점을 중심으로 구성한다. 원본에 없는 내용은 만들지 않는다."
+          : "",
         "JSON 객체만 출력한다:",
         '{"overallSummary":"...","topics":[{"id":"topic-1","title":"...","summary":"...","keywords":["..."],"sourceRanges":[{"rangeId":"summary-chunk-1-moment-1","role":"hook"}]}]}',
-      ].join("\n"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       JSON.stringify({
         sourceTitle: options.sourceTitle ?? "",
+        focus,
         chunks: chunkAnalyses.map((analysis) => ({
           id: analysis.chunkId,
           summary: analysis.summary,
@@ -170,7 +184,8 @@ async function defaultVideoSummaryTextGenerator(
 async function analyzeTranscriptChunk(
   chunk: VideoSummaryTranscriptChunk,
   sourceTitle: string,
-  generateText: VideoSummaryTextGenerator
+  generateText: VideoSummaryTextGenerator,
+  focus = ""
 ): Promise<ChunkAnalysis> {
   let parsed: Record<string, unknown> = {}
   try {
@@ -183,10 +198,15 @@ async function analyzeTranscriptChunk(
         "moment의 sourceStart/sourceEnd는 입력 segment의 실제 start/end 범위만 쓴다.",
         "주어·대상·결론이 있는 완결된 발언을 선택하고, 같은 내용을 반복하지 않는다.",
         "원문에 없는 사실을 추가하지 않는다.",
+        focus
+          ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. focus와 의미가 가까운 발언을 moments에 더 많이·우선적으로 넣는다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함한다."
+          : "",
         "JSON 객체만 출력한다:",
         '{"summary":"...","moments":[{"title":"...","summary":"...","keywords":["..."],"sourceStart":0,"sourceEnd":10}]}',
-      ].join("\n"),
-      JSON.stringify({ sourceTitle, chunk }),
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      JSON.stringify({ sourceTitle, focus, chunk }),
       1500
     )
     parsed = asRecord(parseJson(response))

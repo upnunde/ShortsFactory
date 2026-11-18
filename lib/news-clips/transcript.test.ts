@@ -1559,6 +1559,27 @@ test("짧은 문장도 단어를 자르지 않는 한 줄 자막으로 유지한
   assert.ok(chunks.at(-1)?.endsWith("끝입니다."))
 })
 
+test("한 줄 서두 자막은 명사구를 부사 앞에서 어색하게 가르지 않는다", () => {
+  const cues = layoutTimedSubtitleCues(
+    [
+      {
+        id: "lead-people",
+        start: 0,
+        end: 4,
+        text: "사람들이 화난 지점이 바로 여기야.",
+        emphasis: [],
+        emphasisColor: "yellow",
+      },
+    ],
+    defaultNewsClipSettings.bodySubtitleText,
+    { maxLines: 1 }
+  )
+  assert.deepEqual(
+    cues.map((cue) => cue.text),
+    ["사람들이 화난 지점이", "바로 여기야."]
+  )
+})
+
 test("숫자 뒤 조사를 다음 자막으로 분리하지 않는다", () => {
   const layout = {
     ...defaultNewsClipSettings.bodySubtitleText,

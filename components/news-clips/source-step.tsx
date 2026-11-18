@@ -88,8 +88,8 @@ export function NewsClipSourceStep({
   onIssueStepRequested: () => void
   onNote: (value: string) => void
   onBusy: (value: string) => void
-  onYoutubeUrl: (url: string) => void
-  onVideoFile: (file: File) => void
+  onYoutubeUrl: (url: string, focus?: string) => void
+  onVideoFile: (file: File, focus?: string) => void
   onAnalyzed: (
     source: NewsSource,
     transcript: TranscriptSegment[],
@@ -114,10 +114,12 @@ export function NewsClipSourceStep({
   const [video, setVideo] = useState<File | null>(null)
   const [subtitle, setSubtitle] = useState<File | null>(null)
   const [directVideoFile, setDirectVideoFile] = useState<File | null>(null)
+  const [sourceFocus, setSourceFocus] = useState("")
   const directVideoInputRef = useRef<HTMLInputElement>(null)
   const directYoutubeUrl = extractYouTubeUrl(query)
   const isBuildup2 = productionMode === "buildup2"
   const isVideoSummary = isBuildup2 && sourceSelectionMode === "video-summary"
+  const showSourceFocus = Boolean(directYoutubeUrl) || Boolean(directVideoFile)
   const canAnalyze =
     Boolean(directYoutubeUrl) ||
     Boolean(directVideoFile) ||
@@ -128,14 +130,15 @@ export function NewsClipSourceStep({
 
   function runIssueAction() {
     if (busy) return
+    const focus = sourceFocus.trim().slice(0, 300)
     if (directYoutubeUrl) {
-      onYoutubeUrl(directYoutubeUrl)
+      onYoutubeUrl(directYoutubeUrl, focus)
       return
     }
     if (directVideoFile) {
       const file = directVideoFile
       setDirectVideoFile(null)
-      onVideoFile(file)
+      onVideoFile(file, focus)
       return
     }
     if (isBuildup2) {
@@ -589,6 +592,28 @@ export function NewsClipSourceStep({
                     </Button>
                   ) : null}
                 </div>
+                {showSourceFocus ? (
+                  <label className="flex flex-col gap-2">
+                    <span className="text-sm font-medium">
+                      주요 키워드 · 문장
+                    </span>
+                    <textarea
+                      rows={2}
+                      maxLength={300}
+                      value={sourceFocus}
+                      aria-label="주요 키워드 또는 문장"
+                      placeholder={
+                        isVideoSummary
+                          ? "예: 예산 모순, 현장 피해, 후속 조치"
+                          : "예: 이 발언의 핵심 주장, 예산 낭비 근거"
+                      }
+                      onChange={(event) =>
+                        setSourceFocus(event.currentTarget.value)
+                      }
+                      className={`${field} min-h-16 resize-none`}
+                    />
+                  </label>
+                ) : null}
                 <div className="flex flex-wrap items-center justify-end gap-3">
                   <Button
                     isDisabled={

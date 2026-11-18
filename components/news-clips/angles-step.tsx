@@ -119,36 +119,38 @@ export function NewsClipAnglesStep({
           <p className="truncate text-sm text-muted">{sourceTitle}</p>
         ) : null}
 
-        {productionMode === "report" ? (
-          <Card>
-            <Card.Header className="flex-row items-center justify-between gap-4 border-b border-separator pb-4">
-              <Card.Title>원하는 핵심 내용</Card.Title>
-              <Button
-                className="shrink-0"
-                isDisabled={!focus.trim() || Boolean(busy)}
-                onPress={() => onRetry(focus.trim())}
-              >
-                <LoadingButtonLabel
-                  loading={busyMatches(busy, "angles")}
-                  label="다시 요약"
-                  loadingLabel="요약 중"
-                  progress={progress}
-                />
-              </Button>
-            </Card.Header>
-            <Card.Content className="pt-4">
-              <textarea
-                rows={2}
-                aria-label="원하는 핵심 내용"
-                value={focus}
-                maxLength={300}
-                placeholder="예: 예산 낭비, 재정 부담, 정책의 모순"
-                onChange={(event) => setFocus(event.currentTarget.value)}
-                className="w-full resize-none rounded-xl border border-separator bg-background px-3 py-2.5 text-sm outline-none focus:border-foreground/40"
+        <Card>
+          <Card.Header className="flex-row items-center justify-between gap-4 border-b border-separator pb-4">
+            <Card.Title>원하는 핵심 내용</Card.Title>
+            <Button
+              className="shrink-0"
+              isDisabled={!focus.trim() || Boolean(busy)}
+              onPress={() => onRetry(focus.trim())}
+            >
+              <LoadingButtonLabel
+                loading={busyMatches(busy, "angles")}
+                label="다시 요약"
+                loadingLabel="요약 중"
+                progress={progress}
               />
-            </Card.Content>
-          </Card>
-        ) : null}
+            </Button>
+          </Card.Header>
+          <Card.Content className="pt-4">
+            <textarea
+              rows={2}
+              aria-label="원하는 핵심 내용"
+              value={focus}
+              maxLength={300}
+              placeholder={
+                isVideoSummary
+                  ? "예: 예산 모순, 현장 피해, 후속 조치"
+                  : "예: 예산 낭비, 재정 부담, 정책의 모순"
+              }
+              onChange={(event) => setFocus(event.currentTarget.value)}
+              className="w-full resize-none rounded-xl border border-separator bg-background px-3 py-2.5 text-sm outline-none focus:border-foreground/40"
+            />
+          </Card.Content>
+        </Card>
 
         {isVideoSummary && sourceOverview ? (
           <Card>

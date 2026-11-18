@@ -1461,7 +1461,7 @@ export function NewsClipsApp({
     }
   }
 
-  async function runYoutubeUrl(url: string) {
+  async function runYoutubeUrl(url: string, focus = "") {
     const progressKey = "url-source:video"
     const runId = crypto.randomUUID()
     updateOperationProgress(progressKey, runId, 1)
@@ -1484,7 +1484,7 @@ export function NewsClipsApp({
       }
 
       updateOperationProgress(progressKey, runId, 100)
-      await finishDirectSource(source, url, "URL")
+      await finishDirectSource(source, url, "URL", focus)
     } catch (error) {
       setNote(
         error instanceof Error
@@ -1498,7 +1498,7 @@ export function NewsClipsApp({
     }
   }
 
-  async function runVideoFile(file: File) {
+  async function runVideoFile(file: File, focus = "") {
     setBusy("file-source:video")
     setNote("")
     try {
@@ -1515,7 +1515,7 @@ export function NewsClipsApp({
       if (!response.ok || !source.localFile) {
         throw new Error(source.message || "영상 파일을 업로드하지 못했습니다.")
       }
-      await finishDirectSource(source, file.name, "파일")
+      await finishDirectSource(source, file.name, "파일", focus)
     } catch (error) {
       setNote(
         error instanceof Error
@@ -1530,7 +1530,8 @@ export function NewsClipsApp({
   async function finishDirectSource(
     source: NewsSource,
     query: string,
-    sourceLabel: "URL" | "파일"
+    sourceLabel: "URL" | "파일",
+    focus = ""
   ) {
     const selectedIssue = directSourceIssue(source)
     const controller = new AbortController()
@@ -1581,7 +1582,13 @@ export function NewsClipsApp({
     }
     setBusy(sourceLabel === "파일" ? "file-source:script" : "url-source:script")
     setNote("영상 확인을 마쳤습니다. 핵심 내용을 정리하고 있습니다.")
-    await loadAnglesForSource(sourceProject, source, selectedIssue, true)
+    await loadAnglesForSource(
+      sourceProject,
+      source,
+      selectedIssue,
+      true,
+      focus.trim().slice(0, 300)
+    )
   }
 
   async function loadSupportingSourcesInBackground({
@@ -2065,8 +2072,8 @@ export function NewsClipsApp({
             progress={operationProgressPercent(operationProgress, busy)}
             historySave={historySaveProps}
             onNewProject={newProject}
-            onYoutubeUrl={(url) => void runYoutubeUrl(url)}
-            onVideoFile={(file) => void runVideoFile(file)}
+            onYoutubeUrl={(url, focus) => void runYoutubeUrl(url, focus)}
+            onVideoFile={(file, focus) => void runVideoFile(file, focus)}
             onTranscript={setTranscriptDraft}
             onIssueSearch={(patch) =>
               setIssueSearch((current) => ({ ...current, ...patch }))

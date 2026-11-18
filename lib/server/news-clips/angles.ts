@@ -3,6 +3,7 @@ import {
   includeLeadingContext,
   lockAngleRangeToTranscript,
   normalizeAngleOptions,
+  selectTranscriptForAnglePrompt,
   type NewsAngleOption,
 } from "@/lib/news-clips/angles"
 import { snapSourceRangeToCompleteUtterance } from "@/lib/news-clips/speech-bounds"
@@ -27,19 +28,28 @@ export async function extractNewsAngles(
   }
 ): Promise<NewsAngleOption[]> {
   const fullTranscript = parseTranscript(transcriptText)
-  const promptTranscript = fullTranscript.slice(0, 160)
-  const transcript = promptTranscript
-    .map((segment) => ({
-      start: segment.start,
-      end: segment.end,
-      text: segment.text,
-    }))
+  const promptTranscript = selectTranscriptForAnglePrompt(fullTranscript, {
+    maxSegments: 160,
+  })
+  const transcript = promptTranscript.map((segment) => ({
+    start: segment.start,
+    end: segment.end,
+    text: segment.text,
+  }))
   if (transcript.length === 0) return []
+  const coverage = {
+    sourceStart: transcript[0]?.start ?? 0,
+    sourceEnd: transcript.at(-1)?.end ?? 0,
+    segmentCount: transcript.length,
+    fullSegmentCount: fullTranscript.length,
+  }
 
   const response = await claudeText(
     [
       "너는 시사 쇼츠 기획자다.",
       "원본 자막을 보고, 이 영상으로 만들 수 있는 핵심 콘텐츠 각도 5~6개를 뽑는다.",
+      "아래 transcript는 영상 앞부분만이 아니라 전체 구간에서 고르게 뽑은 발언이다.",
+      "초반에만 몰리지 말고 초반·중반·후반에서 실제로 중요한 주장·수치·장면·발언을 서로 다른 각도로 고른다.",
       "각 항목은 원본에 실제로 나온 주장·수치·장면·발언만 근거로 한다. 없는 사실을 만들지 않는다.",
       "항목끼리 논점이 겹치지 않게 서로 다른 각도여야 한다.",
       "title은 시청자가 고르기 쉬운 짧은 한국어 훅(18자 내외)이다.",
@@ -54,7 +64,7 @@ export async function extractNewsAngles(
         ? "사용자가 지정한 원본 영상이다. 영상 내용 자체를 기준으로 각도를 뽑는다."
         : "선택된 이슈가 있으면 그 이슈와 연결되는 각도를 우선한다.",
       options.focus?.trim()
-        ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. 원본에서 실제로 확인되는 내용 중 focus와 의미가 가까운 주장·근거·발언을 최우선으로 다시 요약한다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함하되, 원본에 없는 내용은 만들지 않는다."
+        ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. 원본에서 실제로 확인되는 내용 중 focus와 의미가 가까운 주장·근거·발언을 최우선으로 다시 요약한다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함하되, 원본에 없는 내용은 만들지 않는다. focus 관련 내용이 중·후반에 있어도 앞부분만 고르지 않는다."
         : "",
       options.productionMode === "buildup2"
         ? "빌드업형: 짧은 TTS 서두에서 원본 핵심 발언으로 자연스럽게 넘길 수 있는 각도를 우선한다."
@@ -67,6 +77,7 @@ export async function extractNewsAngles(
       issueTitle: options.issueTitle ?? "",
       directSource: options.directSource === true,
       focus: options.focus?.trim() ?? "",
+      coverage,
       transcript,
     }),
     1400
@@ -90,7 +101,7 @@ export async function extractNewsAngles(
     )
     return {
       ...locked,
-      evidence: transcript
+      evidence: fullTranscript
         .filter(
           (segment) =>
             segment.end > locked.sourceStart &&

@@ -85,14 +85,18 @@ test("시간을 다시 계산해도 사용자가 합친 자막은 다시 분리�
   assert.deepEqual(result[0]?.mergedFrom, [first, second])
 })
 
-test("잠긴 자막은 렌더 응답과 무관하게 문구와 시간을 모두 유지한다", () => {
+test("잠긴 수동 자막은 문구·시간을 유지하고 TTS 자동 칸은 렌더를 받는다", () => {
   const result = preservePreviewSubtitleEdits(
     [edited],
-    [{ ...edited, start: 20, end: 25, text: "자동 문구" }],
+    [{ ...edited, start: 20, end: 25, text: "자동 문구", edited: false }],
     true
   )
 
-  assert.deepEqual(result, [edited])
+  assert.equal(result.length, 1)
+  assert.equal(result[0]?.text, edited.text)
+  assert.equal(result[0]?.start, edited.start)
+  assert.equal(result[0]?.end, edited.end)
+  assert.equal(result[0]?.edited, true)
 })
 
 test("잠긴 본문에서도 현재 장면에서 제외된 이전 자막은 다시 붙이지 않는다", () => {
@@ -104,11 +108,61 @@ test("잠긴 본문에서도 현재 장면에서 제외된 이전 자막은 다�
   }
   const result = preservePreviewSubtitleEdits(
     [edited, stale],
-    [{ ...edited, start: 20, end: 25, text: "자동 문구" }],
+    [{ ...edited, start: 20, end: 25, text: "자동 문구", edited: false }],
     true
   )
 
-  assert.deepEqual(result, [edited])
+  assert.equal(result.length, 1)
+  assert.equal(result[0]?.id, edited.id)
+  assert.equal(result[0]?.text, edited.text)
+  assert.ok(result.every((cue) => cue.id !== stale.id))
+})
+
+test("서두를 다시 만든 speech-caption은 잠긴 상태에서도 목록에 남는다", () => {
+  const oldLead = {
+    id: "speech-caption-buildup2-lead-1",
+    sceneId: "buildup2-lead",
+    start: 0,
+    end: 1,
+    text: "옛 서두",
+    emphasis: [] as string[],
+    emphasisColor: "yellow" as const,
+  }
+  const quote = {
+    id: "quote-caption-buildup2-quote-1",
+    sceneId: "buildup2-quote",
+    start: 5,
+    end: 7,
+    text: "원본 발언",
+    emphasis: [] as string[],
+    emphasisColor: "yellow" as const,
+  }
+  const rendered = [
+    {
+      ...oldLead,
+      id: "speech-caption-buildup2-lead-1",
+      start: 0.2,
+      end: 1.4,
+      text: "새 서두 첫 칸",
+    },
+    {
+      ...oldLead,
+      id: "speech-caption-buildup2-lead-2",
+      start: 1.4,
+      end: 2.5,
+      text: "새 서두 둘째 칸",
+    },
+    { ...quote, start: 5.1, end: 7.2, text: "렌더 원본" },
+  ]
+
+  const result = preservePreviewSubtitleEdits([oldLead, quote], rendered, true)
+
+  assert.equal(result.length, 3)
+  assert.equal(result[0]?.text, "새 서두 첫 칸")
+  assert.equal(result[1]?.text, "새 서두 둘째 칸")
+  assert.equal(result[2]?.text, "원본 발언")
+  assert.equal(result[2]?.start, 5)
+  assert.equal(result[2]?.end, 7)
 })
 
 test("보도형은 잠긴 문구를 유지한 렌더의 TTS 실측 시간을 받아들인다", () => {
