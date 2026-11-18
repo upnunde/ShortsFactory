@@ -147,6 +147,10 @@ export function NewsClipsApp({
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState("")
   const [previewProgress, setPreviewProgress] = useState<number | null>(null)
+  const [previewTaskNotice, setPreviewTaskNotice] = useState<{
+    status: "running" | "success" | "error"
+    label: string
+  } | null>(null)
   const [operationProgress, setOperationProgress] =
     useState<NewsOperationProgressMap>({})
   const [note, setNote] = useState("")
@@ -318,6 +322,7 @@ export function NewsClipsApp({
     const files = [
       "preview.mp4",
       "preview-intro.mp4",
+      "preview-hook.mp4",
       "preview-lead.mp4",
       "preview-body.mp4",
       "preview-outro.mp4",
@@ -331,7 +336,7 @@ export function NewsClipsApp({
         }).catch(() => null)
         return response?.ok ? `${base}/${file}?recovered=${Date.now()}` : ""
       })
-    ).then(([previewUrl, intro, lead, body, outro]) => {
+    ).then(([previewUrl, intro, hook, lead, body, outro]) => {
       if (!previewUrl || controller.signal.aborted) return
       setProject((current) =>
         current.id === project.id && !current.previewUrl
@@ -339,6 +344,7 @@ export function NewsClipsApp({
               ...current,
               previewUrl,
               previewIntroUrl: intro,
+              previewHookUrl: hook,
               previewLeadUrl: lead,
               previewBodyUrl: body,
               previewOutroUrl: outro,
@@ -485,6 +491,7 @@ export function NewsClipsApp({
       const replacesPreviewMedia =
         "previewUrl" in resolved ||
         "previewIntroUrl" in resolved ||
+        "previewHookUrl" in resolved ||
         "previewLeadUrl" in resolved ||
         "previewBodyUrl" in resolved ||
         "previewOutroUrl" in resolved
@@ -496,6 +503,7 @@ export function NewsClipsApp({
           [
             "previewUrl",
             "previewIntroUrl",
+            "previewHookUrl",
             "previewLeadUrl",
             "previewBodyUrl",
             "previewOutroUrl",
@@ -547,6 +555,7 @@ export function NewsClipsApp({
         // revision이 달라지므로 최종본으로는 쓸 수 없고, 새 미리보기를 만들면 교체된다.
         previewUrl: current.previewUrl,
         previewIntroUrl: current.previewIntroUrl,
+        previewHookUrl: current.previewHookUrl,
         previewLeadUrl: current.previewLeadUrl,
         previewBodyUrl: current.previewBodyUrl,
         previewOutroUrl: current.previewOutroUrl,
@@ -719,6 +728,10 @@ export function NewsClipsApp({
       endCtaText,
       resolvedSource.id
     )
+    const hasColdOpen = baseScenes.some((scene) => scene.id === "buildup2-hook")
+    const disabledParts = hasColdOpen
+      ? base.disabledParts.filter((part) => part !== "hook")
+      : [...new Set([...base.disabledParts, "hook" as const])]
     const prepared = prepareRenderProject(
       {
         ...base,
@@ -731,6 +744,7 @@ export function NewsClipsApp({
         titleOptions: candidate.titleOptions,
         reportScript: completeReportScript,
         reportScenes: baseScenes,
+        disabledParts,
         removedRanges,
         keepRanges,
         subtitles: [],
@@ -766,6 +780,7 @@ export function NewsClipsApp({
         (base.sourceCredit ?? "").trim() ||
         sourceCreditInputText(resolvedSource),
       reportScenes: normalizedReportScenes,
+      disabledParts,
       removedRanges,
       keepRanges:
         keepRanges.length > 0
@@ -817,6 +832,7 @@ export function NewsClipsApp({
       finalRevision: 0,
       previewUrl: "",
       previewIntroUrl: "",
+      previewHookUrl: "",
       previewLeadUrl: "",
       previewBodyUrl: "",
       previewOutroUrl: "",
@@ -1010,6 +1026,13 @@ export function NewsClipsApp({
     previewJobIdRef.current = jobId
     let polling = true
     setPreviewProgress(1)
+    setPreviewTaskNotice({
+      status: "running",
+      label:
+        previewPart === "all"
+          ? "전체 초안을 다시 만드는 중"
+          : `${previewPartLabel(previewPart)} 초안을 다시 만드는 중`,
+    })
     setBusy(busyKey)
     if (!silent) {
       setNote(options.note ?? "저해상도 쇼츠 초안을 만드는 중입니다.")
@@ -1051,6 +1074,7 @@ export function NewsClipsApp({
         message?: string
         previewUrl?: string
         previewIntroUrl?: string
+        previewHookUrl?: string
         previewLeadUrl?: string
         previewBodyUrl?: string
         previewOutroUrl?: string
@@ -1062,7 +1086,9 @@ export function NewsClipsApp({
         transcript?: NewsClipProject["transcript"]
       }
       if (!response.ok || !body.previewUrl) {
-        setNote(body.message || "저해상도 초안을 만들지 못했습니다.")
+        const message = body.message || "저해상도 초안을 만들지 못했습니다."
+        setNote(message)
+        setPreviewTaskNotice({ status: "error", label: message })
         return false
       }
       setPreviewProgress(100)
@@ -1074,6 +1100,7 @@ export function NewsClipsApp({
           current.editorialRevision === draft.editorialRevision
         const previewUrl = refreshMediaUrl(body.previewUrl ?? "")
         const previewIntroUrl = refreshMediaUrl(body.previewIntroUrl ?? "")
+        const previewHookUrl = refreshMediaUrl(body.previewHookUrl ?? "")
         const previewLeadUrl = refreshMediaUrl(body.previewLeadUrl ?? "")
         const previewBodyUrl = refreshMediaUrl(body.previewBodyUrl ?? "")
         const previewOutroUrl = refreshMediaUrl(body.previewOutroUrl ?? "")
@@ -1084,6 +1111,7 @@ export function NewsClipsApp({
           ...current,
           previewUrl,
           previewIntroUrl,
+          previewHookUrl,
           previewLeadUrl,
           previewBodyUrl,
           previewOutroUrl,
@@ -1124,10 +1152,21 @@ export function NewsClipsApp({
       } else {
         setNote("")
       }
+      setPreviewTaskNotice({
+        status: "success",
+        label:
+          previewPart === "all"
+            ? "전체 초안 다시 만들기 완료"
+            : `${previewPartLabel(previewPart)} 초안 다시 만들기 완료`,
+      })
       return true
     } catch {
       if (controller.signal.aborted) return false
       setNote("저해상도 초안을 만들지 못했습니다.")
+      setPreviewTaskNotice({
+        status: "error",
+        label: "초안을 다시 만들지 못했어.",
+      })
       return false
     } finally {
       options.signal?.removeEventListener("abort", abortFromCaller)
@@ -1157,6 +1196,7 @@ export function NewsClipsApp({
     setPreviewProgress(null)
     setBusy("")
     setNote("미리보기 만들기를 취소했습니다.")
+    setPreviewTaskNotice(null)
   }
 
   async function reselectCandidate(
@@ -1324,7 +1364,8 @@ export function NewsClipsApp({
         const currentSubtitleParts = partitionSubtitlesByPart(
           project.subtitles,
           currentSceneParts.lead,
-          currentSceneParts.body
+          currentSceneParts.body,
+          currentSceneParts.hook
         )
         const freshSceneParts = splitScenesByClipPart(
           prepared.project.reportScenes,
@@ -1333,12 +1374,14 @@ export function NewsClipsApp({
         const freshSubtitleParts = partitionSubtitlesByPart(
           prepared.project.subtitles,
           freshSceneParts.lead,
-          freshSceneParts.body
+          freshSceneParts.body,
+          freshSceneParts.hook
         )
         updateProject({
           reportScript,
           reportScenes: prepared.project.reportScenes,
           subtitles: [
+            ...currentSubtitleParts.hook,
             ...currentSubtitleParts.lead,
             ...currentSubtitleParts.body,
             ...freshSubtitleParts.outro,
@@ -1374,6 +1417,7 @@ export function NewsClipsApp({
           },
           previewUrl: project.previewUrl,
           previewIntroUrl: project.previewIntroUrl,
+          previewHookUrl: project.previewHookUrl,
           previewLeadUrl: project.previewLeadUrl,
           previewBodyUrl: project.previewBodyUrl,
           previewOutroUrl: project.previewOutroUrl,
@@ -1385,6 +1429,7 @@ export function NewsClipsApp({
           ...draft,
           previewUrl: project.previewUrl,
           previewIntroUrl: project.previewIntroUrl,
+          previewHookUrl: project.previewHookUrl,
           previewLeadUrl: project.previewLeadUrl,
           previewBodyUrl: project.previewBodyUrl,
           previewOutroUrl: project.previewOutroUrl,
@@ -1768,6 +1813,7 @@ export function NewsClipsApp({
           angleSourceStart: angle.sourceStart,
           angleSourceEnd: angle.sourceEnd,
           angleSourceRanges: angle.ranges ?? [],
+          angleColdOpen: angle.coldOpen,
           jobId: runId,
         }),
         signal,
@@ -2019,6 +2065,50 @@ export function NewsClipsApp({
       </aside>
 
       <main className="flex h-svh min-h-0 w-full flex-1 flex-col overflow-hidden">
+        {previewTaskNotice ? (
+          <div
+            className={`shrink-0 border-b px-5 py-3 ${
+              previewTaskNotice.status === "error"
+                ? "border-danger/30 bg-danger/10"
+                : previewTaskNotice.status === "success"
+                  ? "border-success/30 bg-success/10"
+                  : "border-separator bg-surface"
+            }`}
+            role="status"
+          >
+            <div className="flex items-center gap-3 text-sm">
+              <span className="min-w-0 flex-1 truncate font-medium">
+                {previewTaskNotice.label}
+              </span>
+              {previewTaskNotice.status === "running" ? (
+                <>
+                  <span className="tabular-nums">
+                    {Math.round(previewProgress ?? 0)}%
+                  </span>
+                  <Button size="sm" variant="outline" onPress={cancelPreview}>
+                    취소
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => setPreviewTaskNotice(null)}
+                >
+                  닫기
+                </Button>
+              )}
+            </div>
+            {previewTaskNotice.status === "running" ? (
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-default">
+                <div
+                  className="h-full rounded-full bg-foreground transition-[width]"
+                  style={{ width: `${Math.max(1, previewProgress ?? 1)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {showHistory ? (
           <NewsHistoryPanel
             profileId={profile.id}
@@ -2167,6 +2257,18 @@ function newsSettingsTab(value: string | null) {
     value === "accounts"
     ? value
     : "search"
+}
+
+function previewPartLabel(part: Exclude<NewsPreviewPart, "all">) {
+  return part === "intro"
+    ? "인트로"
+    : part === "hook"
+      ? "핵심 훅"
+      : part === "lead"
+        ? "서두"
+        : part === "body"
+          ? "본문"
+          : "마무리"
 }
 
 function directSourceIssue(source: NewsSource): RecommendedNewsIssue {
@@ -2426,6 +2528,7 @@ function balanceProjectSubtitles(
     youtubeUploadUrl: "",
     previewUrl: project.previewUrl,
     previewIntroUrl: project.previewIntroUrl,
+    previewHookUrl: project.previewHookUrl,
     previewLeadUrl: project.previewLeadUrl,
     previewBodyUrl: project.previewBodyUrl,
     previewOutroUrl: project.previewOutroUrl,
@@ -2447,6 +2550,7 @@ function resetAngleSelection(project: NewsClipProject): NewsClipProject {
     titleOptions: [],
     reportScript: "",
     reportScenes: [],
+    disabledParts: ["hook"],
     removedRanges: [],
     keepRanges: [],
     subtitles: [],
@@ -2464,6 +2568,7 @@ function resetAngleSelection(project: NewsClipProject): NewsClipProject {
     outputUrl: "",
     previewUrl: "",
     previewIntroUrl: "",
+    previewHookUrl: "",
     previewLeadUrl: "",
     previewBodyUrl: "",
     previewOutroUrl: "",
@@ -3032,8 +3137,19 @@ function normalizeSavedNewsProject(
       ? saved.titleCardDurationSeconds
       : 0,
     finalPlaybackRate: normalizeFinalPlaybackRate(saved.finalPlaybackRate),
+    disabledParts: Array.isArray(saved.disabledParts)
+      ? saved.disabledParts.filter(
+          (part): part is NewsClipProject["disabledParts"][number] =>
+            part === "intro" ||
+            part === "hook" ||
+            part === "lead" ||
+            part === "outro"
+        )
+      : fallback.disabledParts,
     previewIntroUrl:
       typeof saved.previewIntroUrl === "string" ? saved.previewIntroUrl : "",
+    previewHookUrl:
+      typeof saved.previewHookUrl === "string" ? saved.previewHookUrl : "",
     previewLeadUrl:
       typeof saved.previewLeadUrl === "string" ? saved.previewLeadUrl : "",
     previewBodyUrl:

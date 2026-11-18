@@ -58,6 +58,8 @@ import {
   splitEndCtaFromScript,
 } from "@/lib/news-clips/report"
 import {
+  activeReportScenes,
+  newsOptionalPartEnabled,
   partitionSubtitlesByPart,
   splitScenesByClipPart,
 } from "@/lib/news-clips/clip-parts"
@@ -318,8 +320,7 @@ export async function renderNewsFramePreview({
     writeFile(sourceAss, bodySourceAssText(sourceCredit, 1, settings)),
   ])
   // 영상 전체 깔고 프레임을 위에 올린다. videoRect 구멍 배치는 쓰지 않는다.
-  const clipFilter =
-    `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[clip]`
+  const clipFilter = `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[clip]`
   const frameOverlay = frame
     ? `[1:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,setsar=1[frame];[clip][frame]overlay=0:0:format=auto[framed]`
     : `[clip]format=yuv420p[framed]`
@@ -454,6 +455,7 @@ async function renderNewsClipExclusive(
   if (prepared.reason) throw new Error(prepared.reason)
   project = prepared.project
   validateProject(project, settings)
+  const introEnabled = newsOptionalPartEnabled(project, "intro")
   const sources = await resolveProjectSources(project)
   const source = sources.get(project.source!.id)
   if (!source) throw new Error("source-upload-required")
@@ -520,10 +522,12 @@ async function renderNewsClipExclusive(
   await progress(10, "음성 준비 중")
   const ttsIdentity = newsTtsCacheIdentity(ttsProvider)
   const captions = path.join(folder, "captions.srt")
+  const hookCaptionsAss = path.join(folder, `${prefix}hook-captions.ass`)
   const leadCaptionsAss = path.join(folder, `${prefix}lead-captions.ass`)
   const bodyCaptionsAss = path.join(folder, `${prefix}body-captions.ass`)
   const outroCaptionsAss = path.join(folder, `${prefix}outro-captions.ass`)
   const titleAss = path.join(folder, `${prefix}title.ass`)
+  const hookTitleAss = path.join(folder, `${prefix}hook-title.ass`)
   const leadTitleAss = path.join(folder, `${prefix}lead-title.ass`)
   const bodyTitleAss = path.join(folder, `${prefix}body-title.ass`)
   const outroTitleAss = path.join(folder, `${prefix}outro-title.ass`)
@@ -541,6 +545,7 @@ async function renderNewsClipExclusive(
   const titleAudioRaw = path.join(folder, `title-${titleKey}-raw.wav`)
   const titleAudio = path.join(folder, `title-${titleKey}.wav`)
   const introVideo = path.join(folder, `${prefix}intro.mp4`)
+  const hookVideo = path.join(folder, `${prefix}hook.mp4`)
   const leadVideo = path.join(folder, `${prefix}lead.mp4`)
   const bodyVideo = path.join(folder, `${prefix}body.mp4`)
   const outroVideo = path.join(folder, `${prefix}outro.mp4`)
@@ -558,25 +563,29 @@ async function renderNewsClipExclusive(
   const thumbnail = path.join(folder, "thumbnail.png")
   const cachePath = path.join(folder, `${prefix}render-cache.json`)
 
-  await synthesizeSpeech(project.title, settings, titleAudioRaw, ttsProvider)
-  const titleRawDurationSeconds = await mediaDuration(titleAudioRaw)
-  await normalizePartAudio(titleAudioRaw, titleAudio, titleRawDurationSeconds)
-  const titleSpeechDurationSeconds = await mediaDuration(titleAudio)
-  const titleCardDurationSeconds = roundDuration(
-    titleSpeechDurationSeconds + NEWS_INTRO_GAP_SECONDS
-  )
+  let titleCardDurationSeconds = 0
+  if (introEnabled) {
+    await synthesizeSpeech(project.title, settings, titleAudioRaw, ttsProvider)
+    const titleRawDurationSeconds = await mediaDuration(titleAudioRaw)
+    await normalizePartAudio(titleAudioRaw, titleAudio, titleRawDurationSeconds)
+    const titleSpeechDurationSeconds = await mediaDuration(titleAudio)
+    titleCardDurationSeconds = roundDuration(
+      titleSpeechDurationSeconds + NEWS_INTRO_GAP_SECONDS
+    )
+  }
   await progress(20, "인트로 음성 완료")
 
   const {
+    hook: hookScenesPlanned,
     lead: leadScenesPlanned,
     body: bodyScenesPlanned,
     outro: outroScenesPlanned,
-  } = splitScenesByClipPart(project.reportScenes, project.productionMode)
+  } = splitScenesByClipPart(activeReportScenes(project), project.productionMode)
 
   const primarySourceId = source.id
   async function synthesizePart(
     scenes: typeof leadScenesPlanned,
-    part: "lead" | "body" | "outro"
+    part: "hook" | "lead" | "body" | "outro"
   ) {
     if (!scenes.length) return null
     return synthesizeReport(
@@ -594,16 +603,19 @@ async function renderNewsClipExclusive(
     )
   }
 
+  const hookReport = await synthesizePart(hookScenesPlanned, "hook")
+  await progress(28, "핵심 훅 음성 완료")
   const leadReport = await synthesizePart(leadScenesPlanned, "lead")
   await progress(35, "도입부 음성 완료")
   const bodyReport = await synthesizePart(bodyScenesPlanned, "body")
   await progress(45, "본문 음성 완료")
   const outroReport = await synthesizePart(outroScenesPlanned, "outro")
   await progress(52, "마무리 음성 완료")
-  if (!leadReport && !bodyReport) {
+  if (!hookReport && !leadReport && !bodyReport) {
     throw new Error("report-scenes-required")
   }
 
+  const hookDurationSeconds = roundDuration(hookReport?.duration ?? 0)
   const leadDurationSeconds = roundDuration(leadReport?.duration ?? 0)
   const bodyDurationSeconds = roundDuration(bodyReport?.duration ?? 0)
   const outroDurationSeconds = outroReport
@@ -611,6 +623,7 @@ async function renderNewsClipExclusive(
     : 0
   const outputDurationSeconds = roundDuration(
     titleCardDurationSeconds +
+      hookDurationSeconds +
       leadDurationSeconds +
       bodyDurationSeconds +
       outroDurationSeconds
@@ -626,11 +639,12 @@ async function renderNewsClipExclusive(
   const lockedParts = partitionSubtitlesByPart(
     project.subtitles,
     leadScenesPlanned,
-    bodyScenesPlanned
+    bodyScenesPlanned,
+    hookScenesPlanned
   )
 
   function partSubtitles(options: {
-    part: "lead" | "body" | "outro"
+    part: "hook" | "lead" | "body" | "outro"
     planned: typeof leadScenesPlanned
     report: NonNullable<typeof leadReport> | null
     edited: typeof project.subtitles
@@ -648,6 +662,7 @@ async function renderNewsClipExclusive(
         (options.part === "outro" ? NEWS_OUTRO_GAP_SECONDS : 0)
     )
     const preferSingleLine =
+      options.part === "hook" ||
       options.part === "lead" ||
       (project.productionMode === "report" && options.part === "body")
     // 서두는 잠긴 자동 칸·글자 수 재분할보다 TTS 단어 정렬을 정본으로 쓴다.
@@ -681,11 +696,9 @@ async function renderNewsClipExclusive(
         ? lockedEdited.flatMap((cue) =>
             cue.edited
               ? [cue]
-              : layoutTimedSubtitleCues(
-                  [cue],
-                  settings.bodySubtitleText,
-                  { maxLines: 1 }
-                )
+              : layoutTimedSubtitleCues([cue], settings.bodySubtitleText, {
+                  maxLines: 1,
+                })
           )
         : lockedEdited
       return snapSubtitleCueTimes(
@@ -703,18 +716,13 @@ async function renderNewsClipExclusive(
         ? lockedEdited.flatMap((cue) =>
             cue.edited
               ? [cue]
-              : layoutTimedSubtitleCues(
-                  [cue],
-                  settings.bodySubtitleText,
-                  { maxLines: 1 }
-                )
+              : layoutTimedSubtitleCues([cue], settings.bodySubtitleText, {
+                  maxLines: 1,
+                })
           )
         : lockedEdited
       return snapSubtitleCueTimes(
-        retimeLockedSubtitleCuesToSpeech(
-          lockedForRender,
-          options.report.scenes
-        )
+        retimeLockedSubtitleCuesToSpeech(lockedForRender, options.report.scenes)
       )
     }
     const localEdited = options.edited.map((cue) => ({
@@ -737,10 +745,9 @@ async function renderNewsClipExclusive(
                 project.subtitleTimingsLocked && !transcriptWasRefreshed,
               captionPhrases: reportCaptionPhrases(options.phrases),
               transcript: project.transcript,
-              maxCaptionCharacters:
-                preferSingleLine
-                  ? lineCharacters
-                  : automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
+              maxCaptionCharacters: preferSingleLine
+                ? lineCharacters
+                : automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
               preferredCaptionCharacters: lineCharacters,
             }
           ),
@@ -757,12 +764,20 @@ async function renderNewsClipExclusive(
     })
   }
 
+  const hookSubtitles = partSubtitles({
+    part: "hook",
+    planned: hookScenesPlanned,
+    report: hookReport,
+    edited: lockedParts.hook,
+    offsetSeconds: 0,
+    phrases: narrationOf(hookScenesPlanned),
+  })
   const leadSubtitles = partSubtitles({
     part: "lead",
     planned: leadScenesPlanned,
     report: leadReport,
     edited: lockedParts.lead,
-    offsetSeconds: 0,
+    offsetSeconds: hookDurationSeconds,
     phrases: narrationOf(leadScenesPlanned) || bodyScript,
   })
   const bodySubtitles = partSubtitles({
@@ -770,7 +785,7 @@ async function renderNewsClipExclusive(
     planned: bodyScenesPlanned,
     report: bodyReport,
     edited: lockedParts.body,
-    offsetSeconds: leadDurationSeconds,
+    offsetSeconds: hookDurationSeconds + leadDurationSeconds,
     phrases: narrationOf(bodyScenesPlanned) || bodyScript,
   })
   const outroSubtitlesLocal = partSubtitles({
@@ -778,22 +793,38 @@ async function renderNewsClipExclusive(
     planned: outroScenesPlanned,
     report: outroReport,
     edited: lockedParts.outro,
-    offsetSeconds: leadDurationSeconds + bodyDurationSeconds,
+    offsetSeconds:
+      hookDurationSeconds + leadDurationSeconds + bodyDurationSeconds,
     phrases: endCtaScript,
   })
   const combinedSubtitles = snapSubtitleCueTimes([
-    ...leadSubtitles,
+    ...hookSubtitles,
+    ...leadSubtitles.map((cue) => ({
+      ...cue,
+      start: roundDuration(cue.start + hookDurationSeconds),
+      end: roundDuration(cue.end + hookDurationSeconds),
+    })),
     ...bodySubtitles.map((cue) => ({
       ...cue,
-      start: roundDuration(cue.start + leadDurationSeconds),
-      end: roundDuration(cue.end + leadDurationSeconds),
+      start: roundDuration(
+        cue.start + hookDurationSeconds + leadDurationSeconds
+      ),
+      end: roundDuration(cue.end + hookDurationSeconds + leadDurationSeconds),
     })),
     ...outroSubtitlesLocal.map((cue) => ({
       ...cue,
       start: roundDuration(
-        cue.start + leadDurationSeconds + bodyDurationSeconds
+        cue.start +
+          hookDurationSeconds +
+          leadDurationSeconds +
+          bodyDurationSeconds
       ),
-      end: roundDuration(cue.end + leadDurationSeconds + bodyDurationSeconds),
+      end: roundDuration(
+        cue.end +
+          hookDurationSeconds +
+          leadDurationSeconds +
+          bodyDurationSeconds
+      ),
     })),
   ])
   const exportSubtitles = combinedSubtitles.map((cue) => ({
@@ -859,7 +890,7 @@ async function renderNewsClipExclusive(
     dimensions,
   })
   function contentPartSignature(
-    part: "lead" | "body" | "outro",
+    part: "hook" | "lead" | "body" | "outro",
     report: NonNullable<typeof leadReport>,
     subtitles: typeof leadSubtitles,
     durationSeconds: number
@@ -892,6 +923,14 @@ async function renderNewsClipExclusive(
       dimensions,
     })
   }
+  const hookVideoSignature = hookReport
+    ? contentPartSignature(
+        "hook",
+        hookReport,
+        hookSubtitles,
+        hookDurationSeconds
+      )
+    : "none"
   const leadVideoSignature = leadReport
     ? contentPartSignature(
         "lead",
@@ -917,7 +956,8 @@ async function renderNewsClipExclusive(
       )
     : "none"
   const joinedSignature = digest({
-    introVideoSignature,
+    introVideoSignature: introEnabled ? introVideoSignature : "disabled",
+    hookVideoSignature,
     leadVideoSignature,
     bodyVideoSignature,
     outroVideoSignature,
@@ -929,6 +969,7 @@ async function renderNewsClipExclusive(
     bgmFile: settings.bgmFile,
     finalPlaybackRate,
   })
+  const hookSourceAss = path.join(folder, `${prefix}hook-source.ass`)
   const leadSourceAss = path.join(folder, `${prefix}lead-source.ass`)
   const bodySourceAss = path.join(folder, `${prefix}body-source.ass`)
   const outroSourceAss = path.join(folder, `${prefix}outro-source.ass`)
@@ -938,12 +979,29 @@ async function renderNewsClipExclusive(
       : exportSubtitles
   await Promise.all([
     writeFile(captions, subtitlesToSrt(exportCaptionCues)),
+    writeFile(hookCaptionsAss, subtitlesToAss(hookSubtitles, settings)),
     writeFile(leadCaptionsAss, subtitlesToAss(leadSubtitles, settings)),
     writeFile(bodyCaptionsAss, subtitlesToAss(bodySubtitles, settings)),
     writeFile(outroCaptionsAss, subtitlesToAss(outroSubtitlesLocal, settings)),
     writeFile(
       titleAss,
       titleAssText(effectiveProject.title, titleCardDurationSeconds, settings)
+    ),
+    writeFile(
+      hookTitleAss,
+      bodyTitleAssText(
+        effectiveProject.title,
+        Math.max(0.1, hookDurationSeconds),
+        settings
+      )
+    ),
+    writeFile(
+      hookSourceAss,
+      bodySourceAssTextForScenes(
+        hookReport?.scenes ?? [],
+        commonSourceCredit,
+        settings
+      )
     ),
     writeFile(
       leadTitleAss,
@@ -1011,9 +1069,10 @@ async function renderNewsClipExclusive(
   await progress(60, "자막 준비 완료")
 
   if (
-    forcePart("intro") ||
-    renderCache.introVideoSignature !== introVideoSignature ||
-    !(await exists(introVideo))
+    introEnabled &&
+    (forcePart("intro") ||
+      renderCache.introVideoSignature !== introVideoSignature ||
+      !(await exists(introVideo)))
   ) {
     await makeTitleVideo(
       settings,
@@ -1033,6 +1092,30 @@ async function renderNewsClipExclusive(
   }
   await saveRenderStage({ introVideoSignature })
   await progress(69, "인트로 영상 완료")
+  if (
+    hookReport &&
+    (forcePart("hook") ||
+      renderCache.hookVideoSignature !== hookVideoSignature ||
+      !(await exists(hookVideo)))
+  ) {
+    await makeBodyVideo(
+      effectiveProject,
+      settings,
+      sourceFiles,
+      sources,
+      source.id,
+      hookReport.audio,
+      hookReport.scenes,
+      hookCaptionsAss,
+      hookTitleAss,
+      hookSourceAss,
+      hookVideo,
+      dimensions,
+      hookDurationSeconds
+    )
+  }
+  await saveRenderStage({ hookVideoSignature })
+  await progress(73, "핵심 훅 영상 완료")
   if (
     leadReport &&
     (forcePart("lead") ||
@@ -1111,7 +1194,8 @@ async function renderNewsClipExclusive(
     !(await exists(joinedVideo))
   ) {
     const parts = [
-      introVideo,
+      ...(introEnabled ? [introVideo] : []),
+      ...(hookReport ? [hookVideo] : []),
       ...(leadReport ? [leadVideo] : []),
       ...(bodyReport ? [bodyVideo] : []),
       ...(outroReport ? [outroVideo] : []),
@@ -1152,7 +1236,7 @@ async function renderNewsClipExclusive(
       "-ss",
       "0.15",
       "-i",
-      introVideo,
+      introEnabled ? introVideo : joinedVideo,
       "-frames:v",
       "1",
       titleFrame,
@@ -1179,7 +1263,12 @@ async function renderNewsClipExclusive(
     return {
       signature,
       previewUrl: `${base}/preview.mp4?v=${previewVersion}`,
-      previewIntroUrl: `${base}/preview-intro.mp4?v=${previewVersion}`,
+      previewIntroUrl: introEnabled
+        ? `${base}/preview-intro.mp4?v=${previewVersion}`
+        : "",
+      previewHookUrl: hookReport
+        ? `${base}/preview-hook.mp4?v=${previewVersion}`
+        : "",
       previewLeadUrl: leadReport
         ? `${base}/preview-lead.mp4?v=${previewVersion}`
         : "",
@@ -1202,7 +1291,8 @@ async function renderNewsClipExclusive(
   return {
     signature,
     outputUrl: `${base}/final.mp4?v=${outputVersion}`,
-    previewIntroUrl: `${base}/intro.mp4?v=${outputVersion}`,
+    previewIntroUrl: introEnabled ? `${base}/intro.mp4?v=${outputVersion}` : "",
+    previewHookUrl: hookReport ? `${base}/hook.mp4?v=${outputVersion}` : "",
     previewLeadUrl: leadReport ? `${base}/lead.mp4?v=${outputVersion}` : "",
     previewBodyUrl: bodyReport ? `${base}/body.mp4?v=${outputVersion}` : "",
     previewOutroUrl: outroReport ? `${base}/outro.mp4?v=${outputVersion}` : "",
@@ -1429,6 +1519,7 @@ function invalidProjectReason(
   project: NewsClipProject,
   settings: NewsClipSettings
 ) {
+  const activeScenes = activeReportScenes(project)
   const [firstTitleLine, secondTitleLine] = splitIntroTitleLines(
     project.title,
     settings.titleCardText
@@ -1449,11 +1540,13 @@ function invalidProjectReason(
   if (!titleLineFits(secondTitleLine, secondTitleLayout)) {
     return "title-second-line-overflow"
   }
-  if (!project.reportScript.trim()) return "report-script-required"
-  if (project.reportScenes.length === 0) return "report-scenes-required"
+  if (project.productionMode === "report" && !project.reportScript.trim()) {
+    return "report-script-required"
+  }
+  if (activeScenes.length === 0) return "report-scenes-required"
   // 보도형은 화면 종류와 무관하게 모든 장면을 TTS로 읽는다. 빌드업형의
   // quote 무음컷(…-cut-2 이후)만 원본 음성을 쓰므로 narration이 비어도 된다.
-  const brokenScene = project.reportScenes.find((scene) => {
+  const brokenScene = activeScenes.find((scene) => {
     if (project.productionMode === "report" && !scene.narration.trim()) {
       return true
     }
@@ -1481,8 +1574,12 @@ async function resolveProjectSources(project: NewsClipProject) {
   const primarySourceId = project.source?.id ?? ""
   const selectedSourceIds = new Set([
     primarySourceId,
-    project.introSourceId,
-    ...project.reportScenes.map((scene) => scene.sourceId || primarySourceId),
+    ...(newsOptionalPartEnabled(project, "intro")
+      ? [project.introSourceId]
+      : []),
+    ...activeReportScenes(project).map(
+      (scene) => scene.sourceId || primarySourceId
+    ),
   ])
   const resolved = new Map<string, NewsSource>()
   for (const sourceId of selectedSourceIds) {
@@ -1739,7 +1836,7 @@ async function synthesizeContinuousReportPart({
   folder: string
   ttsVolume: number
   provider: ResolvedNewsTtsProvider
-  part: "lead" | "body" | "outro"
+  part: "hook" | "lead" | "body" | "outro"
 }) {
   const narration = scenes
     .map((scene) => scene.narration.trim())
@@ -1805,7 +1902,7 @@ async function synthesizeReport(
   quoteVolume: number,
   provider: ResolvedNewsTtsProvider,
   transcripts: Map<string, TranscriptSegment[]>,
-  part: "lead" | "body" | "outro" = "body",
+  part: "hook" | "lead" | "body" | "outro" = "body",
   fullTts = false
 ) {
   if (!scenes.length) {
@@ -2927,9 +3024,7 @@ async function runOnce(bin: string, args: string[]) {
           resolve()
           return
         }
-        console.error(
-          `FFmpeg failed for ${output}\n${stderr.slice(-4_000)}`
-        )
+        console.error(`FFmpeg failed for ${output}\n${stderr.slice(-4_000)}`)
         reject(new Error("ffmpeg-failed"))
       })
     })
@@ -3018,6 +3113,7 @@ function fitSceneSourceRange(
 type RenderCache = {
   introVideoSignature?: string
   titleVideoSignature?: string
+  hookVideoSignature?: string
   leadVideoSignature?: string
   bodyVideoSignature?: string
   outroVideoSignature?: string

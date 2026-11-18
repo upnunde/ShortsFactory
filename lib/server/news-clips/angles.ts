@@ -67,9 +67,10 @@ export async function extractNewsAngles(
         ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. 원본에서 실제로 확인되는 내용 중 focus와 의미가 가까운 주장·근거·발언을 최우선으로 다시 요약한다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함하되, 원본에 없는 내용은 만들지 않는다. focus 관련 내용이 중·후반에 있어도 앞부분만 고르지 않는다."
         : "",
       options.productionMode === "buildup2"
-        ? "빌드업형: 짧은 TTS 서두에서 원본 핵심 발언으로 자연스럽게 넘길 수 있는 각도를 우선한다."
+        ? "빌드업형: 짧은 TTS 서두에서 원본 핵심 발언으로 자연스럽게 넘길 수 있는 각도를 우선한다. 각 각도에서 TTS 전에 0.8~7초만 원본으로 보여 줄 수 있는 독립적이고 강한 발언을 coldOpen으로 고른다. 문맥 왜곡 없이 핵심을 대표하고 단독으로 이해될 때만 suitable=true, score 75 이상으로 두고, 없으면 coldOpen은 null로 두라."
         : "보도형: 짧은 논평 대본으로 풀어낼 수 있는 각도를 우선한다.",
-      "JSON 배열만 출력한다: [{id,title,summary,keywords:string[],sourceStart:number,sourceEnd:number}]",
+      "coldOpen의 text는 원문 발언을 그대로 쓰고 sourceStart/sourceEnd는 transcript 시간을 쓴다. 자극적인 표현을 새로 만들지 마라.",
+      "JSON 배열만 출력한다: [{id,title,summary,keywords:string[],sourceStart:number,sourceEnd:number,coldOpen:{text:string,sourceStart:number,sourceEnd:number,score:number,reason:string,suitable:boolean}|null}]",
     ].join("\n"),
     JSON.stringify({
       productionMode: options.productionMode,
@@ -82,36 +83,65 @@ export async function extractNewsAngles(
     }),
     1400
   )
-  return normalizeAngleOptions(JSON.parse(stripFence(response))).map((angle) => {
-    const completed = snapSourceRangeToCompleteUtterance(
-      angle.sourceStart,
-      angle.sourceEnd,
-      fullTranscript
-    )
-    const locked = includeLeadingContext(
-      lockAngleRangeToTranscript(
-        {
-          ...angle,
-          sourceStart: completed.start,
-          sourceEnd: completed.end,
-        },
+  return normalizeAngleOptions(JSON.parse(stripFence(response))).map(
+    (angle) => {
+      const completed = snapSourceRangeToCompleteUtterance(
+        angle.sourceStart,
+        angle.sourceEnd,
         fullTranscript
-      ),
-      fullTranscript
-    )
-    return {
-      ...locked,
-      evidence: fullTranscript
-        .filter(
-          (segment) =>
-            segment.end > locked.sourceStart &&
-            segment.start < locked.sourceEnd
-        )
-        .map((segment) => segment.text.trim())
-        .filter(Boolean)
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .slice(0, 260),
+      )
+      const locked = includeLeadingContext(
+        lockAngleRangeToTranscript(
+          {
+            ...angle,
+            sourceStart: completed.start,
+            sourceEnd: completed.end,
+          },
+          fullTranscript
+        ),
+        fullTranscript
+      )
+      const coldOpen = validateColdOpen(angle, fullTranscript)
+      return {
+        ...locked,
+        ...(coldOpen ? { coldOpen } : { coldOpen: undefined }),
+        evidence: fullTranscript
+          .filter(
+            (segment) =>
+              segment.end > locked.sourceStart &&
+              segment.start < locked.sourceEnd
+          )
+          .map((segment) => segment.text.trim())
+          .filter(Boolean)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .slice(0, 260),
+      }
     }
-  })
+  )
+}
+
+function validateColdOpen(
+  angle: NewsAngleOption,
+  transcript: ReturnType<typeof parseTranscript>
+) {
+  const candidate = angle.coldOpen
+  if (!candidate?.suitable || candidate.score < 75) return undefined
+  const start = Math.max(angle.sourceStart, candidate.sourceStart)
+  const end = Math.min(angle.sourceEnd, candidate.sourceEnd)
+  if (end - start < 0.8 || end - start > 7) return undefined
+  const actual = transcript
+    .filter((segment) => segment.end > start && segment.start < end)
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!actual) return undefined
+  return {
+    ...candidate,
+    text: actual.slice(0, 160),
+    sourceStart: Math.round(start * 100) / 100,
+    sourceEnd: Math.round(end * 100) / 100,
+  }
 }

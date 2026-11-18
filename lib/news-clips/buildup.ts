@@ -9,6 +9,7 @@ import type {
   RemovedRange,
   TranscriptSegment,
 } from "./types.ts"
+import type { NewsColdOpen } from "./angles.ts"
 
 export const BUILDUP2_LEAD_PROMPT_HINT =
   "핵심 발언의 모순·온도만 짚는 차분한 반말 서두 1~2문장. '들어봐' 고정 훅·CTA 금지"
@@ -207,6 +208,7 @@ export function buildBuildup2Scenes(
   preferred?: NewsReportScene[],
   options: Buildup2RangeOptions = {}
 ): NewsReportScene[] {
+  const hookScene = preferred?.find((scene) => scene.id === "buildup2-hook")
   const teaserScene = preferred?.find((scene) => scene.id === "buildup2-lead")
   const preferredCutScenes = (preferred ?? [])
     .filter(
@@ -289,7 +291,44 @@ export function buildBuildup2Scenes(
           ...(highlightScene?.crop ? { crop: { ...highlightScene.crop } } : {}),
         },
       ]
-  return [lead, ...quoteScenes]
+  return [...(hookScene ? [hookScene] : []), lead, ...quoteScenes]
+}
+
+/** 검증된 핵심 발언이 있을 때만 TTS 서두 앞에 콜드 오픈을 붙인다. */
+export function withBuildupColdOpen(
+  scenes: NewsReportScene[],
+  coldOpen: NewsColdOpen | undefined,
+  primarySourceId = ""
+) {
+  const withoutHook = scenes.filter((scene) => scene.id !== "buildup2-hook")
+  if (
+    !coldOpen?.suitable ||
+    coldOpen.score < 75 ||
+    coldOpen.sourceEnd - coldOpen.sourceStart < 0.8 ||
+    coldOpen.sourceEnd - coldOpen.sourceStart > 7
+  ) {
+    return withoutHook
+  }
+  const hook: NewsReportScene = {
+    id: "buildup2-hook",
+    narration: "",
+    part: "hook",
+    audioMode: "original",
+    visualMode: "quote",
+    visual: "quote",
+    sourceId: primarySourceId || undefined,
+    sourceStart: coldOpen.sourceStart,
+    sourceEnd: coldOpen.sourceEnd,
+  }
+  const leadIndex = withoutHook.findIndex(
+    (scene) => scene.id === "buildup2-lead"
+  )
+  const insertionIndex = leadIndex < 0 ? 0 : leadIndex
+  return [
+    ...withoutHook.slice(0, insertionIndex),
+    hook,
+    ...withoutHook.slice(insertionIndex),
+  ]
 }
 
 /** 잘린 하이라이트 조각들까지 포함해 전체 원본 구간을 구한다. */

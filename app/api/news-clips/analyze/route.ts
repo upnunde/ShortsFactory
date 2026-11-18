@@ -34,6 +34,7 @@ import {
   writeNewsRenderProgress,
 } from "@/lib/server/news-clips/render-progress"
 import type { RemovedRange } from "@/lib/news-clips/types"
+import type { NewsColdOpen } from "@/lib/news-clips/angles"
 
 export const runtime = "nodejs"
 
@@ -58,6 +59,7 @@ export async function POST(request: Request) {
     angleSourceStart?: unknown
     angleSourceEnd?: unknown
     angleSourceRanges?: unknown
+    angleColdOpen?: unknown
     previousTitle?: unknown
     previousTitles?: unknown
     previousScript?: unknown
@@ -86,6 +88,7 @@ export async function POST(request: Request) {
   const lockedAngleRanges = normalizeSourceAssemblyRanges(
     body?.angleSourceRanges
   )
+  const angleColdOpen = normalizeColdOpen(body?.angleColdOpen)
   const lockedAngleRange = lockedAngleRanges.length
     ? {
         start: lockedAngleRanges[0]!.start,
@@ -180,6 +183,9 @@ export async function POST(request: Request) {
     ...lockedAngleRanges.map(
       (range) => `${range.start.toFixed(2)}-${range.end.toFixed(2)}`
     ),
+    angleColdOpen
+      ? `${angleColdOpen.sourceStart.toFixed(2)}-${angleColdOpen.sourceEnd.toFixed(2)}-${angleColdOpen.score}`
+      : "no-cold-open",
     settings.issueSearchGuidance,
     issueContext.title,
     ...issueContext.keywords,
@@ -375,6 +381,7 @@ export async function POST(request: Request) {
       avoidPrevious,
       lockedRange: lockedAngleRange,
       lockedRanges: lockedAngleRanges,
+      coldOpen: productionMode === "buildup2" ? angleColdOpen : undefined,
     }
     let transcriptForAnalysis = transcript
     let refinedRange = lockedAngleRange
@@ -511,5 +518,36 @@ export async function POST(request: Request) {
       { message: "자막에서 발언 구간을 분석하지 못했습니다." },
       { status: 422 }
     )
+  }
+}
+
+function normalizeColdOpen(value: unknown): NewsColdOpen | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const record = value as Partial<NewsColdOpen>
+  const sourceStart = Number(record.sourceStart)
+  const sourceEnd = Number(record.sourceEnd)
+  const score = Number(record.score)
+  if (
+    record.suitable !== true ||
+    !Number.isFinite(sourceStart) ||
+    !Number.isFinite(sourceEnd) ||
+    sourceEnd - sourceStart < 0.8 ||
+    sourceEnd - sourceStart > 7 ||
+    !Number.isFinite(score) ||
+    score < 75
+  ) {
+    return undefined
+  }
+  return {
+    text:
+      typeof record.text === "string" ? record.text.trim().slice(0, 160) : "",
+    sourceStart: Math.max(0, sourceStart),
+    sourceEnd,
+    score: Math.max(75, Math.min(100, Math.round(score))),
+    reason:
+      typeof record.reason === "string"
+        ? record.reason.trim().slice(0, 180)
+        : "",
+    suitable: true,
   }
 }

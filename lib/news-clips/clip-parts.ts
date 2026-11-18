@@ -1,12 +1,45 @@
 import { isEndCtaScene } from "./report.ts"
 import type {
+  NewsClipProject,
   NewsClipProductionMode,
+  NewsOptionalPart,
   NewsReportScene,
   NewsReportScenePart,
   SubtitleCue,
 } from "./types.ts"
 
-export type NewsClipPartId = "intro" | "lead" | "body" | "outro"
+export type NewsClipPartId = "intro" | "hook" | "lead" | "body" | "outro"
+
+export function newsOptionalPartEnabled(
+  project: Pick<
+    NewsClipProject,
+    "disabledParts" | "productionMode" | "reportScenes"
+  >,
+  part: NewsOptionalPart
+) {
+  if (part === "hook") {
+    return (
+      project.productionMode === "buildup2" &&
+      project.reportScenes.some(
+        (scene) => reportScenePart(scene, "buildup2") === "hook"
+      ) &&
+      !project.disabledParts.includes(part)
+    )
+  }
+  return !project.disabledParts.includes(part)
+}
+
+export function activeReportScenes(
+  project: Pick<
+    NewsClipProject,
+    "disabledParts" | "productionMode" | "reportScenes"
+  >
+) {
+  return project.reportScenes.filter((scene) => {
+    const part = reportScenePart(scene, project.productionMode)
+    return part === "body" || newsOptionalPartEnabled(project, part)
+  })
+}
 
 /** 장면 ID로 분리된 마무리 문구가 서두 끝에 중복 저장된 레거시 상태를 정리한다. */
 export function removeTrailingPartText(value: string, trailing: string) {
@@ -55,6 +88,7 @@ export function reportScenePart(
   if (isEndCtaScene(scene)) return "outro"
   if (scene.part) return scene.part
   if (productionMode === "buildup2") {
+    if (scene.id === "buildup2-hook") return "hook"
     return scene.id === "buildup2-lead" ? "lead" : "body"
   }
   // 신규 보도 장면은 part를 저장한다. 아래 ID 판정은 기존 저장본 전용이며
@@ -71,6 +105,9 @@ export function splitScenesByClipPart(
   productionMode: NewsClipProductionMode
 ) {
   return {
+    hook: scenes.filter(
+      (scene) => reportScenePart(scene, productionMode) === "hook"
+    ),
     lead: scenes.filter(
       (scene) => reportScenePart(scene, productionMode) === "lead"
     ),
@@ -103,7 +140,9 @@ export function syncSceneNarrationFromSubtitles(
 
   return scenes.map((scene) => {
     const part = reportScenePart(scene, productionMode)
-    if (productionMode === "buildup2" && part === "body") return scene
+    if (productionMode === "buildup2" && (part === "hook" || part === "body")) {
+      return scene
+    }
     const sceneCues = cuesByScene.get(scene.id)
     if (!sceneCues?.length) return scene
     const narration = [...sceneCues]
@@ -126,10 +165,13 @@ export function isLeadSceneId(
 export function partitionSubtitlesByPart(
   cues: SubtitleCue[],
   leadScenes: Array<Pick<NewsReportScene, "id">>,
-  bodyScenes: Array<Pick<NewsReportScene, "id">>
+  bodyScenes: Array<Pick<NewsReportScene, "id">>,
+  hookScenes: Array<Pick<NewsReportScene, "id">> = []
 ) {
+  const hookIds = new Set(hookScenes.map((scene) => scene.id))
   const leadIds = new Set(leadScenes.map((scene) => scene.id))
   const bodyIds = new Set(bodyScenes.map((scene) => scene.id))
+  const hook: SubtitleCue[] = []
   const lead: SubtitleCue[] = []
   const body: SubtitleCue[] = []
   const outro: SubtitleCue[] = []
@@ -142,6 +184,10 @@ export function partitionSubtitlesByPart(
       subtitleCueLooksLikeEndCta(cue)
     ) {
       outro.push(cue)
+      continue
+    }
+    if (hookIds.has(sceneId)) {
+      hook.push(cue)
       continue
     }
     if (leadIds.has(sceneId)) {
@@ -157,7 +203,7 @@ export function partitionSubtitlesByPart(
     // 같은 시간대에 겹치거나 본문 끝에 다시 붙지 않는다.
   }
 
-  return { lead, body, outro }
+  return { hook, lead, body, outro }
 }
 
 /** 레거시 저장본에서 CTA 첫 질문이 마지막 본문 sceneId로 남은 경우를 복구한다. */

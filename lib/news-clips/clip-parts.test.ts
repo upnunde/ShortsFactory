@@ -2,12 +2,15 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
+  activeReportScenes,
+  newsOptionalPartEnabled,
   partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
   removeTrailingPartText,
   splitScenesByClipPart,
   syncSceneNarrationFromSubtitles,
 } from "./clip-parts.ts"
+import { freshNewsClipProject } from "./types.ts"
 
 test("빌드업형은 lead를 서두, quote를 본문으로 나눈다", () => {
   const parts = splitScenesByClipPart(
@@ -50,6 +53,61 @@ test("빌드업형은 lead를 서두, quote를 본문으로 나눈다", () => {
   assert.deepEqual(
     parts.outro.map((scene) => scene.id),
     ["end-cta"]
+  )
+})
+
+test("핵심 훅을 독립 구간으로 나누고 본문 외 구간은 켜고 끄는다", () => {
+  const base = freshNewsClipProject("channel-test")
+  const project = {
+    ...base,
+    disabledParts: ["intro", "lead", "outro"] as typeof base.disabledParts,
+    reportScenes: [
+      {
+        id: "buildup2-hook",
+        part: "hook" as const,
+        narration: "",
+        audioMode: "original" as const,
+        visual: "quote" as const,
+        sourceStart: 1,
+        sourceEnd: 4,
+      },
+      {
+        id: "buildup2-lead",
+        part: "lead" as const,
+        narration: "서두",
+        visual: "source" as const,
+        sourceStart: 4,
+        sourceEnd: 7,
+      },
+      {
+        id: "buildup2-quote",
+        part: "body" as const,
+        narration: "",
+        audioMode: "original" as const,
+        visual: "quote" as const,
+        sourceStart: 7,
+        sourceEnd: 20,
+      },
+      {
+        id: "end-cta",
+        part: "outro" as const,
+        narration: "마무리",
+        visual: "source" as const,
+        sourceStart: 20,
+        sourceEnd: 22,
+      },
+    ],
+  }
+  const parts = splitScenesByClipPart(project.reportScenes, "buildup2")
+
+  assert.deepEqual(
+    parts.hook.map((scene) => scene.id),
+    ["buildup2-hook"]
+  )
+  assert.equal(newsOptionalPartEnabled(project, "hook"), true)
+  assert.deepEqual(
+    activeReportScenes(project).map((scene) => scene.id),
+    ["buildup2-hook", "buildup2-quote"]
   )
 })
 

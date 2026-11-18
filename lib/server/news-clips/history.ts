@@ -146,6 +146,7 @@ async function repairLegacyHistoryTranscript(snapshot: NewsHistorySnapshot) {
       subtitleTimingsLocked: false,
       previewUrl: "",
       previewIntroUrl: "",
+      previewHookUrl: "",
       previewLeadUrl: "",
       previewBodyUrl: "",
       previewOutroUrl: "",

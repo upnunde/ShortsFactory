@@ -7,7 +7,9 @@ export type ProjectType = "character" | "news_clip"
 
 export type NewsClipProductionMode = "report" | "buildup2"
 export type NewsSourceSelectionMode = "single-range" | "video-summary"
-export type NewsPreviewPart = "all" | "intro" | "lead" | "body" | "outro"
+export type NewsOptionalPart = "intro" | "hook" | "lead" | "outro"
+export type NewsPreviewPart =
+  "all" | "intro" | "hook" | "lead" | "body" | "outro"
 
 export type NewsChannelProfile = {
   id: string
@@ -200,7 +202,7 @@ export type SubtitleCue = {
 }
 
 /** 보도 대본의 의미 파트. 배열 순서로 서두·본문을 추론하지 않는다. */
-export type NewsReportScenePart = "lead" | "body" | "outro"
+export type NewsReportScenePart = "hook" | "lead" | "body" | "outro"
 
 /** 장면의 기준 음성. 보도형은 tts, 빌드업 직접 발언만 original을 쓴다. */
 export type NewsReportAudioMode = "tts" | "original"
@@ -338,6 +340,8 @@ export type NewsClipProject = {
   titleOptions: string[]
   reportScript: string
   supplementalContext: string
+  /** 본문을 제외한 선택 구간의 사용 여부. 장면은 보존해 다시 켤 수 있다. */
+  disabledParts: NewsOptionalPart[]
   /** 인트로·서두·본문·마무리에 공통으로 표시하는 프로젝트 출처. */
   sourceCredit: string
   reportScenes: NewsReportScene[]
@@ -371,6 +375,7 @@ export type NewsClipProject = {
   previewUrl: string
   /** 4클립 분리 미리보기. 없으면 합본 previewUrl만 쓴다. */
   previewIntroUrl: string
+  previewHookUrl: string
   previewLeadUrl: string
   previewBodyUrl: string
   previewOutroUrl: string
@@ -542,6 +547,7 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     titleOptions: [],
     reportScript: "",
     supplementalContext: "",
+    disabledParts: ["hook"],
     sourceCredit: "",
     reportScenes: [],
     detectedSilences: [],
@@ -569,6 +575,7 @@ export function freshNewsClipProject(profileId: string): NewsClipProject {
     outputUrl: "",
     previewUrl: "",
     previewIntroUrl: "",
+    previewHookUrl: "",
     previewLeadUrl: "",
     previewBodyUrl: "",
     previewOutroUrl: "",

@@ -9,6 +9,7 @@ const SUBTITLE_TIMELINE_KEYS = new Set([
   "keepRanges",
   "title",
   "titleCardDurationSeconds",
+  "disabledParts",
 ])
 
 /** 화면·음량·메타데이터 변경은 확정 자막의 시간 잠금을 풀지 않는다. */

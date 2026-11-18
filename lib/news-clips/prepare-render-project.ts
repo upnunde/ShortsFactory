@@ -2,6 +2,8 @@ import { collapseBuildup2HighlightCuts } from "./buildup.ts"
 import { angleHasLockedRange } from "./angles.ts"
 import { applyBuildupBodyCuts } from "./body-cuts.ts"
 import {
+  activeReportScenes,
+  newsOptionalPartEnabled,
   partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
   reportScenePart,
@@ -12,7 +14,8 @@ import {
   tightenLockedSourceRangeToSpeech,
 } from "./speech-bounds.ts"
 import {
-  NEWS_TOTAL_GAP_SECONDS,
+  NEWS_INTRO_GAP_SECONDS,
+  NEWS_OUTRO_GAP_SECONDS,
   appendEndCtaScenes,
   canonicalReportScript,
   dedupeReportNarrationScenes,
@@ -262,7 +265,8 @@ export function prepareRenderProject(
 
   reportScenes = lockSceneSources(reportScenes, primarySourceId)
 
-  const reason = renderContractReason(project, reportScenes)
+  const enabledScenes = activeReportScenes({ ...project, reportScenes })
+  const reason = renderContractReason(project, enabledScenes)
   if (reason) {
     return { project, reason }
   }
@@ -270,17 +274,18 @@ export function prepareRenderProject(
   const normalizedReportScript =
     project.productionMode === "buildup2"
       ? [
-          reportScenes.find((scene) => scene.id === "buildup2-lead")?.narration,
-          ctaText,
+          enabledScenes.find((scene) => scene.id === "buildup2-lead")
+            ?.narration,
+          enabledScenes.some((scene) => isEndCtaScene(scene)) ? ctaText : "",
         ]
           .map((value) => value?.trim() ?? "")
           .filter(Boolean)
           .join("\n")
-      : canonicalReportScript(project.reportScript, reportScenes)
+      : canonicalReportScript(project.reportScript, enabledScenes)
   const { body: normalizedBody } = splitEndCtaFromScript(normalizedReportScript)
   const subtitleBody =
     project.productionMode === "buildup2"
-      ? reportScenes
+      ? enabledScenes
           .filter((scene) => !isEndCtaScene(scene))
           .map((scene) => scene.narration.trim())
           .filter(Boolean)
@@ -288,13 +293,14 @@ export function prepareRenderProject(
       : normalizedBody || normalizedReportScript
   const normalizedGeneratedSubtitles = normalizeSubtitleCues(
     reportSubtitles(
-      reportScenes,
+      enabledScenes,
       undefined,
       reportCaptionPhrases(subtitleBody),
       transcript,
       {
-        maxCaptionCharacters:
-          automaticSubtitleCueCharacterLimit(settings.bodySubtitleText),
+        maxCaptionCharacters: automaticSubtitleCueCharacterLimit(
+          settings.bodySubtitleText
+        ),
         preferredCaptionCharacters: subtitleLineCharacterLimit(
           settings.bodySubtitleText
         ),
@@ -303,17 +309,19 @@ export function prepareRenderProject(
     settings.bodySubtitleText
   )
   const generatedSceneParts = splitScenesByClipPart(
-    reportScenes,
+    enabledScenes,
     project.productionMode
   )
   const generatedSubtitleParts = partitionSubtitlesByPart(
     normalizedGeneratedSubtitles,
     generatedSceneParts.lead,
-    generatedSceneParts.body
+    generatedSceneParts.body,
+    generatedSceneParts.hook
   )
   // 서두와 보도형 본문은 짧고 빠르게 읽히도록 한 줄을 우선한다.
   // 한 줄 폭을 넘는 문장은 같은 시간 범위 안에서 여러 자막 칸으로 나눈다.
   const generatedSubtitles = [
+    ...generatedSubtitleParts.hook,
     ...layoutTimedSubtitleCues(
       generatedSubtitleParts.lead,
       settings.bodySubtitleText,
@@ -343,7 +351,7 @@ export function prepareRenderProject(
           ? generatedSubtitles
           : normalizeSubtitleCues(project.subtitles, settings.bodySubtitleText)
   const outputBodyDuration = estimateReportScenesDuration(
-    reportScenes,
+    enabledScenes,
     settings.titleVoiceRate
   )
 
@@ -360,7 +368,13 @@ export function prepareRenderProject(
         ? false
         : project.subtitleTimingsLocked,
       outputDurationSeconds:
-        settings.titleCardSeconds + outputBodyDuration + NEWS_TOTAL_GAP_SECONDS,
+        (newsOptionalPartEnabled(project, "intro")
+          ? settings.titleCardSeconds + NEWS_INTRO_GAP_SECONDS
+          : 0) +
+        outputBodyDuration +
+        (newsOptionalPartEnabled(project, "outro")
+          ? NEWS_OUTRO_GAP_SECONDS
+          : 0),
       renderSignature: "",
     },
   }
@@ -388,13 +402,16 @@ export function renderContractReason(
   project: NewsClipProject,
   reportScenes: NewsReportScene[] = project.reportScenes
 ) {
+  reportScenes = activeReportScenes({ ...project, reportScenes })
   if (!project.source?.approved) return "source-not-approved"
   if (!project.title.trim()) return "title-required"
   const reportScript =
     project.productionMode === "report"
       ? canonicalReportScript(project.reportScript, reportScenes)
       : project.reportScript.trim()
-  if (!reportScript) return "report-script-required"
+  if (project.productionMode === "report" && !reportScript) {
+    return "report-script-required"
+  }
   if (!reportScenes.length) return "report-scenes-required"
 
   const broken = reportScenes.find((scene) => {
@@ -417,13 +434,12 @@ export function renderContractReason(
   }
 
   if (project.productionMode === "buildup2") {
-    const hasTeaser = reportScenes.some((scene) => scene.id === "buildup2-lead")
     const hasHighlight = reportScenes.some(
       (scene) =>
         scene.id === "buildup2-quote" ||
         /^buildup2-quote-cut-\d+/i.test(scene.id)
     )
-    if (!hasTeaser || !hasHighlight) return "report-scenes-required"
+    if (!hasHighlight) return "report-scenes-required"
     if (!project.transcript.length) return "report-script-required"
   }
 

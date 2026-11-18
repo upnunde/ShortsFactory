@@ -148,6 +148,12 @@ export function videoSummaryPlanToAngleOptions(
   return plan.topics.map((topic) => {
     const first = topic.sourceRanges[0]
     const last = topic.sourceRanges.at(-1)
+    const hook = topic.sourceRanges.find(
+      (range) =>
+        range.role === "hook" &&
+        range.sourceEnd - range.sourceStart >= 0.8 &&
+        range.sourceEnd - range.sourceStart <= 7
+    )
     return {
       id: topic.id,
       title: topic.title,
@@ -163,7 +169,20 @@ export function videoSummaryPlanToAngleOptions(
         evidence: range.evidence,
         sourceStart: range.sourceStart,
         sourceEnd: range.sourceEnd,
+        role: range.role,
       })),
+      ...(hook
+        ? {
+            coldOpen: {
+              text: hook.evidence.slice(0, 160),
+              sourceStart: hook.sourceStart,
+              sourceEnd: hook.sourceEnd,
+              score: 85,
+              reason: "요약 구성에서 가장 강한 훅 발언",
+              suitable: true,
+            },
+          }
+        : {}),
       estimatedDurationSeconds: topic.estimatedDurationSeconds,
     }
   })

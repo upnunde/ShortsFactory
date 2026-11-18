@@ -8,6 +8,7 @@ import {
   expandScenesWithSilenceCuts,
   keepRangesInside,
   localBuildup2Draft,
+  withBuildupColdOpen,
 } from "./buildup.ts"
 import type { NewsReportScene, TranscriptSegment } from "./types.ts"
 
@@ -60,6 +61,43 @@ const reviewedDateTranscript: TranscriptSegment[] = [
     captionBoundarySource: "automatic",
   },
 ]
+
+test("검증된 핵심 발언은 TTS 서두 앞에 원본 음성 훅으로 붙인다", () => {
+  const scenes = withBuildupColdOpen(
+    [
+      {
+        id: "buildup2-lead",
+        narration: "이 발언의 배경을 보자.",
+        visual: "source",
+        sourceStart: 80,
+        sourceEnd: 83,
+      },
+      {
+        id: "buildup2-quote",
+        narration: "",
+        visual: "quote",
+        sourceStart: 83,
+        sourceEnd: 110,
+      },
+    ],
+    {
+      text: "이재명 탈옥법입니다.",
+      sourceStart: 84,
+      sourceEnd: 87,
+      score: 90,
+      reason: "핵심 발언",
+      suitable: true,
+    },
+    "source-1"
+  )
+
+  assert.deepEqual(
+    scenes.map((scene) => scene.id),
+    ["buildup2-hook", "buildup2-lead", "buildup2-quote"]
+  )
+  assert.equal(scenes[0]?.part, "hook")
+  assert.equal(scenes[0]?.audioMode, "original")
+})
 
 const lockedEndTranscript: TranscriptSegment[] = [
   {

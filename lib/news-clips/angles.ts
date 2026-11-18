@@ -5,6 +5,16 @@ export type NewsAngleSourceRange = {
   evidence: string
   sourceStart: number
   sourceEnd: number
+  role?: "hook" | "context" | "evidence" | "conclusion"
+}
+
+export type NewsColdOpen = {
+  text: string
+  sourceStart: number
+  sourceEnd: number
+  score: number
+  reason: string
+  suitable: boolean
 }
 
 export type NewsAngleOption = {
@@ -21,6 +31,8 @@ export type NewsAngleOption = {
   ranges?: NewsAngleSourceRange[]
   /** 공백 구간을 제외한 ranges 실제 재생 시간 합계. */
   estimatedDurationSeconds?: number
+  /** TTS 서두 앞에 잠깐 보여 줄 원본 발언. 적합할 때만 존재한다. */
+  coldOpen?: NewsColdOpen
 }
 
 export type AngleTranscriptSegment = {
@@ -45,10 +57,9 @@ export function angleHasLockedRange(
  * 각도 분석 프롬프트용 전사. 앞부분만 자르지 않고 영상 전체에서
  * 시간순으로 고르게 뽑아 토큰 한도 안에서 초·중·후반 핵심을 모두 보게 한다.
  */
-export function selectTranscriptForAnglePrompt<T extends AngleTranscriptSegment>(
-  transcript: T[],
-  options: { maxSegments?: number } = {}
-) {
+export function selectTranscriptForAnglePrompt<
+  T extends AngleTranscriptSegment,
+>(transcript: T[], options: { maxSegments?: number } = {}) {
   const maxSegments = Math.max(24, Math.floor(options.maxSegments ?? 160))
   const ordered = transcript
     .filter(
@@ -58,9 +69,7 @@ export function selectTranscriptForAnglePrompt<T extends AngleTranscriptSegment>
         Number.isFinite(segment.end) &&
         segment.end > segment.start
     )
-    .toSorted(
-      (left, right) => left.start - right.start || left.end - right.end
-    )
+    .toSorted((left, right) => left.start - right.start || left.end - right.end)
   if (ordered.length <= maxSegments) return ordered
 
   const selected: T[] = []
@@ -228,6 +237,7 @@ export function normalizeAngleOptions(value: unknown): NewsAngleOption[] {
       const sourceEnd = Number.isFinite(rawEnd)
         ? Math.max(sourceStart, rawEnd)
         : sourceStart
+      const coldOpen = normalizeColdOpen(record.coldOpen)
       return [
         {
           id:
@@ -250,6 +260,7 @@ export function normalizeAngleOptions(value: unknown): NewsAngleOption[] {
           sourceStart: Math.round(sourceStart * 100) / 100,
           sourceEnd: Math.round(sourceEnd * 100) / 100,
           ...(ranges.length ? { ranges } : {}),
+          ...(coldOpen ? { coldOpen } : {}),
           ...(ranges.length ||
           Number.isFinite(Number(record.estimatedDurationSeconds))
             ? {
@@ -311,6 +322,13 @@ function normalizeAngleRanges(value: unknown): NewsAngleSourceRange[] {
               : "",
           sourceStart: Math.round(sourceStart * 100) / 100,
           sourceEnd: Math.round(sourceEnd * 100) / 100,
+          ...(record.role === "hook" ||
+          record.role === "context" ||
+          record.role === "conclusion"
+            ? { role: record.role }
+            : record.role === "evidence"
+              ? { role: "evidence" as const }
+              : {}),
         },
       ]
     })
@@ -319,4 +337,39 @@ function normalizeAngleRanges(value: unknown): NewsAngleSourceRange[] {
         left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
     )
     .slice(0, 8)
+}
+
+function normalizeColdOpen(value: unknown): NewsColdOpen | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const record = value as Partial<NewsColdOpen> & {
+    start?: unknown
+    end?: unknown
+  }
+  const sourceStart = Number(record.sourceStart ?? record.start)
+  const sourceEnd = Number(record.sourceEnd ?? record.end)
+  const score = Number(record.score)
+  const text = typeof record.text === "string" ? record.text.trim() : ""
+  if (
+    !text ||
+    !Number.isFinite(sourceStart) ||
+    !Number.isFinite(sourceEnd) ||
+    sourceEnd - sourceStart < 0.8 ||
+    sourceEnd - sourceStart > 7
+  ) {
+    return undefined
+  }
+  const normalizedScore = Number.isFinite(score)
+    ? Math.max(0, Math.min(100, Math.round(score)))
+    : 0
+  return {
+    text: text.slice(0, 160),
+    sourceStart: Math.round(Math.max(0, sourceStart) * 100) / 100,
+    sourceEnd: Math.round(Math.max(sourceStart, sourceEnd) * 100) / 100,
+    score: normalizedScore,
+    reason:
+      typeof record.reason === "string"
+        ? record.reason.trim().slice(0, 180)
+        : "",
+    suitable: record.suitable === true && normalizedScore >= 75,
+  }
 }

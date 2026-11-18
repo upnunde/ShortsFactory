@@ -11,7 +11,7 @@ import {
   useState,
 } from "react"
 
-import { Button, Card, Modal } from "@heroui/react"
+import { Button, Card, Modal, Switch } from "@heroui/react"
 import {
   ChevronDown,
   FileUp,
@@ -80,6 +80,7 @@ import {
   subtitleCueSourceRange,
 } from "@/lib/news-clips/subtitle-source-range"
 import {
+  newsOptionalPartEnabled,
   partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
   reportScenePart,
@@ -136,6 +137,7 @@ import type {
   NewsClipStep,
   NewsMediaFit,
   NewsMediaMotion,
+  NewsOptionalPart,
   NewsPreviewPart,
   NewsReportScene,
   NewsSource,
@@ -893,6 +895,7 @@ export function NewsClipReviewStep({
     compositionPane,
     mode,
     project.previewIntroUrl,
+    project.previewHookUrl,
     project.previewLeadUrl,
     project.previewBodyUrl,
     project.previewOutroUrl,
@@ -1005,7 +1008,13 @@ export function NewsClipReviewStep({
       return next
     })
     const partLabel =
-      part === "lead" ? "서두" : part === "outro" ? "마무리" : "본문"
+      part === "hook"
+        ? "핵심 훅"
+        : part === "lead"
+          ? "서두"
+          : part === "outro"
+            ? "마무리"
+            : "본문"
     onNote(
       `${partLabel} 구간 ${targetScenes.length}개에 화면 설정을 동일하게 저장했습니다.`
     )
@@ -1375,7 +1384,8 @@ export function NewsClipReviewStep({
     const currentSubtitleParts = partitionSubtitlesByPart(
       project.subtitles,
       currentSceneParts.lead,
-      currentSceneParts.body
+      currentSceneParts.body,
+      currentSceneParts.hook
     )
     const freshSceneParts = splitScenesByClipPart(
       prepared.project.reportScenes,
@@ -1384,16 +1394,19 @@ export function NewsClipReviewStep({
     const freshSubtitleParts = partitionSubtitlesByPart(
       prepared.project.subtitles,
       freshSceneParts.lead,
-      freshSceneParts.body
+      freshSceneParts.body,
+      freshSceneParts.hook
     )
     const subtitles =
       target === "lead"
         ? [
+            ...currentSubtitleParts.hook,
             ...freshSubtitleParts.lead,
             ...currentSubtitleParts.body,
             ...currentSubtitleParts.outro,
           ]
         : [
+            ...currentSubtitleParts.hook,
             ...currentSubtitleParts.lead,
             ...currentSubtitleParts.body,
             ...freshSubtitleParts.outro,
@@ -1837,7 +1850,13 @@ export function NewsClipReviewStep({
         return next
       })
       const partLabel =
-        part === "lead" ? "서두" : part === "outro" ? "마무리" : "본문"
+        part === "hook"
+          ? "핵심 훅"
+          : part === "lead"
+            ? "서두"
+            : part === "outro"
+              ? "마무리"
+              : "본문"
       onNote(`${partLabel} 화면을 첨부 파일로 교체했습니다.`)
     } catch (error) {
       onNote(
@@ -2180,11 +2199,13 @@ export function NewsClipReviewStep({
       ? project.previewUrl
       : compositionPane === "intro"
         ? project.previewIntroUrl
-        : compositionPane === "lead"
-          ? project.previewLeadUrl
-          : compositionPane === "body"
-            ? project.previewBodyUrl
-            : project.previewOutroUrl
+        : compositionPane === "hook"
+          ? project.previewHookUrl
+          : compositionPane === "lead"
+            ? project.previewLeadUrl
+            : compositionPane === "body"
+              ? project.previewBodyUrl
+              : project.previewOutroUrl
   const previewSceneParts = splitScenesByClipPart(
     project.reportScenes,
     project.productionMode
@@ -2192,8 +2213,10 @@ export function NewsClipReviewStep({
   const previewSubtitleParts = partitionSubtitlesByPart(
     project.subtitles,
     previewSceneParts.lead,
-    previewSceneParts.body
+    previewSceneParts.body,
+    previewSceneParts.hook
   )
+  const hookCaptions = previewSubtitleParts.hook
   const leadCaptions = previewSubtitleParts.lead
   const bodyCaptions = previewSubtitleParts.body
   const outroCaptions = previewSubtitleParts.outro
@@ -2202,11 +2225,13 @@ export function NewsClipReviewStep({
       ? project.subtitles
       : compositionPane === "outro"
         ? outroCaptions
-        : compositionPane === "lead"
-          ? leadCaptions
-          : compositionPane === "body"
-            ? bodyCaptions
-            : []
+        : compositionPane === "hook"
+          ? hookCaptions
+          : compositionPane === "lead"
+            ? leadCaptions
+            : compositionPane === "body"
+              ? bodyCaptions
+              : []
   // 4번: 구간별 클립 재생. 5번: 합본·최종본.
   const showPartPreview = mode === "preview"
   const renderedVideoUrl =
@@ -2225,11 +2250,45 @@ export function NewsClipReviewStep({
       ? "전체 초안"
       : compositionPane === "intro"
         ? "인트로"
-        : compositionPane === "lead"
-          ? "서두"
-          : compositionPane === "body"
-            ? "본문"
+        : compositionPane === "hook"
+          ? "핵심 훅"
+          : compositionPane === "lead"
+            ? "서두"
+            : compositionPane === "body"
+              ? "본문"
+              : "마무리"
+  const optionalPane: NewsOptionalPart | null =
+    compositionPane === "intro" ||
+    compositionPane === "hook" ||
+    compositionPane === "lead" ||
+    compositionPane === "outro"
+      ? compositionPane
+      : null
+  const optionalPaneEnabled = optionalPane
+    ? newsOptionalPartEnabled(project, optionalPane)
+    : true
+  const coldOpenAvailable = project.reportScenes.some(
+    (scene) => scene.id === "buildup2-hook"
+  )
+
+  function setOptionalPaneEnabled(part: NewsOptionalPart, enabled: boolean) {
+    if (part === "hook" && project.productionMode === "report") return
+    const disabledParts = enabled
+      ? project.disabledParts.filter((item) => item !== part)
+      : [...new Set([...project.disabledParts, part])]
+    const label =
+      part === "intro"
+        ? "인트로"
+        : part === "hook"
+          ? "핵심 훅"
+          : part === "lead"
+            ? "서두"
             : "마무리"
+    onProject({ disabledParts })
+    onNote(
+      `${label} 구간을 ${enabled ? "켰어." : "껐어."} 전체 다시 만들기에 반영돼.`
+    )
+  }
   const uploadAt = scheduleForUpload(scheduledAtDraft)
   const scheduleInWindow =
     inKoreaUploadWindow(scheduledAtDraft) && uploadAt === scheduledAtDraft
@@ -2357,21 +2416,21 @@ export function NewsClipReviewStep({
     if (!draft) return
     setRemakingPreviewPart(part)
     try {
-    // 서두·마무리는 TTS라 다시 만들면 새 자막 칸이 생긴다. 잠금을 유지하면
-    // 예전 ID만 남겨 서두 자막 목록이 비거나 옛 칸이 남는다. 본문(원본 음성)
-    // 다시 만들기만 잠긴 자막 시간을 유지한다.
-    await onPreview(
-      true,
-      {
-        ...draft,
-        subtitleTimingsLocked: Boolean(
-          draft.subtitleTimingsLocked &&
+      // 서두·마무리는 TTS라 다시 만들면 새 자막 칸이 생긴다. 잠금을 유지하면
+      // 예전 ID만 남겨 서두 자막 목록이 비거나 옛 칸이 남는다. 본문(원본 음성)
+      // 다시 만들기만 잠긴 자막 시간을 유지한다.
+      await onPreview(
+        true,
+        {
+          ...draft,
+          subtitleTimingsLocked: Boolean(
+            draft.subtitleTimingsLocked &&
             draft.subtitles.length &&
             part === "body"
-        ),
-      },
-      part
-    )
+          ),
+        },
+        part
+      )
     } finally {
       setRemakingPreviewPart(null)
     }
@@ -2765,19 +2824,47 @@ export function NewsClipReviewStep({
               </div>
             ) : null}
             {mode === "preview" ? (
-              <SegmentedTabs
-                ariaLabel="미리보기 구간"
-                className="shrink-0"
-                value={compositionPane}
-                onChange={setCompositionPane}
-                items={[
-                  { id: "all", label: "전체" },
-                  { id: "intro", label: "인트로" },
-                  { id: "lead", label: "서두" },
-                  { id: "body", label: "본문" },
-                  { id: "outro", label: "마무리" },
-                ]}
-              />
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
+                <SegmentedTabs
+                  ariaLabel="미리보기 구간"
+                  value={compositionPane}
+                  onChange={setCompositionPane}
+                  items={[
+                    { id: "all", label: "전체" },
+                    { id: "intro", label: "인트로" },
+                    ...(project.productionMode === "buildup2"
+                      ? [{ id: "hook" as const, label: "핵심 훅" }]
+                      : []),
+                    { id: "lead", label: "서두" },
+                    { id: "body", label: "본문" },
+                    { id: "outro", label: "마무리" },
+                  ]}
+                />
+                {optionalPane ? (
+                  <Switch
+                    aria-label={`${partPreviewLabel} 사용`}
+                    isSelected={optionalPaneEnabled}
+                    isDisabled={
+                      busy !== "" ||
+                      (optionalPane === "hook" && !coldOpenAvailable)
+                    }
+                    onChange={(enabled) =>
+                      setOptionalPaneEnabled(optionalPane, enabled)
+                    }
+                  >
+                    <Switch.Content>
+                      <Switch.Control>
+                        <Switch.Thumb />
+                      </Switch.Control>
+                      {optionalPane === "hook" && !coldOpenAvailable
+                        ? "적합한 훅 없음"
+                        : optionalPaneEnabled
+                          ? "사용"
+                          : "사용 안 함"}
+                    </Switch.Content>
+                  </Switch>
+                ) : null}
+              </div>
             ) : null}
             {mode === "script" && !reportScriptOnly ? (
               <SegmentedTabs
@@ -4106,6 +4193,7 @@ export function NewsClipReviewStep({
                         </div>
                       ) : null}
                       {mode === "direction" ||
+                      compositionPane === "hook" ||
                       compositionPane === "lead" ||
                       compositionPane === "body" ||
                       compositionPane === "outro" ? (
@@ -4118,6 +4206,11 @@ export function NewsClipReviewStep({
                                   project.reportScenes,
                                   project.productionMode
                                 )
+                                if (compositionPane === "hook") {
+                                  return parts.hook.some(
+                                    (item) => item.id === scene.id
+                                  )
+                                }
                                 if (compositionPane === "lead") {
                                   return parts.lead.some(
                                     (item) => item.id === scene.id
@@ -4827,7 +4920,8 @@ export function NewsClipReviewStep({
                   : null}
 
                 {(mode === "preview" &&
-                  (compositionPane === "lead" ||
+                  (compositionPane === "hook" ||
+                    compositionPane === "lead" ||
                     compositionPane === "body" ||
                     compositionPane === "outro")) ||
                 mode === "final" ? (
@@ -5263,7 +5357,7 @@ export function NewsClipReviewStep({
                   </>
                 ) : null}
 
-                {mode === "preview" && compositionPane !== "all" ? (
+                {mode === "preview" ? (
                   <div className="flex items-center justify-end gap-3 pt-2 pb-1">
                     <Button
                       variant="outline"
@@ -5284,25 +5378,28 @@ export function NewsClipReviewStep({
                         progress={previewProgress}
                       />
                     </Button>
-                    <Button
-                      variant="outline"
-                      isDisabled={
-                        busyMatches(busy, "preview")
-                          ? remakingPreviewPart !== compositionPane
-                          : busy !== ""
-                      }
-                      onPress={() => void remakePreview(compositionPane)}
-                    >
-                      <LoadingButtonLabel
-                        loading={
-                          busyMatches(busy, "preview") &&
-                          remakingPreviewPart === compositionPane
+                    {compositionPane !== "all" ? (
+                      <Button
+                        variant="outline"
+                        isDisabled={
+                          !optionalPaneEnabled ||
+                          (busyMatches(busy, "preview")
+                            ? remakingPreviewPart !== compositionPane
+                            : busy !== "")
                         }
-                        label={`${partPreviewLabel} 다시 만들기`}
-                        loadingLabel="취소"
-                        progress={previewProgress}
-                      />
-                    </Button>
+                        onPress={() => void remakePreview(compositionPane)}
+                      >
+                        <LoadingButtonLabel
+                          loading={
+                            busyMatches(busy, "preview") &&
+                            remakingPreviewPart === compositionPane
+                          }
+                          label={`${partPreviewLabel} 다시 만들기`}
+                          loadingLabel="취소"
+                          progress={previewProgress}
+                        />
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>

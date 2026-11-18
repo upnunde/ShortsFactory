@@ -27,6 +27,46 @@ test("각도 정규화는 주제 구간 start/end를 보존한다", () => {
   assert.equal(angleHasLockedRange(angles[0]!), true)
 })
 
+test("문맥이 독립적이고 점수가 충분한 짧은 발언만 핵심 훅으로 보존한다", () => {
+  const [angle] = normalizeAngleOptions([
+    {
+      title: "탈옥법 발언",
+      summary: "발언의 요지를 확인한다.",
+      sourceStart: 80,
+      sourceEnd: 120,
+      coldOpen: {
+        text: "이재명 탈옥법입니다.",
+        sourceStart: 83.2,
+        sourceEnd: 86.4,
+        score: 88,
+        reason: "주제를 한 문장으로 보여 준다.",
+        suitable: true,
+      },
+    },
+  ])
+
+  assert.equal(angle?.coldOpen?.suitable, true)
+  assert.equal(angle?.coldOpen?.sourceStart, 83.2)
+
+  const [weak] = normalizeAngleOptions([
+    {
+      title: "약한 발언",
+      summary: "훅으로 쓰기 어렵다.",
+      sourceStart: 80,
+      sourceEnd: 120,
+      coldOpen: {
+        text: "배경 설명입니다.",
+        sourceStart: 90,
+        sourceEnd: 93,
+        score: 60,
+        reason: "약함",
+        suitable: true,
+      },
+    },
+  ])
+  assert.equal(weak?.coldOpen?.suitable, false)
+})
+
 test("구간이 너무 짧으면 locked range가 아니다", () => {
   const angles = normalizeAngleOptions([
     {
@@ -186,7 +226,9 @@ test("각도 프롬프트 전사는 앞부분만 자르지 않고 전체 구간�
   assert.equal(selected[0]?.id, "seg-1")
   assert.equal(selected.at(-1)?.id, "seg-400")
   assert.ok(selected.some((segment) => segment.start >= 300))
-  assert.ok(selected.some((segment) => segment.start >= 150 && segment.start < 250))
+  assert.ok(
+    selected.some((segment) => segment.start >= 150 && segment.start < 250)
+  )
   assert.ok(
     selected.every((segment, index) => {
       if (index === 0) return true
