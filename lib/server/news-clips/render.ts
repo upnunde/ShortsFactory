@@ -46,6 +46,7 @@ import {
   quoteTranscriptAlignment,
   applySubtitleTimingForRender,
   continuousSpeechWordBoundaries,
+  restoreSpeechSentenceBoundaries,
   mergeEditedSubtitleText,
   retimeLockedSubtitleCuesToSpeech,
   subtitleCuesFromSpeechAlignment,
@@ -1720,7 +1721,7 @@ function timeContinuousTtsScenes(
       start: roundDuration(start),
       end: roundDuration(end),
       duration: roundDuration(end - start),
-      alignment: sceneWords,
+      alignment: restoreSpeechSentenceBoundaries(scene.narration, sceneWords),
     } satisfies TimedReportScene
   })
 }
@@ -1891,10 +1892,13 @@ async function synthesizeReport(
     })
     durations.push(duration)
     alignments.push(
-      scaleSpeechWordsToDuration(
-        timing?.words ?? [],
-        duration,
-        timing?.audioDuration
+      restoreSpeechSentenceBoundaries(
+        narration,
+        scaleSpeechWordsToDuration(
+          timing?.words ?? [],
+          duration,
+          timing?.audioDuration
+        )
       )
     )
     tightVideoPaths.push(undefined)

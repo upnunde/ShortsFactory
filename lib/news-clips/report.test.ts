@@ -19,6 +19,7 @@ import {
   reportSceneAudioMode,
   reportScriptFromScenes,
   reportVisualContinuationAnchor,
+  restoreSpeechSentenceBoundaries,
   resolveReportVisualContinuations,
   reportSubtitles,
   shortBreathReviewTranscript,
@@ -1144,6 +1145,41 @@ test("음성 단어 타임스탬프는 읽기 좋은 자막 칸으로 묶는다"
   assert.ok(retimed.every((cue) => cue.sourceEnd === undefined))
 })
 
+test("TTS에서 마침표가 빠져도 거야와 결국을 한 자막으로 묶지 않는다", () => {
+  const narration =
+    "그들은 이 일을 이미 알고 있었다는 거야. 결국 그들은 새로운 계획을 선택했어."
+  const texts = narration.replace(/[.]/g, "").split(/\s+/)
+  const alignment = restoreSpeechSentenceBoundaries(
+    narration,
+    texts.map((text, index) => ({
+      text,
+      start: index * 0.4,
+      end: index * 0.4 + 0.32,
+    }))
+  )
+  const cues = subtitleCuesFromSpeechAlignment(
+    {
+      id: "tts-period-boundary",
+      narration,
+      visual: "source",
+      sourceStart: 0,
+      sourceEnd: texts.length * 0.4,
+      start: 0,
+      end: texts.length * 0.4,
+      alignment,
+    },
+    { maxCharacters: 12, preferredCharacters: 10 }
+  )
+
+  assert.equal(
+    alignment.find((word) => word.text === "거야")?.boundaryAfter,
+    true
+  )
+  assert.ok(cues.every((cue) => !/거야\s+결국/u.test(cue.text)))
+  assert.ok(cues.some((cue) => /거야$/u.test(cue.text)))
+  assert.ok(cues.some((cue) => /^결국(?:\s|$)/u.test(cue.text)))
+})
+
 test("원본 음성 실측 자막은 소스 영상의 절대 구간을 함께 보관한다", () => {
   const scene: NewsReportScene = {
     id: "quote-source-range",
@@ -1828,7 +1864,7 @@ test("관형어와 피수식어는 한 줄 칸에서 가르지 않는다", () =>
     {
       id: "adnominal-lead",
       narration: "",
-      visual: "broll",
+      visual: "source",
       sourceStart: 0,
       sourceEnd: 6,
       start: 0,

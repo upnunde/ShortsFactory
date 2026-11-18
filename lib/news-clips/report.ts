@@ -1066,6 +1066,38 @@ export function continuousSpeechWordBoundaries(
   return boundaries
 }
 
+/**
+ * TTS 단어 타임스탬프에서 빠진 마침표를 원문 대본으로 복원한다.
+ * Typecast는 `거야. 결국`을 `거야`, `결국` 두 단어로만 반환하므로,
+ * 이 경계를 되살리지 않으면 길이 최적화가 `거야 결국`을 한 자막으로 묶는다.
+ */
+export function restoreSpeechSentenceBoundaries<T extends SpeechAlignmentUnit>(
+  narration: string,
+  words: T[]
+): Array<T & { boundaryAfter?: boolean }> {
+  if (!words.length) return []
+  const restored = words.map((word) => ({
+    ...word,
+    boundaryAfter:
+      word.boundaryAfter === true || /[.!?。！？]["'”’)]*$/u.test(word.text),
+  }))
+  const sentences = splitReportSentences(narration)
+  if (sentences.length < 2) return restored
+
+  const boundaries = continuousSpeechWordBoundaries(sentences, restored)
+  for (const boundary of boundaries.slice(1, -1)) {
+    const previousIndex = Math.max(
+      0,
+      Math.min(restored.length - 1, boundary - 1)
+    )
+    restored[previousIndex] = {
+      ...restored[previousIndex]!,
+      boundaryAfter: true,
+    }
+  }
+  return restored
+}
+
 function speechMatchKey(value: string) {
   return value
     .normalize("NFKC")
