@@ -18,6 +18,9 @@ type SourceTimedSubtitleCue = SubtitleCue & {
   sourceEnd?: number
 }
 
+const DELETION_SILENCE_TIGHTEN_SECONDS = 0.24
+const ADJACENT_SPEECH_GUARD_SECONDS = 0.04
+
 export type SubtitleSourceRange = {
   start: number
   end: number
@@ -96,6 +99,79 @@ export function subtitleCueSourceRange(
     sceneEnd,
     scene.id
   )
+}
+
+/**
+ * 자막 삭제 시 단어 경계 바로 바깥의 짧은 무음·정지 화면도 함께 걷어낸다.
+ * 인접 발음 앞뒤에는 최소 안전 간격을 남기고, 일반 자막 표시 시간은 건드리지 않는다.
+ */
+export function subtitleCueDeletionSourceRange(
+  cue: SubtitleCue,
+  scenes: NewsReportScene[],
+  transcript: TranscriptSegment[],
+  layout: NewsTextLayout
+): SubtitleSourceRange | null {
+  const range = subtitleCueSourceRange(cue, scenes, transcript, layout)
+  if (!range) return null
+  const scene = scenes.find((item) => item.id === range.sceneId)
+  if (!scene) return range
+
+  const sceneStart = Math.min(scene.sourceStart, scene.sourceEnd)
+  const sceneEnd = Math.max(scene.sourceStart, scene.sourceEnd)
+  const speechUnits = transcript.flatMap((segment) => {
+    const words = segment.words.filter(
+      (word) =>
+        word.text.trim() &&
+        Number.isFinite(word.start) &&
+        Number.isFinite(word.end) &&
+        word.end > word.start
+    )
+    if (words.length) return words
+    return Number.isFinite(segment.start) &&
+      Number.isFinite(segment.end) &&
+      segment.end > segment.start
+      ? [{ start: segment.start, end: segment.end }]
+      : []
+  })
+  const previousEnd = speechUnits.reduce<number | null>((latest, unit) => {
+    if (
+      unit.end > range.start + 0.01 ||
+      unit.end < sceneStart ||
+      unit.start > sceneEnd
+    ) {
+      return latest
+    }
+    return latest === null ? unit.end : Math.max(latest, unit.end)
+  }, null)
+  const nextStart = speechUnits.reduce<number | null>((earliest, unit) => {
+    if (
+      unit.start < range.end - 0.01 ||
+      unit.end < sceneStart ||
+      unit.start > sceneEnd
+    ) {
+      return earliest
+    }
+    return earliest === null ? unit.start : Math.min(earliest, unit.start)
+  }, null)
+
+  const paddedStart = Math.max(
+    sceneStart,
+    range.start - DELETION_SILENCE_TIGHTEN_SECONDS,
+    previousEnd === null
+      ? sceneStart
+      : previousEnd + ADJACENT_SPEECH_GUARD_SECONDS
+  )
+  const paddedEnd = Math.min(
+    sceneEnd,
+    range.end + DELETION_SILENCE_TIGHTEN_SECONDS,
+    nextStart === null ? sceneEnd : nextStart - ADJACENT_SPEECH_GUARD_SECONDS
+  )
+
+  return {
+    ...range,
+    start: round(Math.min(range.start, paddedStart)),
+    end: round(Math.max(range.end, paddedEnd)),
+  }
 }
 
 function findLegacyCueMatch(cue: SubtitleCue, regenerated: SubtitleCue[]) {

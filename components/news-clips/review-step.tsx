@@ -75,7 +75,10 @@ import {
 import { preservePreviewSubtitleEdits } from "@/lib/news-clips/preview-subtitles"
 import { sceneAudioTimingChanged } from "@/lib/news-clips/scene-edit"
 import { tightenLockedSourceRangeToSpeech } from "@/lib/news-clips/speech-bounds"
-import { subtitleCueSourceRange } from "@/lib/news-clips/subtitle-source-range"
+import {
+  subtitleCueDeletionSourceRange,
+  subtitleCueSourceRange,
+} from "@/lib/news-clips/subtitle-source-range"
 import {
   partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
@@ -1584,7 +1587,7 @@ export function NewsClipReviewStep({
   function deleteBodySubtitleRange(
     caption: NewsClipProject["subtitles"][number]
   ) {
-    const sourceRange = subtitleCueSourceRange(
+    const sourceRange = subtitleCueDeletionSourceRange(
       caption,
       project.reportScenes,
       project.transcript,

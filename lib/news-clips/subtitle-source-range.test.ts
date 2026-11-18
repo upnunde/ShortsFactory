@@ -3,7 +3,10 @@ import test from "node:test"
 
 import { NEWS_SOURCE_PLAYBACK_RATE } from "./playback.ts"
 import { reportSubtitles } from "./report.ts"
-import { subtitleCueSourceRange } from "./subtitle-source-range.ts"
+import {
+  subtitleCueDeletionSourceRange,
+  subtitleCueSourceRange,
+} from "./subtitle-source-range.ts"
 import {
   automaticSubtitleCueCharacterLimit,
   layoutTimedSubtitleCues,
@@ -74,6 +77,34 @@ test("저장된 원본 경계가 있으면 출력 시간이나 수정 문구와 
   assert.deepEqual(subtitleCueSourceRange(cue, [scene], transcript, layout), {
     start: 103.25,
     end: 105.75,
+    sceneId: scene.id,
+  })
+})
+
+test("자막 삭제는 인접 발음을 보호하면서 앞뒤 빈 화면을 더 타이트하게 제거한다", () => {
+  const cue = {
+    id: "delete-middle-caption",
+    sceneId: scene.id,
+    start: 3.5,
+    end: 6.4,
+    text: "두 번째 문제 제기입니다.",
+    emphasis: [],
+    emphasisColor: "yellow",
+    sourceStart: 103.5,
+    sourceEnd: 106.4,
+  } satisfies SubtitleCue & { sourceStart: number; sourceEnd: number }
+
+  assert.deepEqual(
+    subtitleCueDeletionSourceRange(cue, [scene], transcript, layout),
+    {
+      start: 103.26,
+      end: 106.64,
+      sceneId: scene.id,
+    }
+  )
+  assert.deepEqual(subtitleCueSourceRange(cue, [scene], transcript, layout), {
+    start: 103.5,
+    end: 106.4,
     sceneId: scene.id,
   })
 })
