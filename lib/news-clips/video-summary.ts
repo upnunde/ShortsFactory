@@ -63,6 +63,8 @@ type NormalizeVideoSummaryOptions = {
   maxTopics?: number
   minRangesPerTopic?: number
   maxRangesPerTopic?: number
+  targetDurationSeconds?: number
+  maxDurationSeconds?: number
 }
 
 /**
@@ -80,9 +82,19 @@ export function normalizeVideoSummaryPlan(
   const maxTopics = clampInteger(options.maxTopics ?? 5, minTopics, 5)
   const minRanges = clampInteger(options.minRangesPerTopic ?? 2, 1, 6)
   const maxRanges = clampInteger(options.maxRangesPerTopic ?? 6, minRanges, 8)
+  const targetDurationSeconds = clampNumber(
+    options.targetDurationSeconds ?? 45,
+    5,
+    120
+  )
+  const maxDurationSeconds = clampNumber(
+    options.maxDurationSeconds ?? 50,
+    targetDurationSeconds,
+    120
+  )
   const orderedTranscript = validTranscript(transcript)
   const coverage = transcriptCoverage(orderedTranscript)
-  const overallSummary = koreanText(record.overallSummary, 1200)
+  const overallSummary = koreanText(record.overallSummary, 500)
   const rawTopics = Array.isArray(record.topics) ? record.topics : []
   const topics = rawTopics
     .flatMap((topic, index) => {
@@ -90,6 +102,8 @@ export function normalizeVideoSummaryPlan(
         sourceId,
         minRanges,
         maxRanges,
+        targetDurationSeconds,
+        maxDurationSeconds,
         coverage,
       })
       return normalized ? [normalized] : []
@@ -206,6 +220,8 @@ function normalizeTopic(
     sourceId: string
     minRanges: number
     maxRanges: number
+    targetDurationSeconds: number
+    maxDurationSeconds: number
     coverage: VideoSummaryCoverage
   }
 ): VideoSummaryTopicOption | null {
@@ -235,13 +251,15 @@ function normalizeTopic(
       (left, right) =>
         left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
     )
-  const sourceRanges = coalesceSourceRanges(
-    lockedRanges,
-    transcript,
-    options.sourceId
-  )
-    .slice(0, options.maxRanges)
-    .map((range, order) => ({ ...range, order }))
+  const sourceRanges = fitVideoSummaryDuration(
+    coalesceSourceRanges(lockedRanges, transcript, options.sourceId).slice(
+      0,
+      options.maxRanges
+    ),
+    options.minRanges,
+    options.targetDurationSeconds,
+    options.maxDurationSeconds
+  ).map((range, order) => ({ ...range, order }))
   if (sourceRanges.length < options.minRanges) return null
 
   const keywords = Array.isArray(record.keywords)
@@ -379,6 +397,44 @@ function coalesceSourceRanges(
   return merged
 }
 
+/**
+ * 원본 발화를 중간에서 자르지 않고 선택 구간 조합만 줄여 약 1분 최종본의
+ * 원본 본문 예산에 맞춘다. 최대 8개라 모든 조합을 검사해 목표에 가장 가까운
+ * 조합을 고를 수 있다.
+ */
+function fitVideoSummaryDuration(
+  ranges: VideoSummarySourceRange[],
+  minRanges: number,
+  targetSeconds: number,
+  maxSeconds: number
+) {
+  const durationOf = (range: VideoSummarySourceRange) =>
+    Math.max(0, range.sourceEnd - range.sourceStart)
+  const total = ranges.reduce((sum, range) => sum + durationOf(range), 0)
+  if (total <= maxSeconds) return ranges
+
+  const hasHook = ranges.some((range) => range.role === "hook")
+  const hasConclusion = ranges.some((range) => range.role === "conclusion")
+  let best: { ranges: VideoSummarySourceRange[]; score: number } | null = null
+  for (let mask = 1; mask < 1 << ranges.length; mask += 1) {
+    const selected = ranges.filter((_, index) => (mask & (1 << index)) !== 0)
+    if (selected.length < minRanges) continue
+    const duration = selected.reduce((sum, range) => sum + durationOf(range), 0)
+    if (duration > maxSeconds) continue
+    const keepsHook = selected.some((range) => range.role === "hook")
+    const keepsConclusion = selected.some(
+      (range) => range.role === "conclusion"
+    )
+    const score =
+      -Math.abs(targetSeconds - duration) * 10 +
+      selected.length +
+      (hasHook && keepsHook ? 30 : 0) +
+      (hasConclusion && keepsConclusion ? 30 : 0)
+    if (!best || score > best.score) best = { ranges: selected, score }
+  }
+  return best?.ranges ?? ranges.slice(0, minRanges)
+}
+
 function transcriptCoverage(
   transcript: TranscriptSegment[]
 ): VideoSummaryCoverage {
@@ -474,6 +530,10 @@ function finiteNumber(value: unknown) {
 
 function clampInteger(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.floor(value)))
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
 }
 
 function round(value: number) {

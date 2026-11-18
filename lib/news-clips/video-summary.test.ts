@@ -99,7 +99,7 @@ test("한국어 전체 요약과 3개 후보를 청크 분석 후 복수 구간�
   const plan = await extractVideoSummaryPlan(serializeTranscript(transcript), {
     sourceId: "source-1",
     sourceTitle: "정책 토론 전체 영상",
-    generateText: async () => {
+    generateText: async (system) => {
       calls += 1
       if (calls === 1) {
         return JSON.stringify({
@@ -113,6 +113,8 @@ test("한국어 전체 요약과 3개 후보를 청크 분석 후 복수 구간�
           })),
         })
       }
+      assert.match(system, /전체 내용을 순서대로 골고루 줄이지 않는다/)
+      assert.match(system, /hook.*context.*evidence.*conclusion/)
       return JSON.stringify({
         overallSummary:
           "영상은 정책의 추진 배경을 설명하고 예산 부족과 현장 피해를 짚어 본다. 이후 법적 모순과 책임 공방, 후속 조치까지 이어진다.",
@@ -156,6 +158,85 @@ test("짧은 영상은 모델 JSON이 깨져도 실제 전사로 3개 요약 후
     )
   )
   assert.equal(videoSummaryPlanIsComplete(plan), true)
+})
+
+test("발언 하나뿐인 짧은 영상도 가진 내용으로 요약 후보를 만든다", async () => {
+  const shortTranscript = [
+    makeSegment(
+      "short-segment-1",
+      0,
+      "핵심은 예산이 늘었지만 현장 지원은 오히려 줄었다는 점입니다."
+    ),
+  ]
+  const plan = await extractVideoSummaryPlan(
+    serializeTranscript(shortTranscript),
+    {
+      sourceId: "very-short-source",
+      sourceTitle: "짧은 핵심 발언",
+      generateText: async () => "깨진 응답",
+    }
+  )
+
+  assert.equal(plan.topics.length, 1)
+  assert.equal(plan.topics[0]?.sourceRanges.length, 1)
+  assert.equal(
+    videoSummaryPlanIsComplete(plan, {
+      minTopics: 1,
+      minRangesPerTopic: 1,
+    }),
+    true
+  )
+})
+
+test("긴 영상의 핵심 구간 합계는 약 1분 최종본 예산을 넘지 않는다", () => {
+  const longTranscript = Array.from({ length: 6 }, (_, index) =>
+    makeLongSegment(
+      `long-segment-${index + 1}`,
+      index * 12,
+      `${index + 1}번째 핵심 발언은 정책의 모순과 현장 피해 근거를 구체적으로 설명합니다.`
+    )
+  )
+  const plan = normalizeVideoSummaryPlan(
+    {
+      overallSummary:
+        "영상의 가장 중요한 정책 모순과 현장 피해 근거를 중심으로 정리한다.",
+      topics: [
+        {
+          id: "one-minute-topic",
+          title: "정책 모순의 핵심 근거",
+          summary: "가장 강한 발언과 근거, 결론을 연결한 요약이다.",
+          sourceRanges: longTranscript.map((segment, index) => ({
+            id: `long-range-${index + 1}`,
+            sourceStart: segment.start,
+            sourceEnd: segment.end,
+            role:
+              index === 0
+                ? "hook"
+                : index === longTranscript.length - 1
+                  ? "conclusion"
+                  : "evidence",
+          })),
+        },
+      ],
+    },
+    longTranscript,
+    {
+      sourceId: "long-source",
+      minTopics: 1,
+      minRangesPerTopic: 2,
+      maxRangesPerTopic: 8,
+      targetDurationSeconds: 45,
+      maxDurationSeconds: 50,
+    }
+  )
+
+  assert.equal(plan.topics.length, 1)
+  assert.ok(plan.topics[0]!.estimatedDurationSeconds <= 50)
+  assert.ok(plan.topics[0]!.estimatedDurationSeconds >= 40)
+  assert.ok(plan.topics[0]!.sourceRanges.some((range) => range.role === "hook"))
+  assert.ok(
+    plan.topics[0]!.sourceRanges.some((range) => range.role === "conclusion")
+  )
 })
 
 test("겹친 구간만 반환한 불완전한 주제는 떨어진 실제 발언 조합으로 보충한다", async () => {
@@ -274,6 +355,27 @@ function makeSegment(
     text,
     start,
     end: start + 2,
+    speaker: "speaker-1",
+    words: words.map((word, index) => ({
+      text: word,
+      start: Math.round((start + 0.1 + duration * index) * 1000) / 1000,
+      end: Math.round((start + 0.1 + duration * (index + 1)) * 1000) / 1000,
+    })),
+  }
+}
+
+function makeLongSegment(
+  id: string,
+  start: number,
+  text: string
+): TranscriptSegment {
+  const words = text.split(/\s+/)
+  const duration = 9.8 / words.length
+  return {
+    id,
+    text,
+    start,
+    end: start + 10,
     speaker: "speaker-1",
     words: words.map((word, index) => ({
       text: word,

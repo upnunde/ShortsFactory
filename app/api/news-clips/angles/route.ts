@@ -56,7 +56,7 @@ export async function POST(request: Request) {
       { status: 422 }
     )
   }
-  await readNewsClipSettings(newsChannelId(body?.profileId))
+  const settings = await readNewsClipSettings(newsChannelId(body?.profileId))
   let transcript = (await readStoredTranscript(sourceId)) || ""
   // 원본 SRT/VTT가 있으면 전체 영상 Whisper 캐시로 덮어쓰지 않는다.
   // 빌드업형인데 시간 정보가 전혀 없을 때만 단어 시간 STT를 만든다.
@@ -106,6 +106,16 @@ export async function POST(request: Request) {
         sourceId: source.id,
         sourceTitle: source.title,
         focus,
+        // 제목 카드·짧은 TTS 서두·마무리를 더한 최종본이 약 1분이 되도록
+        // 원본 발언 조립에는 약 45초를 배정한다.
+        targetDurationSeconds: Math.max(
+          20,
+          settings.idealMaxSeconds - settings.titleCardSeconds - 7
+        ),
+        maxDurationSeconds: Math.max(
+          25,
+          settings.targetMaxSeconds - settings.titleCardSeconds - 7
+        ),
       })
       const angles = videoSummaryPlanToAngleOptions(plan)
       if (angles.length === 0) {
