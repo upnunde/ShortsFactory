@@ -106,10 +106,10 @@ export async function readHiggsfield(context?: CredentialCookieContext | null) {
     if (keyId && keySecret) {
       return `${keyId}:${keySecret}`
     }
-    return null
   } catch {
-    return null
+    // Fall through to the environment variable for portable/Vercel installs.
   }
+  return process.env.HIGGSFIELD_API_KEY?.trim() || null
 }
 
 export async function readAzureSpeech(
