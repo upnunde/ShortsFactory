@@ -62,7 +62,7 @@ const reviewedDateTranscript: TranscriptSegment[] = [
   },
 ]
 
-test("검증된 핵심 발언은 TTS 서두 앞에 원본 음성 훅으로 붙인다", () => {
+test("수동 지정한 핵심 발언은 TTS 서두 앞에 원본 음성 훅으로 붙인다", () => {
   const scenes = withBuildupColdOpen(
     [
       {
@@ -97,6 +97,42 @@ test("검증된 핵심 발언은 TTS 서두 앞에 원본 음성 훅으로 붙�
   )
   assert.equal(scenes[0]?.part, "hook")
   assert.equal(scenes[0]?.audioMode, "original")
+})
+
+test("자막에서 고른 복수 훅은 본문을 다시 구성해도 순서대로 유지한다", () => {
+  const hookScenes: NewsReportScene[] = [
+    {
+      id: "buildup2-hook-selection-1",
+      narration: "",
+      part: "hook",
+      audioMode: "original",
+      visual: "quote",
+      sourceStart: 74,
+      sourceEnd: 75,
+    },
+    {
+      id: "buildup2-hook-selection-2",
+      narration: "",
+      part: "hook",
+      audioMode: "original",
+      visual: "quote",
+      sourceStart: 79,
+      sourceEnd: 80,
+    },
+  ]
+  const scenes = buildBuildup2Scenes(
+    "이 발언의 핵심을 보자.",
+    73.94,
+    81.02,
+    reviewedDateTranscript,
+    "source-1",
+    hookScenes
+  )
+
+  assert.deepEqual(
+    scenes.slice(0, 3).map((scene) => scene.id),
+    ["buildup2-hook-selection-1", "buildup2-hook-selection-2", "buildup2-lead"]
+  )
 })
 
 const lockedEndTranscript: TranscriptSegment[] = [

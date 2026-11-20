@@ -174,6 +174,25 @@ test("영상 요약형의 떨어진 핵심 구간은 분석 결과부터 렌더 
     ),
     false
   )
+  const bodyCaptions = prepared.project.subtitles.filter((caption) =>
+    caption.sceneId?.startsWith("buildup2-quote-cut-")
+  )
+  assert.ok(bodyCaptions.length > 0)
+  const bodyText = bodyCaptions.map((caption) => caption.text).join(" ")
+  assert.doesNotMatch(
+    bodyText,
+    /사용하지 않는다|직접 관련이 없다|중간 토론|반복 설명/
+  )
+  assert.ok(
+    bodyCaptions.every((caption) =>
+      expectedRanges.some(
+        (range) =>
+          (caption.sourceStart ?? -1) >= range.sourceStart - 0.001 &&
+          (caption.sourceEnd ?? Number.POSITIVE_INFINITY) <=
+            range.sourceEnd + 0.001
+      )
+    )
+  )
 })
 
 function segment(id: string, start: number, end: number, text: string) {

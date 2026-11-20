@@ -10,6 +10,7 @@ import type {
   TranscriptSegment,
 } from "./types.ts"
 import type { NewsColdOpen } from "./angles.ts"
+import { buildupHookScenes, removeBuildupHookScenes } from "./caption-hook.ts"
 
 export const BUILDUP2_LEAD_PROMPT_HINT =
   "핵심 발언의 모순·온도만 짚는 차분한 반말 서두 1~2문장. '들어봐' 고정 훅·CTA 금지"
@@ -208,7 +209,7 @@ export function buildBuildup2Scenes(
   preferred?: NewsReportScene[],
   options: Buildup2RangeOptions = {}
 ): NewsReportScene[] {
-  const hookScene = preferred?.find((scene) => scene.id === "buildup2-hook")
+  const hookScenes = buildupHookScenes(preferred ?? [])
   const teaserScene = preferred?.find((scene) => scene.id === "buildup2-lead")
   const preferredCutScenes = (preferred ?? [])
     .filter(
@@ -291,16 +292,16 @@ export function buildBuildup2Scenes(
           ...(highlightScene?.crop ? { crop: { ...highlightScene.crop } } : {}),
         },
       ]
-  return [...(hookScene ? [hookScene] : []), lead, ...quoteScenes]
+  return [...hookScenes, lead, ...quoteScenes]
 }
 
-/** 검증된 핵심 발언이 있을 때만 TTS 서두 앞에 콜드 오픈을 붙인다. */
+/** 수동 지정한 핵심 발언을 인트로 다음·TTS 서두 앞에 붙인다. */
 export function withBuildupColdOpen(
   scenes: NewsReportScene[],
   coldOpen: NewsColdOpen | undefined,
   primarySourceId = ""
 ) {
-  const withoutHook = scenes.filter((scene) => scene.id !== "buildup2-hook")
+  const withoutHook = removeBuildupHookScenes(scenes)
   if (
     !coldOpen?.suitable ||
     coldOpen.score < 75 ||

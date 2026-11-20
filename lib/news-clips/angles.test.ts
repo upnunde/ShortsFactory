@@ -3,6 +3,7 @@ import test from "node:test"
 
 import {
   angleHasLockedRange,
+  fallbackColdOpenForAngle,
   includeLeadingContext,
   lockAngleRangeToTranscript,
   normalizeAngleOptions,
@@ -25,6 +26,47 @@ test("각도 정규화는 주제 구간 start/end를 보존한다", () => {
   assert.equal(angles[0]?.sourceStart, 120.4)
   assert.equal(angles[0]?.sourceEnd, 168.2)
   assert.equal(angleHasLockedRange(angles[0]!), true)
+})
+
+test("핵심 내용 후보는 유효한 순서대로 최대 10개까지 보존한다", () => {
+  const angles = normalizeAngleOptions(
+    Array.from({ length: 12 }, (_, index) => ({
+      id: `angle-${index + 1}`,
+      title: `핵심 논점 ${index + 1}`,
+      summary: `서로 다른 핵심 논점 ${index + 1}의 근거를 설명한다.`,
+      sourceStart: index * 10,
+      sourceEnd: index * 10 + 8,
+    }))
+  )
+
+  assert.equal(angles.length, 10)
+  assert.equal(angles[0]?.id, "angle-1")
+  assert.equal(angles.at(-1)?.id, "angle-10")
+})
+
+test("모델 훅이 없어도 확정 구간의 첫 단어 호흡을 7초 이내 훅으로 만든다", () => {
+  const coldOpen = fallbackColdOpenForAngle(
+    { sourceStart: 10, sourceEnd: 22 },
+    [
+      {
+        id: "segment-1",
+        text: "첫 번째 핵심 발언은 실제 원문 안에서 자연스럽게 시작합니다",
+        start: 10,
+        end: 22,
+        words: Array.from({ length: 10 }, (_, index) => ({
+          text: `${index + 1}번째`,
+          start: 10 + index * 0.8,
+          end: 10.7 + index * 0.8,
+        })),
+      },
+    ]
+  )
+
+  assert.equal(coldOpen?.suitable, true)
+  assert.equal(coldOpen?.sourceStart, 10)
+  assert.ok((coldOpen?.sourceEnd ?? 0) - (coldOpen?.sourceStart ?? 0) >= 0.8)
+  assert.ok((coldOpen?.sourceEnd ?? 0) - (coldOpen?.sourceStart ?? 0) <= 7)
+  assert.match(coldOpen?.text ?? "", /1번째/)
 })
 
 test("문맥이 독립적이고 점수가 충분한 짧은 발언만 핵심 훅으로 보존한다", () => {

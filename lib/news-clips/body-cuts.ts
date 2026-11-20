@@ -162,10 +162,10 @@ export function remapSubtitlesAfterBodyCut(input: {
   const deletedOutputSeconds = scaleQuoteTimelineSeconds(
     Math.max(0, input.deletedSourceEnd - input.deletedSourceStart)
   )
-  const deletedCaptionEnd =
-    input.deletedCaptionEnd ?? Number.POSITIVE_INFINITY
+  const deletedCaptionEnd = input.deletedCaptionEnd ?? Number.POSITIVE_INFINITY
   const quoteScenes = input.nextScenes.filter(
-    (scene) => reportSceneAudioMode(scene) === "original" && isBuildupQuote(scene)
+    (scene) =>
+      reportSceneAudioMode(scene) === "original" && isBuildupQuote(scene)
   )
 
   return input.cues.flatMap((cue) => {
@@ -218,10 +218,155 @@ export function remapSubtitlesAfterBodyCut(input: {
   })
 }
 
-function findQuoteSceneContaining(
-  scenes: NewsReportScene[],
-  midpoint: number
-) {
+/**
+ * 삭제 구간 복원 후 기존 본문 자막을 새 quote 장면에 다시 연결한다.
+ * 복원 지점 뒤의 자막만 복원 길이만큼 뒤로 이동하며 수정 문구는 유지한다.
+ */
+export function remapSubtitlesAfterBodyRestore(input: {
+  cues: SubtitleCue[]
+  previousScenes: NewsReportScene[]
+  nextScenes: NewsReportScene[]
+  restoredSourceStart: number
+  restoredSourceEnd: number
+  resolveSourceRange: (
+    cue: SubtitleCue,
+    scenes: NewsReportScene[]
+  ) => { start: number; end: number } | null
+  isBodyCue: (cue: SubtitleCue, scenes: NewsReportScene[]) => boolean
+}) {
+  const restoredOutputSeconds = scaleQuoteTimelineSeconds(
+    Math.max(0, input.restoredSourceEnd - input.restoredSourceStart)
+  )
+  const quoteScenes = input.nextScenes.filter(
+    (scene) =>
+      reportSceneAudioMode(scene) === "original" && isBuildupQuote(scene)
+  )
+  const lastPreviousQuoteIndex = input.previousScenes.reduce(
+    (lastIndex, scene, index) =>
+      isBuildupQuote(scene) ? Math.max(lastIndex, index) : lastIndex,
+    -1
+  )
+  const previousBodyEnd = input.cues.reduce(
+    (end, cue) =>
+      input.isBodyCue(cue, input.previousScenes) ? Math.max(end, cue.end) : end,
+    Number.NEGATIVE_INFINITY
+  )
+
+  return input.cues.map((cue) => {
+    const bodyCue = input.isBodyCue(cue, input.previousScenes)
+    const cueSourceRange = bodyCue
+      ? input.resolveSourceRange(cue, input.previousScenes)
+      : null
+    let sceneId = cue.sceneId
+    if (bodyCue && cueSourceRange) {
+      const midpoint = (cueSourceRange.start + cueSourceRange.end) / 2
+      const nextScene =
+        findQuoteSceneContaining(quoteScenes, midpoint) ??
+        findNearestQuoteScene(quoteScenes, midpoint) ??
+        quoteScenes[0]
+      if (nextScene) sceneId = nextScene.id
+    } else if (
+      bodyCue &&
+      cue.sceneId &&
+      !input.nextScenes.some((scene) => scene.id === cue.sceneId)
+    ) {
+      sceneId = quoteScenes[0]?.id || cue.sceneId
+    }
+
+    const previousSceneIndex = cue.sceneId
+      ? input.previousScenes.findIndex((scene) => scene.id === cue.sceneId)
+      : -1
+    const followsBody =
+      !bodyCue &&
+      ((previousSceneIndex > lastPreviousQuoteIndex &&
+        lastPreviousQuoteIndex >= 0) ||
+        (previousSceneIndex < 0 &&
+          Number.isFinite(previousBodyEnd) &&
+          cue.start >= previousBodyEnd - 0.001))
+    const shift =
+      (bodyCue &&
+        cueSourceRange &&
+        cueSourceRange.start >= input.restoredSourceEnd - 0.001) ||
+      followsBody
+        ? restoredOutputSeconds
+        : 0
+
+    return {
+      ...cue,
+      sceneId,
+      start: round(cue.start + shift),
+      end: round(cue.end + shift),
+    }
+  })
+}
+
+/**
+ * 삭제 구간을 복원할 때는 현재 자막을 전체 재생성하지 않는다.
+ * 기존 cue는 장면 ID와 시간만 새 타임라인에 맞추고, 새로 생성한 cue 중
+ * 복원한 원본 구간과 겹치는 본문 자막만 삽입한다.
+ */
+export function restoreSubtitlesAfterBodyRestore(input: {
+  cues: SubtitleCue[]
+  generatedCues: SubtitleCue[]
+  previousScenes: NewsReportScene[]
+  nextScenes: NewsReportScene[]
+  restoredSourceStart: number
+  restoredSourceEnd: number
+  resolveSourceRange: (
+    cue: SubtitleCue,
+    scenes: NewsReportScene[]
+  ) => { start: number; end: number } | null
+  isBodyCue: (cue: SubtitleCue, scenes: NewsReportScene[]) => boolean
+}) {
+  const remapped = remapSubtitlesAfterBodyRestore({
+    cues: input.cues,
+    previousScenes: input.previousScenes,
+    nextScenes: input.nextScenes,
+    restoredSourceStart: input.restoredSourceStart,
+    restoredSourceEnd: input.restoredSourceEnd,
+    resolveSourceRange: input.resolveSourceRange,
+    isBodyCue: input.isBodyCue,
+  })
+  const restoredStart = Math.min(
+    input.restoredSourceStart,
+    input.restoredSourceEnd
+  )
+  const restoredEnd = Math.max(
+    input.restoredSourceStart,
+    input.restoredSourceEnd
+  )
+  const usedIds = new Set(remapped.map((cue) => cue.id))
+  const restoredCues = input.generatedCues.flatMap((cue, index) => {
+    if (!input.isBodyCue(cue, input.nextScenes)) return []
+    const sourceRange = input.resolveSourceRange(cue, input.nextScenes)
+    if (
+      !sourceRange ||
+      sourceRange.end <= restoredStart + 0.001 ||
+      sourceRange.start >= restoredEnd - 0.001
+    ) {
+      return []
+    }
+
+    let id = cue.id
+    if (usedIds.has(id)) {
+      const suffix = `restored-${Math.round(restoredStart * 1000)}-${index + 1}`
+      id = `${cue.id}-${suffix}`
+      let duplicate = 2
+      while (usedIds.has(id)) {
+        id = `${cue.id}-${suffix}-${duplicate}`
+        duplicate += 1
+      }
+    }
+    usedIds.add(id)
+    return [{ ...cue, id }]
+  })
+
+  return [...remapped, ...restoredCues].sort(
+    (left, right) => left.start - right.start || left.end - right.end
+  )
+}
+
+function findQuoteSceneContaining(scenes: NewsReportScene[], midpoint: number) {
   return scenes.find(
     (scene) =>
       midpoint >= scene.sourceStart - 0.001 &&
@@ -229,10 +374,7 @@ function findQuoteSceneContaining(
   )
 }
 
-function findNearestQuoteScene(
-  scenes: NewsReportScene[],
-  midpoint: number
-) {
+function findNearestQuoteScene(scenes: NewsReportScene[], midpoint: number) {
   if (!scenes.length) return undefined
   return [...scenes].sort((left, right) => {
     const leftDistance = midpointDistance(left, midpoint)

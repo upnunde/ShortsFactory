@@ -1,5 +1,6 @@
 import { claudeText } from "@/lib/server/anthropic"
 import {
+  fallbackColdOpenForAngle,
   includeLeadingContext,
   lockAngleRangeToTranscript,
   normalizeAngleOptions,
@@ -47,7 +48,8 @@ export async function extractNewsAngles(
   const response = await claudeText(
     [
       "너는 시사 쇼츠 기획자다.",
-      "원본 자막을 보고, 이 영상으로 만들 수 있는 핵심 콘텐츠 각도 5~6개를 뽑는다.",
+      "원본 자막을 보고, 이 영상으로 만들 수 있는 핵심 콘텐츠 각도를 1~10개 뽑는다.",
+      "실제로 서로 다른 핵심 논점이 있는 만큼만 제안한다. 개수를 채우기 위해 약한 내용이나 같은 논점을 표현만 바꿔 추가하지 않는다.",
       "아래 transcript는 영상 앞부분만이 아니라 전체 구간에서 고르게 뽑은 발언이다.",
       "초반에만 몰리지 말고 초반·중반·후반에서 실제로 중요한 주장·수치·장면·발언을 서로 다른 각도로 고른다.",
       "각 항목은 원본에 실제로 나온 주장·수치·장면·발언만 근거로 한다. 없는 사실을 만들지 않는다.",
@@ -84,7 +86,7 @@ export async function extractNewsAngles(
       coverage,
       transcript,
     }),
-    1400
+    2600
   )
   return normalizeAngleOptions(JSON.parse(stripFence(response))).map(
     (angle) => {
@@ -104,7 +106,11 @@ export async function extractNewsAngles(
         ),
         fullTranscript
       )
-      const coldOpen = validateColdOpen(angle, fullTranscript)
+      const coldOpen =
+        options.productionMode === "buildup2"
+          ? (validateColdOpen(locked, fullTranscript) ??
+            fallbackColdOpenForAngle(locked, fullTranscript))
+          : undefined
       return {
         ...locked,
         ...(coldOpen ? { coldOpen } : { coldOpen: undefined }),

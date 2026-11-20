@@ -1,3 +1,5 @@
+import { NEWS_SOURCE_ASSEMBLY_MAX_RANGES } from "./source-assembly.ts"
+
 export type NewsAngleSourceRange = {
   id: string
   label: string
@@ -51,6 +53,89 @@ export function angleHasLockedRange(
     Number.isFinite(angle.sourceEnd) &&
     angle.sourceEnd - angle.sourceStart >= 3
   )
+}
+
+/**
+ * 모델이 별도 콜드 오픈을 고르지 못해도 확정된 주제 구간의 첫 호흡을
+ * 단어 경계에서 7초 이내로 잘라 자동 훅으로 쓴다.
+ */
+export function fallbackColdOpenForAngle(
+  angle: Pick<NewsAngleOption, "sourceStart" | "sourceEnd">,
+  transcript: AngleTranscriptSegment[]
+): NewsColdOpen | undefined {
+  const rangeStart = Math.max(0, Math.min(angle.sourceStart, angle.sourceEnd))
+  const rangeEnd = Math.max(rangeStart, angle.sourceStart, angle.sourceEnd)
+  if (rangeEnd - rangeStart < 0.8) return undefined
+
+  const segments = transcript
+    .filter(
+      (segment) =>
+        segment.text.trim() &&
+        segment.end > rangeStart &&
+        segment.start < rangeEnd
+    )
+    .toSorted((left, right) => left.start - right.start || left.end - right.end)
+  if (!segments.length) return undefined
+
+  const words = segments
+    .flatMap((segment) => segment.words ?? [])
+    .filter(
+      (word) =>
+        word.text.trim() &&
+        Number.isFinite(word.start) &&
+        Number.isFinite(word.end) &&
+        word.end > word.start &&
+        word.start >= rangeStart - 0.05 &&
+        word.end <= rangeEnd + 0.05
+    )
+    .toSorted((left, right) => left.start - right.start || left.end - right.end)
+  const start = words[0]?.start ?? Math.max(rangeStart, segments[0]!.start)
+  const maximumEnd = Math.min(rangeEnd, start + 7)
+  const availableWords = words.filter(
+    (word) => word.start >= start && word.end <= maximumEnd + 0.001
+  )
+  const sentenceEnd = availableWords.find(
+    (word) =>
+      word.end - start >= 0.8 && /[.!?。！？…]["'”’)]*$/u.test(word.text.trim())
+  )?.end
+  const pauseEnd = availableWords.find((word, index) => {
+    const next = availableWords[index + 1]
+    return word.end - start >= 0.8 && next && next.start - word.end >= 0.55
+  })?.end
+  const wordEnd = availableWords.at(-1)?.end
+  // 단어 타임스탬프가 없는 긴 구간은 문장 중간을 임의로 자르지 않고
+  // 4번 수동 훅 설정으로 남긴다.
+  const wholeSegmentEnd = segments.find(
+    (segment) =>
+      segment.start >= rangeStart - 0.05 &&
+      segment.end <= maximumEnd + 0.001 &&
+      segment.end - start >= 0.8
+  )?.end
+  const end = sentenceEnd ?? pauseEnd ?? wordEnd ?? wholeSegmentEnd
+  if (end === undefined) return undefined
+  if (end - start < 0.8) return undefined
+
+  const text =
+    words
+      .filter((word) => word.end > start && word.start < end)
+      .map((word) => word.text.trim())
+      .filter(Boolean)
+      .join(" ") ||
+    segments
+      .filter((segment) => segment.end > start && segment.start < end)
+      .map((segment) => segment.text.trim())
+      .filter(Boolean)
+      .join(" ")
+  if (!text) return undefined
+
+  return {
+    text: text.replace(/\s+/g, " ").trim().slice(0, 160),
+    sourceStart: Math.round(start * 100) / 100,
+    sourceEnd: Math.round(end * 100) / 100,
+    score: 75,
+    reason: "확정한 핵심 구간의 자연스러운 첫 호흡",
+    suitable: true,
+  }
 }
 
 /**
@@ -280,7 +365,7 @@ export function normalizeAngleOptions(value: unknown): NewsAngleOption[] {
         } satisfies NewsAngleOption,
       ]
     })
-    .slice(0, 6)
+    .slice(0, 10)
 }
 
 function normalizeAngleRanges(value: unknown): NewsAngleSourceRange[] {
@@ -336,7 +421,7 @@ function normalizeAngleRanges(value: unknown): NewsAngleSourceRange[] {
       (left, right) =>
         left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
     )
-    .slice(0, 8)
+    .slice(0, NEWS_SOURCE_ASSEMBLY_MAX_RANGES)
 }
 
 function normalizeColdOpen(value: unknown): NewsColdOpen | undefined {

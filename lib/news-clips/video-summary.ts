@@ -1,6 +1,7 @@
 import { isPrimarilyKorean } from "./language.ts"
 import { snapSourceRangeToCompleteUtterance } from "./speech-bounds.ts"
-import type { NewsAngleOption } from "./angles.ts"
+import { fallbackColdOpenForAngle, type NewsAngleOption } from "./angles.ts"
+import { NEWS_SOURCE_ASSEMBLY_MAX_RANGES } from "./source-assembly.ts"
 import type { TranscriptSegment } from "./types.ts"
 
 export type VideoSummaryRangeRole =
@@ -78,19 +79,13 @@ export function normalizeVideoSummaryPlan(
 ): VideoSummaryPlan {
   const record = asRecord(value)
   const sourceId = cleanText(options.sourceId ?? record.sourceId, 160)
-  const minTopics = clampInteger(options.minTopics ?? 3, 1, 5)
-  const maxTopics = clampInteger(options.maxTopics ?? 5, minTopics, 5)
+  const minTopics = clampInteger(options.minTopics ?? 1, 1, 10)
+  const maxTopics = clampInteger(options.maxTopics ?? 10, minTopics, 10)
   const minRanges = clampInteger(options.minRangesPerTopic ?? 2, 1, 6)
-  const maxRanges = clampInteger(options.maxRangesPerTopic ?? 6, minRanges, 8)
-  const targetDurationSeconds = clampNumber(
-    options.targetDurationSeconds ?? 45,
-    5,
-    120
-  )
-  const maxDurationSeconds = clampNumber(
-    options.maxDurationSeconds ?? 50,
-    targetDurationSeconds,
-    120
+  const maxRanges = clampInteger(
+    options.maxRangesPerTopic ?? 8,
+    minRanges,
+    NEWS_SOURCE_ASSEMBLY_MAX_RANGES
   )
   const orderedTranscript = validTranscript(transcript)
   const coverage = transcriptCoverage(orderedTranscript)
@@ -102,8 +97,6 @@ export function normalizeVideoSummaryPlan(
         sourceId,
         minRanges,
         maxRanges,
-        targetDurationSeconds,
-        maxDurationSeconds,
         coverage,
       })
       return normalized ? [normalized] : []
@@ -122,7 +115,7 @@ export function videoSummaryPlanIsComplete(
   plan: VideoSummaryPlan,
   options: { minTopics?: number; minRangesPerTopic?: number } = {}
 ) {
-  const minTopics = clampInteger(options.minTopics ?? 3, 1, 5)
+  const minTopics = clampInteger(options.minTopics ?? 1, 1, 10)
   const minRanges = clampInteger(options.minRangesPerTopic ?? 2, 1, 6)
   return (
     plan.overallSummary.length > 0 &&
@@ -143,17 +136,29 @@ export function videoSummaryPlanIsComplete(
  * overallSummary는 project.sourceOverview에, 반환값은 angleOptions에 저장하면 된다.
  */
 export function videoSummaryPlanToAngleOptions(
-  plan: VideoSummaryPlan
+  plan: VideoSummaryPlan,
+  transcript: TranscriptSegment[] = []
 ): NewsAngleOption[] {
   return plan.topics.map((topic) => {
     const first = topic.sourceRanges[0]
     const last = topic.sourceRanges.at(-1)
-    const hook = topic.sourceRanges.find(
-      (range) =>
-        range.role === "hook" &&
-        range.sourceEnd - range.sourceStart >= 0.8 &&
-        range.sourceEnd - range.sourceStart <= 7
-    )
+    const hook =
+      topic.sourceRanges.find(
+        (range) =>
+          range.role === "hook" && range.sourceEnd - range.sourceStart >= 0.8
+      ) ??
+      topic.sourceRanges.find(
+        (range) => range.sourceEnd - range.sourceStart >= 0.8
+      )
+    const timedHook = hook
+      ? fallbackColdOpenForAngle(
+          {
+            sourceStart: hook.sourceStart,
+            sourceEnd: hook.sourceEnd,
+          },
+          transcript
+        )
+      : undefined
     return {
       id: topic.id,
       title: topic.title,
@@ -173,12 +178,12 @@ export function videoSummaryPlanToAngleOptions(
       })),
       ...(hook
         ? {
-            coldOpen: {
+            coldOpen: timedHook ?? {
               text: hook.evidence.slice(0, 160),
               sourceStart: hook.sourceStart,
-              sourceEnd: hook.sourceEnd,
+              sourceEnd: Math.min(hook.sourceEnd, hook.sourceStart + 7),
               score: 85,
-              reason: "요약 구성에서 가장 강한 훅 발언",
+              reason: "요약 구성의 대표 훅 발언",
               suitable: true,
             },
           }
@@ -239,8 +244,6 @@ function normalizeTopic(
     sourceId: string
     minRanges: number
     maxRanges: number
-    targetDurationSeconds: number
-    maxDurationSeconds: number
     coverage: VideoSummaryCoverage
   }
 ): VideoSummaryTopicOption | null {
@@ -270,15 +273,15 @@ function normalizeTopic(
       (left, right) =>
         left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
     )
-  const sourceRanges = fitVideoSummaryDuration(
-    coalesceSourceRanges(lockedRanges, transcript, options.sourceId).slice(
-      0,
-      options.maxRanges
-    ),
-    options.minRanges,
-    options.targetDurationSeconds,
-    options.maxDurationSeconds
-  ).map((range, order) => ({ ...range, order }))
+  // 1분은 AI가 구간을 고를 때의 목표일 뿐 강제 상한이 아니다. 모델이
+  // 논점 완결에 필요하다고 선택한 실제 발화는 2분을 넘어도 여기서 버리지 않는다.
+  const sourceRanges = coalesceSourceRanges(
+    lockedRanges,
+    transcript,
+    options.sourceId
+  )
+    .slice(0, options.maxRanges)
+    .map((range, order) => ({ ...range, order }))
   if (sourceRanges.length < options.minRanges) return null
 
   const keywords = Array.isArray(record.keywords)
@@ -416,44 +419,6 @@ function coalesceSourceRanges(
   return merged
 }
 
-/**
- * 원본 발화를 중간에서 자르지 않고 선택 구간 조합만 줄여 약 1분 최종본의
- * 원본 본문 예산에 맞춘다. 최대 8개라 모든 조합을 검사해 목표에 가장 가까운
- * 조합을 고를 수 있다.
- */
-function fitVideoSummaryDuration(
-  ranges: VideoSummarySourceRange[],
-  minRanges: number,
-  targetSeconds: number,
-  maxSeconds: number
-) {
-  const durationOf = (range: VideoSummarySourceRange) =>
-    Math.max(0, range.sourceEnd - range.sourceStart)
-  const total = ranges.reduce((sum, range) => sum + durationOf(range), 0)
-  if (total <= maxSeconds) return ranges
-
-  const hasHook = ranges.some((range) => range.role === "hook")
-  const hasConclusion = ranges.some((range) => range.role === "conclusion")
-  let best: { ranges: VideoSummarySourceRange[]; score: number } | null = null
-  for (let mask = 1; mask < 1 << ranges.length; mask += 1) {
-    const selected = ranges.filter((_, index) => (mask & (1 << index)) !== 0)
-    if (selected.length < minRanges) continue
-    const duration = selected.reduce((sum, range) => sum + durationOf(range), 0)
-    if (duration > maxSeconds) continue
-    const keepsHook = selected.some((range) => range.role === "hook")
-    const keepsConclusion = selected.some(
-      (range) => range.role === "conclusion"
-    )
-    const score =
-      -Math.abs(targetSeconds - duration) * 10 +
-      selected.length +
-      (hasHook && keepsHook ? 30 : 0) +
-      (hasConclusion && keepsConclusion ? 30 : 0)
-    if (!best || score > best.score) best = { ranges: selected, score }
-  }
-  return best?.ranges ?? ranges.slice(0, minRanges)
-}
-
 function transcriptCoverage(
   transcript: TranscriptSegment[]
 ): VideoSummaryCoverage {
@@ -549,10 +514,6 @@ function finiteNumber(value: unknown) {
 
 function clampInteger(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.floor(value)))
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value))
 }
 
 function round(value: number) {

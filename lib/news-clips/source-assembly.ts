@@ -1,5 +1,8 @@
 import type { KeepRange, RemovedRange } from "./types.ts"
 
+/** 긴 핵심 내용을 4~20초 호흡으로 나눠도 손실되지 않는 최대 조립 구간 수. */
+export const NEWS_SOURCE_ASSEMBLY_MAX_RANGES = 16
+
 export type SourceAssemblyRange = { start: number; end: number }
 
 export function buildSourceAssemblyPlan(value: unknown): {
@@ -65,5 +68,5 @@ export function normalizeSourceAssemblyRanges(value: unknown) {
       previous.end = Math.max(previous.end, range.end)
     }
   }
-  return merged.slice(0, 8)
+  return merged.slice(0, NEWS_SOURCE_ASSEMBLY_MAX_RANGES)
 }

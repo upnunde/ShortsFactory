@@ -3,6 +3,7 @@ import test from "node:test"
 
 import {
   activeReportScenes,
+  newsClipPlaybackOrder,
   newsOptionalPartEnabled,
   partitionSubtitlesByPart,
   removeTrailingCtaFromLead,
@@ -11,6 +12,19 @@ import {
   syncSceneNarrationFromSubtitles,
 } from "./clip-parts.ts"
 import { freshNewsClipProject } from "./types.ts"
+
+test("영상은 인트로 다음에 핵심 훅을 재생한다", () => {
+  assert.deepEqual(
+    newsClipPlaybackOrder({
+      intro: true,
+      hook: true,
+      lead: true,
+      body: true,
+      outro: true,
+    }),
+    ["intro", "hook", "lead", "body", "outro"]
+  )
+})
 
 test("빌드업형은 lead를 서두, quote를 본문으로 나눈다", () => {
   const parts = splitScenesByClipPart(
@@ -108,6 +122,11 @@ test("핵심 훅을 독립 구간으로 나누고 본문 외 구간은 켜고 �
   assert.deepEqual(
     activeReportScenes(project).map((scene) => scene.id),
     ["buildup2-hook", "buildup2-quote"]
+  )
+  assert.equal(newsOptionalPartEnabled(project, "lead"), false)
+  assert.equal(
+    activeReportScenes(project).some((scene) => scene.id === "buildup2-lead"),
+    false
   )
 })
 

@@ -58,11 +58,21 @@ import {
 import {
   buildBuildup2Scenes,
   buildup2HighlightBounds,
+  withBuildupColdOpen,
 } from "@/lib/news-clips/buildup"
+import {
+  buildupHookDuration,
+  buildupHookScenes,
+  buildCaptionHookSelection,
+  isCaptionHookDurationValid,
+  removeBuildupHookScenes,
+  replaceCaptionHookSubtitles,
+} from "@/lib/news-clips/caption-hook"
 import {
   activeManualBodyCuts,
   applyBuildupBodyCuts,
   remapSubtitlesAfterBodyCut,
+  restoreSubtitlesAfterBodyRestore,
   sourceRangeOverlapsManualCut,
 } from "@/lib/news-clips/body-cuts"
 import { angleHasLockedRange } from "@/lib/news-clips/angles"
@@ -194,6 +204,12 @@ type IntroLayoutDraft = {
   introMotion: NewsMediaMotion
 }
 
+type ManualHookRangeDraft = {
+  key: string
+  start: number
+  end: number
+}
+
 /** 파일 첨부 전 인트로 화면 — 초기화 시 이 상태로 되돌린다. */
 type IntroVisualBaseline = {
   introSourceId: string
@@ -211,6 +227,9 @@ const POSITION_SLIDER_CENTER = 50
 const ZOOM_SLIDER_MIN = 1 / 3
 const ZOOM_SLIDER_MAX = 3
 const ZOOM_SLIDER_CENTER = 1
+
+const HOOK_MIN_DURATION_SECONDS = 0.8
+const HOOK_MAX_DURATION_SECONDS = 7
 
 /** 사용자 첨부·공개 자료 화면의 기본 구도(1:1). */
 const NEUTRAL_SCENE_CROP: CropPosition = {
@@ -395,10 +414,23 @@ export function NewsClipReviewStep({
   const [frameMode, setFrameMode] = useState<"title" | "body">("title")
   const [compositionPane, setCompositionPaneState] =
     useState<CompositionPane>("all")
+  const [hookSelectionMode, setHookSelectionMode] = useState(false)
+  const [selectedHookCaptionIds, setSelectedHookCaptionIds] = useState<
+    Record<string, true>
+  >({})
 
   function setCompositionPane(pane: CompositionPane) {
     setCompositionPaneState(pane)
     setFrameMode(pane === "intro" ? "title" : "body")
+    if (pane === "hook") {
+      setSelectedDirectionSceneId(
+        buildupHookScenes(project.reportScenes)[0]?.id ?? ""
+      )
+    }
+    if (pane !== "body") {
+      setHookSelectionMode(false)
+      setSelectedHookCaptionIds({})
+    }
   }
 
   const [editorTabByMode, setEditorTabByMode] = useState<
@@ -506,6 +538,16 @@ export function NewsClipReviewStep({
   const [sceneVisualBaselines, setSceneVisualBaselines] = useState<
     Record<string, SceneVisualBaseline>
   >({})
+  const manualHookDraftKey = manualHookRangeKey(project)
+  const [manualHookRangeDraft, setManualHookRangeDraft] =
+    useState<ManualHookRangeDraft>(() => ({
+      key: manualHookRangeKey(project),
+      ...defaultManualHookRange(project),
+    }))
+  const manualHookRange =
+    manualHookRangeDraft.key === manualHookDraftKey
+      ? manualHookRangeDraft
+      : { key: manualHookDraftKey, ...defaultManualHookRange(project) }
   const [introLayoutDraft, setIntroLayoutDraft] =
     useState<IntroLayoutDraft | null>(null)
   const [introVisualBaseline, setIntroVisualBaseline] =
@@ -960,6 +1002,51 @@ export function NewsClipReviewStep({
   function saveSceneLayout(scene: NewsReportScene) {
     const draft = sceneLayoutFor(scene, project, sceneLayoutDrafts)
     selectDirectionScene(scene.id, draft.sourceStart)
+    if (reportScenePart(scene, project.productionMode) === "hook") {
+      const previousHooks = buildupHookScenes(project.reportScenes)
+      const previousDuration = buildupHookDuration(previousHooks)
+      const reportScenes = project.reportScenes.map((item) =>
+        item.id === scene.id
+          ? {
+              ...item,
+              crop: draft.crop,
+              fit: draft.fit,
+              sourceStart: draft.sourceStart,
+              sourceEnd: draft.sourceEnd,
+              motion: draft.motion,
+            }
+          : item
+      )
+      const nextDuration = buildupHookDuration(reportScenes)
+      const enabled = !project.disabledParts.includes("hook")
+      onProject({
+        reportScenes,
+        // 범위가 바뀐 훅 자막은 다시 만들되, 뒤 구간의 편집 문구는 유지하고
+        // 전체 훅 길이 차이만큼 시간만 이동한다.
+        subtitles: replaceCaptionHookSubtitles(
+          project.subtitles,
+          previousHooks,
+          [],
+          previousDuration,
+          nextDuration
+        ),
+        subtitleTimingsLocked: project.subtitleTimingsLocked,
+        outputDurationSeconds: Math.max(
+          0,
+          project.outputDurationSeconds +
+            (enabled ? nextDuration - previousDuration : 0)
+        ),
+        previewHookUrl: "",
+        renderSignature: "",
+      })
+      setSceneLayoutDrafts((current) => {
+        const next = { ...current }
+        delete next[scene.id]
+        return next
+      })
+      onNote("훅 구간을 저장했습니다. 핵심 훅 다시 만들기로 확인하세요.")
+      return
+    }
     updateReportScene(scene.id, {
       crop: draft.crop,
       fit: draft.fit,
@@ -1692,6 +1779,13 @@ export function NewsClipReviewStep({
 
   function restoreBodyTranscriptRange(rangeId: string) {
     if (!bodyReviewBounds || project.productionMode !== "buildup2") return
+    const restoredRange = project.removedRanges.find(
+      (range) => range.id === rangeId && !range.restored
+    )
+    if (!restoredRange) {
+      onNote("복원할 본문 구간을 찾지 못했습니다.")
+      return
+    }
     const removedRanges = project.removedRanges.map((range) =>
       range.id === rangeId ? { ...range, restored: true } : range
     )
@@ -1708,24 +1802,61 @@ export function NewsClipReviewStep({
       onNote("삭제 구간을 복원하지 못했습니다.")
       return
     }
-    // 서두·훅·마무리 자막은 유지하고, 장면 ID가 바뀌는 본문 자막만 비운다.
-    const keptSubtitles = project.subtitles.filter((cue) => {
+    const prepared = prepareRenderProject(
+      {
+        ...project,
+        removedRanges,
+        keepRanges: plan.keepRanges,
+        reportScenes: plan.scenes,
+        // 이 호출의 결과는 복원 구간 cue를 찾는 용도다.
+        // 현재 수정본을 재생성 결과에 합치지 않도록 빈 배열로 둔다.
+        subtitles: [],
+        subtitleTimingsLocked: false,
+      },
+      settings,
+      { rebuildSubtitles: true }
+    )
+    if (prepared.reason) {
+      onNote("삭제 구간을 복원하지 못했습니다.")
+      return
+    }
+    const isBodyCue = (
+      cue: NewsClipProject["subtitles"][number],
+      scenes: NewsClipProject["reportScenes"]
+    ) => {
       if (!cue.sceneId) return true
-      const scene = project.reportScenes.find((item) => item.id === cue.sceneId)
-      if (!scene) return false
-      return reportScenePart(scene, project.productionMode) !== "body"
+      const scene = scenes.find((item) => item.id === cue.sceneId)
+      if (!scene) return true
+      return reportScenePart(scene, project.productionMode) === "body"
+    }
+    const subtitles = restoreSubtitlesAfterBodyRestore({
+      cues: project.subtitles,
+      generatedCues: prepared.project.subtitles,
+      previousScenes: project.reportScenes,
+      nextScenes: prepared.project.reportScenes,
+      restoredSourceStart: restoredRange.start,
+      restoredSourceEnd: restoredRange.end,
+      resolveSourceRange: (cue, scenes) =>
+        subtitleCueSourceRange(
+          cue,
+          scenes,
+          project.transcript,
+          settings.bodySubtitleText
+        ),
+      isBodyCue,
     })
     onProject({
       removedRanges,
-      keepRanges: plan.keepRanges,
-      reportScenes: plan.scenes,
-      subtitles: keptSubtitles,
+      keepRanges: prepared.project.keepRanges,
+      reportScenes: prepared.project.reportScenes,
+      subtitles,
       subtitleTimingsLocked: false,
+      outputDurationSeconds: prepared.project.outputDurationSeconds,
       renderSignature: "",
     })
     setDeletedBodyCutsOpen(true)
     onNote(
-      "삭제한 본문 구간을 복원했습니다. 본문을 다시 만들면 자막이 다시 잡힙니다."
+      "삭제한 본문 구간을 복원했습니다. 기존에 수정한 자막은 그대로 유지했습니다."
     )
   }
 
@@ -1817,6 +1948,123 @@ export function NewsClipReviewStep({
       outputDurationSeconds: prepared.project.outputDurationSeconds,
       renderSignature: "",
     })
+  }
+
+  function saveManualHookRange() {
+    if (project.productionMode !== "buildup2" || !project.source?.id) return
+    const duration = manualHookRange.end - manualHookRange.start
+    if (
+      duration < HOOK_MIN_DURATION_SECONDS ||
+      duration > HOOK_MAX_DURATION_SECONDS
+    ) {
+      onNote("훅은 0.8초에서 7초 사이로 선택해 주세요.")
+      return
+    }
+
+    const hookText = transcriptTextInsideRange(project.transcript, {
+      start: manualHookRange.start,
+      end: manualHookRange.end,
+    })
+    const disabledParts = project.disabledParts.filter(
+      (part) => part !== "hook"
+    )
+    const previousHooks = buildupHookScenes(project.reportScenes)
+    const previousHook = previousHooks[0]
+    const reportScenes = withBuildupColdOpen(
+      project.reportScenes,
+      {
+        text: hookText || "사용자가 지정한 핵심 훅",
+        sourceStart: manualHookRange.start,
+        sourceEnd: manualHookRange.end,
+        score: 100,
+        reason: "4번에서 사용자가 직접 지정한 구간",
+        suitable: true,
+      },
+      project.source.id
+    ).map((scene) =>
+      scene.id === "buildup2-hook"
+        ? {
+            ...scene,
+            crop: previousHook?.crop
+              ? { ...previousHook.crop }
+              : { ...DEFAULT_SOURCE_SCENE_CROP },
+            fit: previousHook?.fit ?? ("cover" as const),
+            motion: previousHook?.motion ?? ("none" as const),
+          }
+        : scene
+    )
+    const previousDuration = buildupHookDuration(previousHooks)
+    const previousEnabled =
+      previousHooks.length > 0 && !project.disabledParts.includes("hook")
+    onProject({
+      reportScenes,
+      disabledParts,
+      subtitles: replaceCaptionHookSubtitles(
+        project.subtitles,
+        previousHooks,
+        [],
+        previousDuration,
+        duration
+      ),
+      subtitleTimingsLocked: project.subtitleTimingsLocked,
+      outputDurationSeconds: Math.max(
+        0,
+        project.outputDurationSeconds -
+          (previousEnabled ? previousDuration : 0) +
+          duration
+      ),
+      previewHookUrl: "",
+      renderSignature: "",
+    })
+    setSceneLayoutDrafts((current) => {
+      const next = { ...current }
+      for (const scene of previousHooks) delete next[scene.id]
+      return next
+    })
+    setHookSelectionMode(false)
+    setSelectedHookCaptionIds({})
+    setSelectedDirectionSceneId("buildup2-hook")
+    onNote("훅 구간을 저장했습니다. 핵심 훅 다시 만들기로 확인하세요.")
+  }
+
+  function removeHookRange() {
+    if (project.productionMode !== "buildup2") return
+    const previousHooks = buildupHookScenes(project.reportScenes)
+    const reportScenes = removeBuildupHookScenes(project.reportScenes)
+    const disabledParts = [
+      ...new Set([...project.disabledParts, "hook" as const]),
+    ]
+    const previousDuration = buildupHookDuration(previousHooks)
+    const retainedSubtitles = replaceCaptionHookSubtitles(
+      project.subtitles,
+      previousHooks,
+      [],
+      previousDuration,
+      0
+    )
+    const previousEnabled =
+      previousHooks.length > 0 && !project.disabledParts.includes("hook")
+    onProject({
+      reportScenes,
+      disabledParts,
+      subtitles: retainedSubtitles,
+      subtitleTimingsLocked: project.subtitleTimingsLocked,
+      outputDurationSeconds: Math.max(
+        0,
+        project.outputDurationSeconds - (previousEnabled ? previousDuration : 0)
+      ),
+      previewHookUrl: "",
+      renderSignature: "",
+    })
+    setSceneLayoutDrafts((current) => {
+      const next = { ...current }
+      for (const scene of previousHooks) delete next[scene.id]
+      return next
+    })
+    setHookSelectionMode(false)
+    setSelectedHookCaptionIds({})
+    setSelectedDirectionSceneId("")
+    onNote("훅 구간을 제거했습니다.")
   }
 
   function setSceneVisualContinuation(sceneId: string, enabled: boolean) {
@@ -2377,6 +2625,126 @@ export function NewsClipReviewStep({
             : compositionPane === "body"
               ? bodyCaptions
               : []
+  const hookSelectableCaptionRanges = new Map(
+    bodyCaptions.flatMap((caption) => {
+      const range = subtitleCueSourceRange(
+        caption,
+        project.reportScenes,
+        project.transcript,
+        settings.bodySubtitleText
+      )
+      return range ? [[caption.id, range] as const] : []
+    })
+  )
+  const selectedHookCaptions = bodyCaptions.flatMap((caption) => {
+    if (!selectedHookCaptionIds[caption.id]) return []
+    const range = hookSelectableCaptionRanges.get(caption.id)
+    return range
+      ? [
+          {
+            ...caption,
+            sourceStart: range.start,
+            sourceEnd: range.end,
+          },
+        ]
+      : []
+  })
+  const captionHookSelection = buildCaptionHookSelection(
+    selectedHookCaptions,
+    project.source?.id ?? ""
+  )
+
+  function toggleHookCaption(captionId: string) {
+    setSelectedHookCaptionIds((current) => {
+      const next = { ...current }
+      if (next[captionId]) delete next[captionId]
+      else next[captionId] = true
+      return next
+    })
+  }
+
+  function cancelHookCaptionSelection() {
+    setHookSelectionMode(false)
+    setSelectedHookCaptionIds({})
+  }
+
+  function saveCaptionHookSelection() {
+    if (project.productionMode !== "buildup2" || !project.source?.id) return
+    if (!selectedHookCaptions.length) {
+      onNote("훅으로 사용할 본문 자막을 선택해 주세요.")
+      return
+    }
+    if (!isCaptionHookDurationValid(captionHookSelection.durationSeconds)) {
+      onNote("선택한 훅의 전체 길이는 0.8초에서 7초 사이여야 합니다.")
+      return
+    }
+
+    const previousHooks = buildupHookScenes(project.reportScenes)
+    const previousDuration = buildupHookDuration(previousHooks)
+    const bodyScenes = splitScenesByClipPart(
+      project.reportScenes,
+      project.productionMode
+    ).body
+    const nextHookScenes = captionHookSelection.scenes.map((scene) => {
+      const sourceScene = bodyScenes.find(
+        (item) =>
+          item.sourceEnd > scene.sourceStart &&
+          item.sourceStart < scene.sourceEnd
+      )
+      return {
+        ...scene,
+        sourceId: sourceScene?.sourceId || project.source?.id,
+        ...(sourceScene?.crop ? { crop: { ...sourceScene.crop } } : {}),
+        ...(sourceScene?.fit ? { fit: sourceScene.fit } : {}),
+        ...(sourceScene?.motion ? { motion: sourceScene.motion } : {}),
+      }
+    })
+    const scenesWithoutHook = removeBuildupHookScenes(project.reportScenes)
+    const leadIndex = scenesWithoutHook.findIndex(
+      (scene) => reportScenePart(scene, project.productionMode) === "lead"
+    )
+    const insertionIndex = leadIndex < 0 ? 0 : leadIndex
+    const reportScenes = [
+      ...scenesWithoutHook.slice(0, insertionIndex),
+      ...nextHookScenes,
+      ...scenesWithoutHook.slice(insertionIndex),
+    ]
+    const subtitles = replaceCaptionHookSubtitles(
+      project.subtitles,
+      previousHooks,
+      captionHookSelection.subtitles,
+      previousDuration,
+      captionHookSelection.durationSeconds
+    )
+    const disabledParts = project.disabledParts.filter(
+      (part) => part !== "hook"
+    )
+
+    onProject({
+      reportScenes,
+      subtitles,
+      disabledParts,
+      subtitleTimingsLocked: true,
+      outputDurationSeconds: Math.max(
+        0,
+        project.outputDurationSeconds -
+          previousDuration +
+          captionHookSelection.durationSeconds
+      ),
+      previewHookUrl: "",
+      renderSignature: "",
+    })
+    setSceneLayoutDrafts((current) => {
+      const next = { ...current }
+      for (const scene of previousHooks) delete next[scene.id]
+      return next
+    })
+    setSelectedDirectionSceneId(nextHookScenes[0]?.id ?? "")
+    cancelHookCaptionSelection()
+    onNote(
+      `본문 자막 ${selectedHookCaptions.length}개를 핵심 훅으로 설정했습니다. 핵심 훅 다시 만들기로 확인하세요.`
+    )
+  }
   // 4번: 구간별 클립 재생. 5번: 합본·최종본.
   const showPartPreview = mode === "preview"
   const renderedVideoUrl =
@@ -2412,8 +2780,36 @@ export function NewsClipReviewStep({
   const optionalPaneEnabled = optionalPane
     ? newsOptionalPartEnabled(project, optionalPane)
     : true
-  const coldOpenAvailable = project.reportScenes.some(
-    (scene) => scene.id === "buildup2-hook"
+  const coldOpenAvailable = buildupHookScenes(project.reportScenes).length > 0
+  const manualHookScene: NewsReportScene = {
+    id: "buildup2-hook",
+    narration: "",
+    part: "hook",
+    audioMode: "original",
+    visualMode: "quote",
+    visual: "quote",
+    sourceId: project.source?.id,
+    sourceStart: manualHookRange.start,
+    sourceEnd: manualHookRange.end,
+    crop: { ...DEFAULT_SOURCE_SCENE_CROP },
+    fit: "cover",
+    motion: "none",
+  }
+  const manualHookText = transcriptTextInsideRange(project.transcript, {
+    start: manualHookRange.start,
+    end: manualHookRange.end,
+  })
+  const manualHookSourceDuration = Math.max(
+    0.1,
+    project.source?.durationSeconds ?? 0,
+    project.transcript.reduce(
+      (maximum, segment) => Math.max(maximum, segment.end),
+      0
+    ),
+    project.candidates.reduce(
+      (maximum, candidate) => Math.max(maximum, candidate.sourceEnd),
+      0
+    )
   )
 
   function setOptionalPaneEnabled(part: NewsOptionalPart, enabled: boolean) {
@@ -2973,10 +3369,10 @@ export function NewsClipReviewStep({
                   onChange={setCompositionPane}
                   items={[
                     { id: "all", label: "전체" },
+                    { id: "intro", label: "인트로" },
                     ...(project.productionMode === "buildup2"
                       ? [{ id: "hook" as const, label: "핵심 훅" }]
                       : []),
-                    { id: "intro", label: "인트로" },
                     { id: "lead", label: "서두" },
                     { id: "body", label: "본문" },
                     { id: "outro", label: "마무리" },
@@ -3000,10 +3396,10 @@ export function NewsClipReviewStep({
                           <Switch.Thumb />
                         </Switch.Control>
                         {optionalPane === "hook" && !coldOpenAvailable
-                          ? "적합한 훅 없음"
+                          ? "구간 미설정"
                           : optionalPaneEnabled
-                            ? "사용"
-                            : "사용 안 함"}
+                            ? `${partPreviewLabel} 사용`
+                            : `${partPreviewLabel} 사용 안 함`}
                       </Switch.Content>
                     </Switch>
                   </div>
@@ -4012,6 +4408,71 @@ export function NewsClipReviewStep({
                   <Card>
                     <Card.Content className="flex flex-col gap-6">
                       {mode === "preview" &&
+                      compositionPane === "hook" &&
+                      !coldOpenAvailable ? (
+                        <div className="flex flex-col gap-4">
+                          <div className="flex flex-col gap-1">
+                            <h3 className={sectionTitleClass}>핵심 훅 설정</h3>
+                            <p className="text-sm leading-5 text-muted">
+                              본문 자막에서 핵심 구간을 고르거나, 원본
+                              타임라인에서 0.8~7초 구간을 직접 선택하세요.
+                            </p>
+                          </div>
+                          <div className="flex justify-end">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onPress={() => {
+                                setCompositionPane("body")
+                                setHookSelectionMode(true)
+                                setSelectedHookCaptionIds({})
+                              }}
+                            >
+                              본문 자막에서 선택
+                            </Button>
+                          </div>
+                          {sourceVideoUrl ? (
+                            <SceneCropPreview
+                              sourceUrl={sourceVideoUrl}
+                              sourceStart={manualHookRange.start}
+                              sourceEnd={manualHookRange.end}
+                              crop={DEFAULT_SOURCE_SCENE_CROP}
+                              motion="none"
+                              title={titleDraft}
+                              subtitle={
+                                manualHookText || "선택한 훅 구간 미리보기"
+                              }
+                              sourceCredit={commonSourceCreditText}
+                              fit="cover"
+                              settings={settings}
+                            />
+                          ) : null}
+                          <SourceRangeTimeline
+                            scene={manualHookScene}
+                            sourceId={project.source?.id ?? ""}
+                            duration={manualHookSourceDuration}
+                            minimumDuration={HOOK_MIN_DURATION_SECONDS}
+                            maximumDuration={HOOK_MAX_DURATION_SECONDS}
+                            onMove={(sourceStart, sourceEnd) =>
+                              setManualHookRangeDraft({
+                                key: manualHookDraftKey,
+                                start: sourceStart,
+                                end: sourceEnd,
+                              })
+                            }
+                          />
+                          <div className="flex justify-end">
+                            <Button
+                              size="sm"
+                              isDisabled={busy !== "" || !project.source?.id}
+                              onPress={saveManualHookRange}
+                            >
+                              훅 구간 저장
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
+                      {mode === "preview" &&
                       compositionPane === "intro" &&
                       introVideoUrl ? (
                         <div className="flex flex-col gap-5">
@@ -4554,6 +5015,16 @@ export function NewsClipReviewStep({
                                     {selected ? (
                                       <div className="flex flex-col gap-4 rounded-xl bg-default/60 p-4">
                                         <div className="flex items-center justify-end gap-2">
+                                          {scenePart === "hook" ? (
+                                            <Button
+                                              size="sm"
+                                              variant="outline"
+                                              isDisabled={busy !== ""}
+                                              onPress={removeHookRange}
+                                            >
+                                              훅 제거
+                                            </Button>
+                                          ) : null}
                                           {continuesPreviousVisual ? (
                                             <Button
                                               size="sm"
@@ -5013,6 +5484,16 @@ export function NewsClipReviewStep({
                                             requiredDuration={
                                               visualGroupDurationSeconds
                                             }
+                                            minimumDuration={
+                                              scenePart === "hook"
+                                                ? HOOK_MIN_DURATION_SECONDS
+                                                : undefined
+                                            }
+                                            maximumDuration={
+                                              scenePart === "hook"
+                                                ? HOOK_MAX_DURATION_SECONDS
+                                                : undefined
+                                            }
                                             onMove={(
                                               sourceStart,
                                               sourceEnd
@@ -5060,7 +5541,61 @@ export function NewsClipReviewStep({
                   <>
                     {mode === "preview" ? (
                       <Card>
-                        <Card.Content className="gap-0">
+                        <Card.Content className="flex flex-col gap-0">
+                          {compositionPane === "body" &&
+                          project.productionMode === "buildup2" ? (
+                            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-separator pb-4">
+                              <div className="flex min-w-0 flex-col gap-1">
+                                <span className="text-sm font-semibold">
+                                  핵심 훅 선택
+                                </span>
+                                <span className="text-xs text-muted">
+                                  본문 자막에서 고른 원본 구간이 인트로 다음에
+                                  재생됩니다.
+                                </span>
+                              </div>
+                              {hookSelectionMode ? (
+                                <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                                  <span className="text-xs text-muted tabular-nums">
+                                    {selectedHookCaptions.length}개 ·{" "}
+                                    {captionHookSelection.durationSeconds.toFixed(
+                                      1
+                                    )}
+                                    초
+                                  </span>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onPress={cancelHookCaptionSelection}
+                                  >
+                                    취소
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    isDisabled={
+                                      Boolean(busy) ||
+                                      selectedHookCaptions.length === 0
+                                    }
+                                    onPress={saveCaptionHookSelection}
+                                  >
+                                    훅으로 설정
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  isDisabled={Boolean(busy)}
+                                  onPress={() => {
+                                    setHookSelectionMode(true)
+                                    setSelectedHookCaptionIds({})
+                                  }}
+                                >
+                                  자막에서 선택
+                                </Button>
+                              )}
+                            </div>
+                          ) : null}
                           {project.previewUrl || project.outputUrl ? (
                             (mode === "preview"
                               ? paneCaptions
@@ -5076,9 +5611,60 @@ export function NewsClipReviewStep({
                                 >
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="flex min-w-0 flex-col gap-1">
-                                      <span className="text-sm font-medium">
-                                        자막 {index + 1}
-                                      </span>
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <span className="text-sm font-medium">
+                                          자막 {index + 1}
+                                        </span>
+                                        {compositionPane === "body" &&
+                                        project.productionMode === "buildup2" &&
+                                        hookSelectionMode ? (
+                                          <Button
+                                            size="sm"
+                                            variant={
+                                              selectedHookCaptionIds[caption.id]
+                                                ? "secondary"
+                                                : "outline"
+                                            }
+                                            aria-pressed={Boolean(
+                                              selectedHookCaptionIds[caption.id]
+                                            )}
+                                            isDisabled={
+                                              !hookSelectableCaptionRanges.has(
+                                                caption.id
+                                              )
+                                            }
+                                            onPress={() =>
+                                              toggleHookCaption(caption.id)
+                                            }
+                                          >
+                                            {selectedHookCaptionIds[caption.id]
+                                              ? "선택됨"
+                                              : "선택"}
+                                          </Button>
+                                        ) : null}
+                                        {compositionPane === "body" &&
+                                        hookSelectableCaptionRanges.has(
+                                          caption.id
+                                        ) &&
+                                        buildupHookScenes(
+                                          project.reportScenes
+                                        ).some((scene) => {
+                                          const range =
+                                            hookSelectableCaptionRanges.get(
+                                              caption.id
+                                            )
+                                          return Boolean(
+                                            range &&
+                                            scene.sourceStart <=
+                                              range.start + 0.01 &&
+                                            scene.sourceEnd >= range.end - 0.01
+                                          )
+                                        }) ? (
+                                          <span className="rounded-full bg-foreground/8 px-2 py-0.5 text-[11px] font-medium text-muted">
+                                            훅 사용 중
+                                          </span>
+                                        ) : null}
+                                      </div>
                                       <span className="text-xs text-muted tabular-nums">
                                         {time(caption.start)} →{" "}
                                         {time(caption.end)}
@@ -6286,29 +6872,45 @@ function SourceRangeTimeline({
   sourceId,
   duration,
   requiredDuration,
+  minimumDuration,
+  maximumDuration,
   onMove,
 }: {
   scene: NewsReportScene
   sourceId: string
   duration: number
   requiredDuration?: number
+  minimumDuration?: number
+  maximumDuration?: number
   onMove: (sourceStart: number, sourceEnd: number) => void
 }) {
+  const safeDuration = Math.max(0.1, duration, scene.sourceEnd)
+  const minimumLength = Math.min(
+    Math.max(0.1, minimumDuration ?? 0.5),
+    safeDuration
+  )
+  const maximumLength = Math.min(
+    safeDuration,
+    Math.max(minimumLength, maximumDuration ?? safeDuration)
+  )
   const requestedEnd = Math.max(
     scene.sourceEnd,
     scene.sourceStart + Math.max(0, requiredDuration ?? 0)
   )
-  const safeDuration = Math.max(0.1, duration, scene.sourceEnd)
-  const minimumLength = Math.min(0.5, safeDuration)
-  const start = Math.max(
+  const requestedStart = Math.max(
     0,
     Math.min(scene.sourceStart, Math.max(0, safeDuration - minimumLength))
   )
-  const end = Math.max(
-    start + minimumLength,
-    Math.min(safeDuration, requestedEnd)
+  const requestedLength = Math.max(
+    minimumLength,
+    Math.min(maximumLength, requestedEnd - requestedStart)
   )
-  const segmentLength = Math.max(minimumLength, end - start)
+  const start = Math.min(
+    requestedStart,
+    Math.max(0, safeDuration - requestedLength)
+  )
+  const end = Math.min(safeDuration, start + requestedLength)
+  const segmentLength = end - start
   const maxMoveStart = Math.max(0, safeDuration - segmentLength)
   const startPercent = (start / safeDuration) * 100
   const endPercent = (end / safeDuration) * 100
@@ -6382,14 +6984,16 @@ function SourceRangeTimeline({
           <input
             aria-label="영상 시작 지점"
             type="range"
-            min={0}
+            min={Math.max(0, end - maximumLength)}
             max={Math.max(0, end - minimumLength)}
             step={0.1}
             value={start}
             onChange={(event) => {
+              const minimumStart = Math.max(0, end - maximumLength)
+              const maximumStart = Math.max(0, end - minimumLength)
               const nextStart = Math.max(
-                0,
-                Math.min(end - minimumLength, Number(event.currentTarget.value))
+                minimumStart,
+                Math.min(maximumStart, Number(event.currentTarget.value))
               )
               onMove(nextStart, end)
             }}
@@ -6404,12 +7008,12 @@ function SourceRangeTimeline({
             aria-label="영상 종료 지점"
             type="range"
             min={Math.min(safeDuration, start + minimumLength)}
-            max={safeDuration}
+            max={Math.min(safeDuration, start + maximumLength)}
             step={0.1}
             value={end}
             onChange={(event) => {
               const nextEnd = Math.min(
-                safeDuration,
+                Math.min(safeDuration, start + maximumLength),
                 Math.max(
                   start + minimumLength,
                   Number(event.currentTarget.value)
@@ -6570,6 +7174,66 @@ function initialIntroSourceDuration(project: NewsClipProject) {
     ...project.candidates.map((candidate) => candidate.sourceEnd),
     ...project.reportScenes.map((scene) => scene.sourceEnd)
   )
+}
+
+function manualHookRangeKey(project: NewsClipProject) {
+  const hook = buildupHookScenes(project.reportScenes)[0]
+  return [
+    project.id,
+    project.source?.id ?? "",
+    project.selectedAngleId,
+    project.selectedCandidateId,
+    hook?.sourceStart ?? "",
+    hook?.sourceEnd ?? "",
+  ].join(":")
+}
+
+function defaultManualHookRange(project: NewsClipProject) {
+  const savedHook = buildupHookScenes(project.reportScenes)[0]
+  const angle = project.angleOptions.find(
+    (item) => item.id === project.selectedAngleId
+  )
+  const candidate = project.candidates.find(
+    (item) => item.id === project.selectedCandidateId
+  )
+  const knownDuration = Math.max(
+    HOOK_MIN_DURATION_SECONDS,
+    project.source?.durationSeconds ?? 0,
+    project.transcript.reduce(
+      (maximum, segment) => Math.max(maximum, segment.end),
+      0
+    ),
+    project.candidates.reduce(
+      (maximum, item) => Math.max(maximum, item.sourceEnd),
+      0
+    )
+  )
+  const suggestedStart =
+    savedHook?.sourceStart ??
+    angle?.coldOpen?.sourceStart ??
+    angle?.sourceStart ??
+    candidate?.sourceStart ??
+    0
+  const suggestedEnd =
+    savedHook?.sourceEnd ??
+    angle?.coldOpen?.sourceEnd ??
+    Math.min(
+      angle?.sourceEnd ?? candidate?.sourceEnd ?? knownDuration,
+      suggestedStart + 3
+    )
+  const requestedLength = Math.max(
+    HOOK_MIN_DURATION_SECONDS,
+    Math.min(HOOK_MAX_DURATION_SECONDS, suggestedEnd - suggestedStart || 3)
+  )
+  const start = Math.max(
+    0,
+    Math.min(suggestedStart, knownDuration - requestedLength)
+  )
+  const end = Math.min(knownDuration, start + requestedLength)
+  return {
+    start: Math.round(start * 10) / 10,
+    end: Math.round(end * 10) / 10,
+  }
 }
 
 function appendSupportingSource(sources: NewsSource[], source: NewsSource) {

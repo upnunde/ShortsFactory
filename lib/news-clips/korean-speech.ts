@@ -40,6 +40,11 @@ export function koreanTtsInput(value: string) {
 
 export function normalizeKoreanSpeechText(value: string) {
   return value
+    // 10·20…90대는 연령대로 읽고(이십대), 차량 수 같은 일반 '대' 세기와 구분한다.
+    .replace(
+      /(?<![\d,.])(-?(?:10|20|30|40|50|60|70|80|90))\s*대/g,
+      (_, number: string) => `${numberToKorean(number)}대`
+    )
     .replace(
       /(-?\d[\d,]*)\s*(명|개|번|살|마리|잔|권|대|곳|가지)/g,
       (_, number: string, counter: string) =>

@@ -67,6 +67,10 @@ import {
   reportScenePart,
   splitScenesByClipPart,
 } from "@/lib/news-clips/clip-parts"
+import {
+  buildupHookScenes,
+  removeBuildupHookScenes,
+} from "@/lib/news-clips/caption-hook"
 import { prepareRenderProject } from "@/lib/news-clips/prepare-render-project"
 import { preservePreviewSubtitleEdits } from "@/lib/news-clips/preview-subtitles"
 import { projectPatchInvalidatesSubtitleTimeline } from "@/lib/news-clips/project-edit"
@@ -728,7 +732,7 @@ export function NewsClipsApp({
       endCtaText,
       resolvedSource.id
     )
-    const hasColdOpen = baseScenes.some((scene) => scene.id === "buildup2-hook")
+    const hasColdOpen = buildupHookScenes(baseScenes).length > 0
     const disabledParts = hasColdOpen
       ? base.disabledParts.filter((part) => part !== "hook")
       : [...new Set([...base.disabledParts, "hook" as const])]
@@ -1292,7 +1296,18 @@ export function NewsClipsApp({
         setNote(body.message || "보도 대본을 다시 작성하지 못했습니다.")
         return
       }
-      const draft = prepareAutomaticDraft(
+      const generatedReportScenes = body.reportScenes ?? []
+      const preservedHookScenes =
+        project.productionMode === "buildup2"
+          ? buildupHookScenes(project.reportScenes)
+          : []
+      const reportScenesForDraft = preservedHookScenes.length
+        ? [
+            ...preservedHookScenes,
+            ...removeBuildupHookScenes(generatedReportScenes),
+          ]
+        : generatedReportScenes
+      let draft = prepareAutomaticDraft(
         project,
         project.source,
         body.transcript,
@@ -1300,7 +1315,7 @@ export function NewsClipsApp({
         body.selectedCandidate,
         body.detectedSilences ?? project.detectedSilences,
         body.reportScript ?? "",
-        body.reportScenes ?? [],
+        reportScenesForDraft,
         body.removedRanges ?? [],
         body.keepRanges ?? [],
         {
@@ -1308,6 +1323,34 @@ export function NewsClipsApp({
           title: body.sourceTitle,
         }
       )
+      if (preservedHookScenes.length) {
+        const preservedHookIds = new Set(
+          preservedHookScenes.map((scene) => scene.id)
+        )
+        const preservedHookSubtitles = project.subtitles.filter(
+          (caption) =>
+            Boolean(caption.sceneId) && preservedHookIds.has(caption.sceneId!)
+        )
+        const freshParts = splitScenesByClipPart(
+          draft.reportScenes,
+          draft.productionMode
+        )
+        const freshSubtitles = partitionSubtitlesByPart(
+          draft.subtitles,
+          freshParts.lead,
+          freshParts.body,
+          freshParts.hook
+        )
+        draft = {
+          ...draft,
+          subtitles: [
+            ...preservedHookSubtitles,
+            ...freshSubtitles.lead,
+            ...freshSubtitles.body,
+            ...freshSubtitles.outro,
+          ],
+        }
+      }
       if (target === "title") {
         const fittedTitles = draft.titleOptions.map((option) =>
           fitTitleToLineLayouts(option, settings.titleCardText, {
@@ -1822,7 +1865,6 @@ export function NewsClipsApp({
           angleSourceStart: angle.sourceStart,
           angleSourceEnd: angle.sourceEnd,
           angleSourceRanges: angle.ranges ?? [],
-          angleColdOpen: angle.coldOpen,
           jobId: runId,
         }),
         signal,

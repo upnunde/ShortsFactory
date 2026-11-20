@@ -25,6 +25,17 @@ test("명·개·번 같은 세기 단위는 고유어 수사로 읽는다", () =
   )
 })
 
+test("10~90대는 연령대로 한자어 수사를 쓰고 차량 수 대와 구분한다", () => {
+  assert.equal(
+    normalizeKoreanSpeechText("20대와 30대 반응이 갈렸다."),
+    "이십대와 삼십대 반응이 갈렸다."
+  )
+  assert.equal(
+    normalizeKoreanSpeechText("차량 3대가 막혔다."),
+    "차량 세 대가 막혔다."
+  )
+})
+
 test("줄바꿈·쉼표·문장 끝에 따라 TTS 쉼을 구성한다", () => {
   assert.deepEqual(
     koreanSpeechUnits("이건 이상해, 근데 중요해.\n바로 들어보자."),

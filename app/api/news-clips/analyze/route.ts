@@ -34,7 +34,6 @@ import {
   writeNewsRenderProgress,
 } from "@/lib/server/news-clips/render-progress"
 import type { RemovedRange } from "@/lib/news-clips/types"
-import type { NewsColdOpen } from "@/lib/news-clips/angles"
 
 export const runtime = "nodejs"
 
@@ -59,7 +58,6 @@ export async function POST(request: Request) {
     angleSourceStart?: unknown
     angleSourceEnd?: unknown
     angleSourceRanges?: unknown
-    angleColdOpen?: unknown
     previousTitle?: unknown
     previousTitles?: unknown
     previousScript?: unknown
@@ -88,7 +86,6 @@ export async function POST(request: Request) {
   const lockedAngleRanges = normalizeSourceAssemblyRanges(
     body?.angleSourceRanges
   )
-  const angleColdOpen = normalizeColdOpen(body?.angleColdOpen)
   const lockedAngleRange = lockedAngleRanges.length
     ? {
         start: lockedAngleRanges[0]!.start,
@@ -172,7 +169,7 @@ export async function POST(request: Request) {
     ? createHash("sha256").update(pasted).digest("hex")
     : "stored-transcript"
   const sourceSetKey = [
-    "issue-script-v7-locked-angle-bounds",
+    "issue-script-v9-manual-hook-selection",
     productionMode,
     directSource ? "direct" : "issue",
     sourceId,
@@ -183,9 +180,6 @@ export async function POST(request: Request) {
     ...lockedAngleRanges.map(
       (range) => `${range.start.toFixed(2)}-${range.end.toFixed(2)}`
     ),
-    angleColdOpen
-      ? `${angleColdOpen.sourceStart.toFixed(2)}-${angleColdOpen.sourceEnd.toFixed(2)}-${angleColdOpen.score}`
-      : "no-cold-open",
     settings.issueSearchGuidance,
     issueContext.title,
     ...issueContext.keywords,
@@ -234,9 +228,23 @@ export async function POST(request: Request) {
   let transcript = pasted || (await readStoredTranscript(sourceId)) || ""
   if (!transcript && source.localFile) {
     try {
-      transcript = await transcribeWithLocalWhisper(source.localFile, source.id)
+      transcript = await transcribeWithLocalWhisper(
+        source.localFile,
+        source.id,
+        "",
+        { signal: request.signal }
+      )
       await writeStoredTranscript(source.id, transcript)
-    } catch {
+    } catch (error) {
+      if (
+        request.signal.aborted ||
+        (error instanceof Error && error.message === "whisper-aborted")
+      ) {
+        return NextResponse.json(
+          { message: "분석을 취소했습니다." },
+          { status: 499 }
+        )
+      }
       transcript = ""
     }
   }
@@ -302,10 +310,18 @@ export async function POST(request: Request) {
           try {
             supportingTranscript = await transcribeWithLocalWhisper(
               supporting.localFile,
-              supporting.id
+              supporting.id,
+              "",
+              { signal: request.signal }
             )
             await writeStoredTranscript(supporting.id, supportingTranscript)
-          } catch {
+          } catch (error) {
+            if (
+              request.signal.aborted ||
+              (error instanceof Error && error.message === "whisper-aborted")
+            ) {
+              throw error
+            }
             supportingTranscript = ""
           }
         }
@@ -381,101 +397,120 @@ export async function POST(request: Request) {
       avoidPrevious,
       lockedRange: lockedAngleRange,
       lockedRanges: lockedAngleRanges,
-      coldOpen: productionMode === "buildup2" ? angleColdOpen : undefined,
     }
     let transcriptForAnalysis = transcript
     let refinedRange = lockedAngleRange
     let transcriptRefinementStatus:
       | "not-attempted"
+      | "baseline-reused"
       | "accepted"
       | "retry-accepted"
       | "baseline-retained"
       | "unavailable" = "not-attempted"
     let transcriptNeedsReview = false
     let transcriptQualityReasons: string[] = []
-    await progress(66, "핵심 구간 정밀 분석 중")
+    await progress(66, "선택 구간 음성 확인 중")
     if (source.localFile && !pasted && lockedAngleRanges.length <= 1) {
-      try {
-        if (!refinedRange) {
-          const preliminary = await analyzeNewsTranscript(
-            transcript,
-            settings,
-            false,
-            analysisContext,
-            productionMode,
-            detectedSilences
-          )
-          refinedRange = {
-            start: preliminary.selectedCandidate.sourceStart,
-            end: preliminary.selectedCandidate.sourceEnd,
-          }
-        }
-        const rangeToRefine = refinedRange
-        const baselineSegments = parseTranscript(transcript)
-        const precedingBaseline = baselineSegments.filter(
-          (segment) => segment.end <= rangeToRefine.start + 0.1
+      if (
+        refinedRange &&
+        transcriptRangeHasReliableWords(
+          parseTranscript(transcript),
+          refinedRange
         )
-        const normalizeRecognition = (timedText: string) =>
-          parseTranscript(timedText).map((segment) =>
-            updateTranscriptSegmentText(
-              segment,
-              normalizeKoreanRecognitionText(segment.text)
+      ) {
+        transcriptRefinementStatus = "baseline-reused"
+        await progress(76, "기존 단어 타임코드 확인 완료")
+      } else {
+        try {
+          if (!refinedRange) {
+            const preliminary = await analyzeNewsTranscript(
+              transcript,
+              settings,
+              false,
+              analysisContext,
+              productionMode,
+              detectedSilences
             )
+            refinedRange = {
+              start: preliminary.selectedCandidate.sourceStart,
+              end: preliminary.selectedCandidate.sourceEnd,
+            }
+          }
+          const rangeToRefine = refinedRange
+          const baselineSegments = parseTranscript(transcript)
+          const precedingBaseline = baselineSegments.filter(
+            (segment) => segment.end <= rangeToRefine.start + 0.1
           )
-        const selectReplacement = (candidate: typeof baselineSegments) =>
-          selectTranscriptRangeReplacement({
-            candidate,
-            baseline: baselineSegments,
-            preceding: precedingBaseline,
-            range: rangeToRefine,
-          })
+          const normalizeRecognition = (timedText: string) =>
+            parseTranscript(timedText).map((segment) =>
+              updateTranscriptSegmentText(
+                segment,
+                normalizeKoreanRecognitionText(segment.text)
+              )
+            )
+          const selectReplacement = (candidate: typeof baselineSegments) =>
+            selectTranscriptRangeReplacement({
+              candidate,
+              baseline: baselineSegments,
+              preceding: precedingBaseline,
+              range: rangeToRefine,
+            })
 
-        const refinedTimedText = await transcribeRangeWithLocalWhisper(
-          source.localFile,
-          source.id,
-          rangeToRefine
-        )
-        const refinedSegments = normalizeRecognition(refinedTimedText)
-        let replacement = selectReplacement(refinedSegments)
-        transcriptRefinementStatus = "accepted"
-
-        if (!replacement.accepted) {
-          const initialReasons = replacement.assessment.reasons
-          await progress(72, "의심 구간 재확인 중")
-          const retryTimedText = await transcribeRangeWithLocalWhisper(
+          const refinedTimedText = await transcribeRangeWithLocalWhisper(
             source.localFile,
             source.id,
             rangeToRefine,
             "",
-            { paddingSeconds: 7 }
+            { signal: request.signal }
           )
-          const retrySegments = normalizeRecognition(retryTimedText)
-          replacement = selectReplacement(retrySegments)
-          if (replacement.accepted) {
-            transcriptRefinementStatus = "retry-accepted"
-          } else {
-            transcriptRefinementStatus = "baseline-retained"
-            transcriptNeedsReview = true
-            transcriptQualityReasons = [
-              ...new Set([
-                ...initialReasons,
-                ...replacement.assessment.reasons,
-              ]),
-            ]
-          }
-        }
+          const refinedSegments = normalizeRecognition(refinedTimedText)
+          let replacement = selectReplacement(refinedSegments)
+          transcriptRefinementStatus = "accepted"
 
-        // 구간 전사가 낮은 신뢰도·앞 문장 재생성·반복 환각으로 의심되면
-        // YouTube 자막을 정답으로 간주하지는 않되, 검증되지 않은 결과로
-        // 덮어쓰지 않고 기존 기준 전사를 그대로 유지한다.
-        if (replacement.accepted) {
-          transcriptForAnalysis = serializeTranscript(replacement.transcript)
+          if (!replacement.accepted) {
+            const initialReasons = replacement.assessment.reasons
+            await progress(72, "의심 구간 재확인 중")
+            const retryTimedText = await transcribeRangeWithLocalWhisper(
+              source.localFile,
+              source.id,
+              rangeToRefine,
+              "",
+              {
+                paddingSeconds: 7,
+                signal: request.signal,
+                timeoutMs: 60_000,
+              }
+            )
+            const retrySegments = normalizeRecognition(retryTimedText)
+            replacement = selectReplacement(retrySegments)
+            if (replacement.accepted) {
+              transcriptRefinementStatus = "retry-accepted"
+            } else {
+              transcriptRefinementStatus = "baseline-retained"
+              transcriptNeedsReview = true
+              transcriptQualityReasons = [
+                ...new Set([
+                  ...initialReasons,
+                  ...replacement.assessment.reasons,
+                ]),
+              ]
+            }
+          }
+
+          // 구간 전사가 낮은 신뢰도·앞 문장 재생성·반복 환각으로 의심되면
+          // YouTube 자막을 정답으로 간주하지는 않되, 검증되지 않은 결과로
+          // 덮어쓰지 않고 기존 기준 전사를 그대로 유지한다.
+          if (replacement.accepted) {
+            transcriptForAnalysis = serializeTranscript(replacement.transcript)
+          }
+        } catch {
+          if (request.signal.aborted) throw new Error("analysis-cancelled")
+          // 로컬 2차 전사가 불가능하면 기존 자막으로 계속 진행한다.
+          transcriptRefinementStatus = "unavailable"
+          transcriptNeedsReview = true
+          transcriptQualityReasons = ["range-transcription-unavailable"]
+          await progress(76, "기존 자막으로 계속 진행 중")
         }
-      } catch {
-        // 로컬 2차 전사가 불가능하면 기존 자막으로 계속 진행한다.
-        transcriptRefinementStatus = "unavailable"
-        transcriptNeedsReview = true
-        transcriptQualityReasons = ["range-transcription-unavailable"]
       }
     }
     await progress(80, "대본 작성 중")
@@ -504,6 +539,17 @@ export async function POST(request: Request) {
     await progress(100, "완료")
     return NextResponse.json({ ...result, cached: false })
   } catch (error) {
+    if (
+      request.signal.aborted ||
+      (error instanceof Error &&
+        (error.message === "analysis-cancelled" ||
+          error.message === "whisper-aborted"))
+    ) {
+      return NextResponse.json(
+        { message: "분석을 취소했습니다." },
+        { status: 499 }
+      )
+    }
     if (error instanceof Error && error.message === "issue-focus-mismatch") {
       return NextResponse.json(
         {
@@ -521,33 +567,26 @@ export async function POST(request: Request) {
   }
 }
 
-function normalizeColdOpen(value: unknown): NewsColdOpen | undefined {
-  if (!value || typeof value !== "object") return undefined
-  const record = value as Partial<NewsColdOpen>
-  const sourceStart = Number(record.sourceStart)
-  const sourceEnd = Number(record.sourceEnd)
-  const score = Number(record.score)
-  if (
-    record.suitable !== true ||
-    !Number.isFinite(sourceStart) ||
-    !Number.isFinite(sourceEnd) ||
-    sourceEnd - sourceStart < 0.8 ||
-    sourceEnd - sourceStart > 7 ||
-    !Number.isFinite(score) ||
-    score < 75
-  ) {
-    return undefined
-  }
-  return {
-    text:
-      typeof record.text === "string" ? record.text.trim().slice(0, 160) : "",
-    sourceStart: Math.max(0, sourceStart),
-    sourceEnd,
-    score: Math.max(75, Math.min(100, Math.round(score))),
-    reason:
-      typeof record.reason === "string"
-        ? record.reason.trim().slice(0, 180)
-        : "",
-    suitable: true,
-  }
+function transcriptRangeHasReliableWords(
+  transcript: ReturnType<typeof parseTranscript>,
+  range: { start: number; end: number }
+) {
+  const segments = transcript.filter(
+    (segment) => segment.end > range.start && segment.start < range.end
+  )
+  const words = segments.flatMap((segment) =>
+    segment.words.filter(
+      (word) => word.end > range.start && word.start < range.end
+    )
+  )
+  const reviewedTimeline =
+    segments.length > 0 &&
+    segments.every((segment) => segment.captionBoundarySource !== undefined)
+  if (reviewedTimeline && words.length >= 3) return true
+  return (
+    words.length >= 3 &&
+    words.filter((word) => Number.isFinite(word.confidence)).length /
+      words.length >=
+      0.7
+  )
 }

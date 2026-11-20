@@ -4,6 +4,8 @@ import test from "node:test"
 import {
   applyBuildupBodyCuts,
   remapSubtitlesAfterBodyCut,
+  remapSubtitlesAfterBodyRestore,
+  restoreSubtitlesAfterBodyRestore,
 } from "./body-cuts.ts"
 import { reportSubtitles } from "./report.ts"
 import type {
@@ -276,5 +278,220 @@ test("삭제 구간을 복원하면 본문 quote 하나로 돌아간다", () => 
         sourceEnd,
       })),
     [{ id: "buildup2-quote", sourceStart: 10, sourceEnd: 30 }]
+  )
+})
+
+test("삭제 구간 복원은 수정한 본문 자막을 유지하고 새 장면에 다시 연결한다", () => {
+  const cutPlan = applyBuildupBodyCuts(scenes, { start: 10, end: 30 }, [
+    manualCut("cut-1", 16, 20),
+  ])
+  const restoredPlan = applyBuildupBodyCuts(
+    cutPlan.scenes,
+    { start: 10, end: 30 },
+    [{ ...manualCut("cut-1", 16, 20), restored: true }]
+  )
+  const cues: SubtitleCue[] = [
+    {
+      id: "lead-1",
+      sceneId: "buildup2-lead",
+      start: 0,
+      end: 2,
+      text: "서두 자막",
+      emphasis: [],
+      emphasisColor: "yellow",
+    },
+    {
+      id: "body-before",
+      sceneId: "buildup2-quote-cut-1",
+      start: 2,
+      end: 5,
+      sourceStart: 11,
+      sourceEnd: 15,
+      text: "사용자가 고친 앞 문장",
+      originalText: "앞 발화",
+      edited: true,
+      emphasis: ["고친"],
+      emphasisColor: "green",
+    },
+    {
+      id: "body-after",
+      sceneId: "buildup2-quote-cut-2",
+      start: 5,
+      end: 9,
+      sourceStart: 21,
+      sourceEnd: 28,
+      text: "사용자가 고친 뒤 문장",
+      originalText: "뒤 발화",
+      edited: true,
+      emphasis: ["뒤"],
+      emphasisColor: "yellow",
+    },
+    {
+      id: "outro-1",
+      sceneId: "end-cta",
+      start: 9,
+      end: 11,
+      text: "마무리 자막",
+      emphasis: [],
+      emphasisColor: "yellow",
+    },
+  ]
+
+  const restored = remapSubtitlesAfterBodyRestore({
+    cues,
+    previousScenes: cutPlan.scenes,
+    nextScenes: restoredPlan.scenes,
+    restoredSourceStart: 16,
+    restoredSourceEnd: 20,
+    resolveSourceRange: (cue) =>
+      Number.isFinite(cue.sourceStart) && Number.isFinite(cue.sourceEnd)
+        ? { start: cue.sourceStart!, end: cue.sourceEnd! }
+        : null,
+    isBodyCue: (cue) => cue.sceneId?.startsWith("buildup2-quote") === true,
+  })
+
+  assert.deepEqual(restored, [
+    cues[0],
+    { ...cues[1], sceneId: "buildup2-quote" },
+    {
+      ...cues[2],
+      sceneId: "buildup2-quote",
+      start: 9,
+      end: 13,
+    },
+    { ...cues[3], start: 13, end: 15 },
+  ])
+})
+
+test("삭제 구간 복원은 기존 자막을 재생성하지 않고 복원 구간만 삽입한다", () => {
+  const cutPlan = applyBuildupBodyCuts(scenes, { start: 10, end: 30 }, [
+    manualCut("cut-1", 16, 20),
+  ])
+  const restoredPlan = applyBuildupBodyCuts(
+    cutPlan.scenes,
+    { start: 10, end: 30 },
+    [{ ...manualCut("cut-1", 16, 20), restored: true }]
+  )
+  const existing: SubtitleCue[] = [
+    {
+      id: "body-before",
+      sceneId: "buildup2-quote-cut-1",
+      start: 2,
+      end: 5,
+      sourceStart: 11,
+      sourceEnd: 15,
+      text: "사용자가 고친 앞 문장",
+      originalText: "앞 발화",
+      edited: true,
+      emphasis: ["고친"],
+      emphasisColor: "green",
+    },
+    {
+      id: "body-after",
+      sceneId: "buildup2-quote-cut-2",
+      start: 5,
+      end: 9,
+      sourceStart: 21,
+      sourceEnd: 28,
+      text: "사용자가 고친 뒤 문장",
+      originalText: "뒤 발화",
+      edited: true,
+      emphasis: ["뒤"],
+      emphasisColor: "yellow",
+    },
+  ]
+  const generated: SubtitleCue[] = [
+    {
+      ...existing[0]!,
+      sceneId: "buildup2-quote",
+      text: "재생성된 앞 문장",
+      edited: false,
+    },
+    {
+      // 활성 컷이 여러 개면 장면 재인덱싱으로 기존 cue ID와 충돌할 수 있다.
+      id: "body-after",
+      sceneId: "buildup2-quote",
+      start: 5,
+      end: 7,
+      sourceStart: 16.1,
+      sourceEnd: 18,
+      text: "복원된 첫 문장",
+      emphasis: [],
+      emphasisColor: "yellow",
+    },
+    {
+      id: "body-restored-2",
+      sceneId: "buildup2-quote",
+      start: 7,
+      end: 9,
+      sourceStart: 18,
+      sourceEnd: 19.9,
+      text: "복원된 둘째 문장",
+      emphasis: [],
+      emphasisColor: "yellow",
+    },
+    {
+      ...existing[1]!,
+      sceneId: "buildup2-quote",
+      start: 9,
+      end: 13,
+      text: "재생성된 뒤 문장",
+      edited: false,
+    },
+  ]
+  const resolveSourceRange = (cue: SubtitleCue) =>
+    Number.isFinite(cue.sourceStart) && Number.isFinite(cue.sourceEnd)
+      ? { start: cue.sourceStart!, end: cue.sourceEnd! }
+      : null
+
+  const restored = restoreSubtitlesAfterBodyRestore({
+    cues: existing,
+    generatedCues: generated,
+    previousScenes: cutPlan.scenes,
+    nextScenes: restoredPlan.scenes,
+    restoredSourceStart: 16,
+    restoredSourceEnd: 20,
+    resolveSourceRange,
+    isBodyCue: () => true,
+  })
+
+  assert.deepEqual(
+    restored.map(({ id, text, start, end, edited }) => ({
+      id,
+      text,
+      start,
+      end,
+      edited,
+    })),
+    [
+      {
+        id: "body-before",
+        text: "사용자가 고친 앞 문장",
+        start: 2,
+        end: 5,
+        edited: true,
+      },
+      {
+        id: "body-after-restored-16000-2",
+        text: "복원된 첫 문장",
+        start: 5,
+        end: 7,
+        edited: undefined,
+      },
+      {
+        id: "body-restored-2",
+        text: "복원된 둘째 문장",
+        start: 7,
+        end: 9,
+        edited: undefined,
+      },
+      {
+        id: "body-after",
+        text: "사용자가 고친 뒤 문장",
+        start: 9,
+        end: 13,
+        edited: true,
+      },
+    ]
   )
 })

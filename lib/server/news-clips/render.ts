@@ -59,6 +59,7 @@ import {
 } from "@/lib/news-clips/report"
 import {
   activeReportScenes,
+  newsClipPlaybackOrder,
   newsOptionalPartEnabled,
   partitionSubtitlesByPart,
   splitScenesByClipPart,
@@ -122,7 +123,7 @@ import type {
 } from "@/lib/news-clips/types"
 
 const NEWS_RENDER_VERSION = NEWS_RENDER_SCHEMA_VERSION
-const NEWS_TTS_PACING_VERSION = "ko-continuous-v3-natural-pauses"
+const NEWS_TTS_PACING_VERSION = "ko-continuous-v4-age-decade-sino"
 const NEWS_TITLE_BACKGROUND = "/news-clips/news-preview-placeholder.png"
 
 export async function renderNewsTextOverlay({
@@ -812,11 +813,11 @@ async function renderNewsClipExclusive(
       hookDurationSeconds + leadDurationSeconds + bodyDurationSeconds
     ),
   ])
-  // 전체 영상은 핵심 훅 다음에 인트로가 들어간다. 편집용 자막 시간축은
-  // 인트로를 제외한 본편 기준으로 유지하고, 외부 SRT에만 인트로 길이를
-  // 훅 이후 구간의 오프셋으로 반영한다.
+  // 전체 영상은 인트로 다음에 핵심 훅이 들어간다. 편집용 자막 시간축은
+  // 인트로를 제외한 본편 기준으로 유지하고, 외부 SRT의 모든 본편 자막에
+  // 인트로 길이를 오프셋으로 반영한다.
   const exportSubtitles = snapSubtitleCueTimes([
-    ...hookSubtitles,
+    ...offsetCues(hookSubtitles, titleCardDurationSeconds),
     ...offsetCues(
       leadSubtitles,
       hookDurationSeconds + titleCardDurationSeconds
@@ -956,8 +957,15 @@ async function renderNewsClipExclusive(
         outroDurationSeconds
       )
     : "none"
+  const playbackOrder = newsClipPlaybackOrder({
+    intro: introEnabled,
+    hook: Boolean(hookReport),
+    lead: Boolean(leadReport),
+    body: Boolean(bodyReport),
+    outro: Boolean(outroReport),
+  })
   const joinedSignature = digest({
-    playbackOrder: ["hook", "intro", "lead", "body", "outro"],
+    playbackOrder,
     introVideoSignature: introEnabled ? introVideoSignature : "disabled",
     hookVideoSignature,
     leadVideoSignature,
@@ -1195,13 +1203,14 @@ async function renderNewsClipExclusive(
     renderCache.joinedSignature !== joinedSignature ||
     !(await exists(joinedVideo))
   ) {
-    const parts = [
-      ...(hookReport ? [hookVideo] : []),
-      ...(introEnabled ? [introVideo] : []),
-      ...(leadReport ? [leadVideo] : []),
-      ...(bodyReport ? [bodyVideo] : []),
-      ...(outroReport ? [outroVideo] : []),
-    ]
+    const videosByPart = {
+      intro: introVideo,
+      hook: hookVideo,
+      lead: leadVideo,
+      body: bodyVideo,
+      outro: outroVideo,
+    }
+    const parts = playbackOrder.map((part) => videosByPart[part])
     await concatNewsClips(parts, joinedVideo, concatList, run)
   }
   await saveRenderStage({ joinedSignature })

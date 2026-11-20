@@ -106,18 +106,12 @@ export async function POST(request: Request) {
         sourceId: source.id,
         sourceTitle: source.title,
         focus,
-        // 제목 카드·짧은 TTS 서두·마무리를 더한 최종본이 약 1분이 되도록
-        // 원본 발언 조립에는 약 45초를 배정한다.
-        targetDurationSeconds: Math.max(
-          20,
-          settings.idealMaxSeconds - settings.titleCardSeconds - 7
-        ),
-        maxDurationSeconds: Math.max(
-          25,
-          settings.targetMaxSeconds - settings.titleCardSeconds - 7
-        ),
+        // 제목 카드·서두·마무리를 포함한 최종본 약 1분을 기본 목표로 삼는다.
+        // 2분은 강제 상한이 아니라 핵심 내용이 충분히 길 때의 참고 기준이다.
+        targetDurationSeconds: Math.max(20, 60 - settings.titleCardSeconds - 7),
+        maxDurationSeconds: 120,
       })
-      const angles = videoSummaryPlanToAngleOptions(plan)
+      const angles = videoSummaryPlanToAngleOptions(plan, parsedTranscript)
       if (angles.length === 0) {
         return NextResponse.json(
           { message: "전체 영상에서 요약 후보를 찾지 못했습니다." },

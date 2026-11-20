@@ -1,4 +1,5 @@
 import { isEndCtaScene } from "./report.ts"
+import { isBuildupHookScene } from "./caption-hook.ts"
 import type {
   NewsClipProject,
   NewsClipProductionMode,
@@ -9,6 +10,21 @@ import type {
 } from "./types.ts"
 
 export type NewsClipPartId = "intro" | "hook" | "lead" | "body" | "outro"
+
+const NEWS_CLIP_PLAYBACK_ORDER: NewsClipPartId[] = [
+  "intro",
+  "hook",
+  "lead",
+  "body",
+  "outro",
+]
+
+/** 최종 영상과 미리보기에서 사용하는 단일 재생 순서. */
+export function newsClipPlaybackOrder(
+  enabled: Partial<Record<NewsClipPartId, boolean>>
+) {
+  return NEWS_CLIP_PLAYBACK_ORDER.filter((part) => enabled[part] === true)
+}
 
 export function newsOptionalPartEnabled(
   project: Pick<
@@ -88,7 +104,7 @@ export function reportScenePart(
   if (isEndCtaScene(scene)) return "outro"
   if (scene.part) return scene.part
   if (productionMode === "buildup2") {
-    if (scene.id === "buildup2-hook") return "hook"
+    if (isBuildupHookScene(scene)) return "hook"
     return scene.id === "buildup2-lead" ? "lead" : "body"
   }
   // 신규 보도 장면은 part를 저장한다. 아래 ID 판정은 기존 저장본 전용이며

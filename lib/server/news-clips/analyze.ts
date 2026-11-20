@@ -17,9 +17,7 @@ import { buildSourceAssemblyPlan } from "@/lib/news-clips/source-assembly"
 import {
   buildBuildup2Scenes,
   localBuildup2Draft,
-  withBuildupColdOpen,
 } from "@/lib/news-clips/buildup"
-import type { NewsColdOpen } from "@/lib/news-clips/angles"
 import {
   appendEndCtaScenes,
   buildReportScenes,
@@ -67,8 +65,6 @@ export type NewsAnalysisSourceContext = {
     start: number
     end: number
   }>
-  /** 전체 핵심 분석에서 문맥까지 통과한 짧은 원본 훅. */
-  coldOpen?: NewsColdOpen
 }
 
 export async function analyzeNewsTranscript(
@@ -324,11 +320,6 @@ async function analyzeBuildup2Transcript(
       sourceContext.primarySourceId
     )
   }
-  reportScenes = withBuildupColdOpen(
-    reportScenes,
-    sourceContext.coldOpen,
-    sourceContext.primarySourceId
-  )
   const completedHighlight = reportScenes.find(
     (scene) =>
       scene.id === "buildup2-quote" ||

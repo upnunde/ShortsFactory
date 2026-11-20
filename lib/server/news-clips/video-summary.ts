@@ -1,4 +1,5 @@
 import { parseTranscript } from "../../news-clips/transcript.ts"
+import { NEWS_SOURCE_ASSEMBLY_MAX_RANGES } from "../../news-clips/source-assembly.ts"
 import {
   buildVideoSummaryTranscriptChunks,
   normalizeVideoSummaryPlan,
@@ -21,8 +22,9 @@ type ExtractVideoSummaryOptions = {
   focus?: string
   maxChunkCharacters?: number
   concurrency?: number
-  /** 최종 1분 영상에서 원본 발언에 배정할 목표·최대 시간. */
+  /** 최종 약 1분 영상에서 원본 발언에 배정할 소프트 목표 시간. */
   targetDurationSeconds?: number
+  /** 2분 이상도 허용한다는 판단 기준이며 강제 상한이 아니다. */
   maxDurationSeconds?: number
   /** 테스트나 다른 LLM 연결에서도 같은 순수 파이프라인을 쓴다. */
   generateText?: VideoSummaryTextGenerator
@@ -68,25 +70,19 @@ export async function extractVideoSummaryPlan(
     chunks,
     Math.max(1, Math.min(4, Math.floor(options.concurrency ?? 2))),
     async (chunk) =>
-      analyzeTranscriptChunk(
-        chunk,
-        sourceTitle,
-        generateText,
-        focus
-      )
+      analyzeTranscriptChunk(chunk, sourceTitle, generateText, focus)
   )
   const moments = chunkAnalyses.flatMap((analysis) => analysis.moments)
   if (moments.length < 1) throw new Error("insufficient-summary-moments")
-  const minTopics = moments.length >= 3 ? 3 : 1
-  const minRangesPerTopic =
-    moments.length >= 6 ? 3 : moments.length >= 2 ? 2 : 1
+  const minTopics = 1
+  const minRangesPerTopic = moments.length >= 2 ? 2 : 1
   const targetDurationSeconds = Math.max(
     5,
-    Math.min(120, options.targetDurationSeconds ?? 45)
+    Math.min(600, options.targetDurationSeconds ?? 53)
   )
-  const maxDurationSeconds = Math.max(
+  const extendedDurationThresholdSeconds = Math.max(
     targetDurationSeconds,
-    Math.min(120, options.maxDurationSeconds ?? 50)
+    Math.min(600, options.maxDurationSeconds ?? 120)
   )
 
   const reductionSystem = [
@@ -96,11 +92,16 @@ export async function extractVideoSummaryPlan(
     "핵심 논점은 '누가·무엇을 주장했는지, 그렇게 보는 근거는 무엇인지, 결론이나 파장은 무엇인지'가 이해되는 정도로 완결되어야 한다.",
     "자극적인 표현을 새로 만들지 말고, 원본의 주장·모순·수치·사례·반박·결론을 근거로 삼아라.",
     "overallSummary는 영상 전체의 주제와 흐름을 4~6문장, 800자 이내의 자연스러운 한국어로 정리한다. 단순 목록이 아니라 전체 논리가 이해되게 쓴다.",
-    `topics는 서로 겹치지 않는 핵심 주제 후보 ${minTopics}~5개다.`,
-    `각 주제는 서로 떨어진 moment를 ${minRangesPerTopic}~8개 선택한다. 길이를 채우기 위한 무관한 구간은 금지하되, 논점을 충분히 설명할 수 있다면 선택 구간 합계는 약 ${Math.round(targetDurationSeconds)}초를 목표로 하고 ${Math.round(maxDurationSeconds)}초를 넘기지 않는다.`,
+    "topics는 서로 겹치지 않는 핵심 주제 후보를 1~10개 만든다. 실제로 독립된 핵심 논점이 있는 만큼만 만들고, 개수를 채우기 위한 중복·약한 후보는 만들지 않는다.",
+    `각 주제는 보통 서로 떨어진 moment를 ${minRangesPerTopic}~5개만 선택한다. ${NEWS_SOURCE_ASSEMBLY_MAX_RANGES}개는 주장이 왜곡되지 않게 보존해야 할 때만 쓰는 기술적 예외 상한이다.`,
+    "각 후보는 명확한 주장 하나만 다룬다. 훅, 이해에 꼭 필요한 최소 배경, 그 주장을 가장 직접적으로 입증하는 결정적 근거 1~3개, 실제로 새로운 의미를 더하는 결론만 남긴다.",
+    `선택 구간 합계 약 ${Math.round(targetDurationSeconds)}초는 채워야 할 목표가 아니라 소프트 상한 가이드다. 20~40초만으로 주제와 근거가 강하게 완결되면 즉시 끝내고, 시간을 채우려고 관련성이 약한 moment를 추가하지 마라.`,
+    `${Math.round(extendedDurationThresholdSeconds)}초를 넘기는 것은 그 구간을 빼면 주장이 왜곡되거나 핵심 근거가 성립하지 않을 때만 허용한다. 단순히 같은 주제와 관련 있다는 이유만으로 늘리지 마라.`,
+    "시간을 맞추려고 원문 문장을 중간에서 자르거나 핵심 근거를 요약문으로 대체하지 마라. 길이가 늘어나더라도 실제 발화의 논리 완결성을 우선한다.",
+    "sourceRanges는 서로 연속일 필요가 없다. 긴 핵심 구간 안에서도 실제로 필요한 완결 발화만 고르고, 반복·부연·전환부는 range 사이의 제외 구간으로 남긴다. 넓은 시간 범위 하나로 불필요한 내용까지 감싸지 마라.",
     "각 주제는 hook → 필요한 context → 결정적 evidence → conclusion 흐름으로 완결되어야 한다. 같은 내용의 반복은 빼되, 주어나 배경을 빼서 무슨 말인지 모르게 만들지 마라.",
     "topic.title은 단편적인 키워드가 아니라, 이 후보가 설명하는 핵심 주장을 하나의 완결된 문장으로 쓴다.",
-    "topic.summary는 3~5문장으로 쓴다. 중심 주장, 필요한 배경, 원본의 구체적 근거, 그 근거가 의미하는 결론을 포함해야 한다. 제목을 다시 말하는 한 문장 요약은 금지한다.",
+    "topic.summary는 2~3문장으로 짧고 명확하게 쓴다. 첫 문장에 중심 주장을, 다음 문장에 가장 강한 원본 근거와 의미를 담고 같은 말을 반복하지 마라.",
     "moment의 score가 높을수록 핵심성과 주목도가 높은 구간이다. 점수만 기계적으로 따르지 말고 하나의 논점으로 이어지는지 함께 판단한다.",
     "원본의 핵심 발화 전체가 목표 시간보다 짧으면 억지로 늘리거나 실패시키지 말고, 있는 핵심만 완결되게 사용한다.",
     "같은 발언을 반복하지 말고, sourceRanges는 원본 시간순으로 배치한다.",
@@ -134,7 +135,7 @@ export async function extractVideoSummaryPlan(
           ? reductionSystem
           : `${reductionSystem}\n이전 출력이 필수 주제 수나 서로 다른 근거 구간 수를 채우지 못했다. 요구 조건을 모두 충족한 완전한 JSON으로 다시 작성하라.`,
         reductionInput,
-        3600
+        5000
       )
       const candidate = asRecord(parseJson(reducedText))
       if (reductionHasMinimumShape(candidate, minTopics, minRangesPerTopic)) {
@@ -204,9 +205,9 @@ export async function extractVideoSummaryPlan(
       sourceId: options.sourceId,
       minTopics,
       minRangesPerTopic,
-      maxRangesPerTopic: 8,
+      maxRangesPerTopic: NEWS_SOURCE_ASSEMBLY_MAX_RANGES,
       targetDurationSeconds,
-      maxDurationSeconds,
+      maxDurationSeconds: extendedDurationThresholdSeconds,
     }
   )
   const completeness = { minTopics, minRangesPerTopic }
@@ -216,19 +217,16 @@ export async function extractVideoSummaryPlan(
         sourceId: options.sourceId,
         overallSummary:
           plan.overallSummary || fallbackOverallSummary(chunkAnalyses, moments),
-        topics: [
-          ...topics,
-          ...fallbackTopics(moments, targetDurationSeconds, maxDurationSeconds),
-        ],
+        topics: [...topics, ...fallbackTopics(moments, minRangesPerTopic)],
       },
       transcript,
       {
         sourceId: options.sourceId,
         minTopics,
         minRangesPerTopic,
-        maxRangesPerTopic: 8,
+        maxRangesPerTopic: NEWS_SOURCE_ASSEMBLY_MAX_RANGES,
         targetDurationSeconds,
-        maxDurationSeconds,
+        maxDurationSeconds: extendedDurationThresholdSeconds,
       }
     )
   }
@@ -262,6 +260,7 @@ async function analyzeTranscriptChunk(
         "summary는 이 청크에서 다루는 주요 논점을 3~6문장의 한국어로 요약한다. 누가 무엇을 말했는지와 근거·결론이 드러나야 한다.",
         "moments는 나중에 하나의 핵심 주제를 설명하는 영상으로 조립할 수 있는 서로 다른 발화 단위 4~10개다.",
         "각 moment는 가능하면 6~20초 안에서 주어·주장·근거가 이해되는 완결된 호흡으로 잡고 24초를 넘기지 않는다.",
+        "중요한 내용이 4~6분 연속되더라도 큰 구간 하나로 묶지 마라. 필요한 발화를 여러 moment로 나누고, 그 사이 반복·부연·전환 멘트·의미 없는 맞장구와 환호는 선택하지 않아 빈 구간으로 남긴다.",
         "인사·반복·의미 없는 맞장구는 제외한다. 다만 핵심 주장을 이해하는 데 필요한 배경 설명은 빼지 마라.",
         "moment.title은 키워드가 아니라 해당 발화의 주장을 짧은 완결 문장으로 쓴다.",
         "moment.summary는 해당 구간이 어떤 논점의 무엇을 설명하는지 1~2문장으로 쓴다. 단편적 단어나 표어만 쓰지 마라.",
@@ -336,7 +335,7 @@ async function analyzeTranscriptChunk(
         moment.evidence &&
         moment.sourceEnd > moment.sourceStart
     )
-    .slice(0, 8)
+    .slice(0, 10)
   const moments = supplementChunkMoments(generatedMoments, chunk, focus)
   return {
     chunkId: chunk.id,
@@ -353,7 +352,7 @@ function supplementChunkMoments(
   focus = ""
 ) {
   const target = Math.min(6, chunk.segments.length)
-  if (generated.length >= target) return generated.slice(0, 8)
+  if (generated.length >= target) return generated.slice(0, 10)
   const moments = [...generated]
   const covered = (start: number, end: number) =>
     moments.some(
@@ -382,7 +381,7 @@ function supplementChunkMoments(
       (left, right) =>
         left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
     )
-    .slice(0, 8)
+    .slice(0, 10)
 }
 
 function fallbackOverallSummary(
@@ -399,11 +398,7 @@ function fallbackOverallSummary(
   )
 }
 
-function fallbackTopics(
-  moments: ChunkMoment[],
-  targetDurationSeconds: number,
-  maxDurationSeconds: number
-) {
+function fallbackTopics(moments: ChunkMoment[], minRangesPerTopic: number) {
   const transcriptFallbacks = moments.filter((moment) =>
     moment.id.includes("-fallback-")
   )
@@ -429,36 +424,23 @@ function fallbackTopics(
     }
     ranked.push(moment)
   }
-  const pool = ranked
-    .slice(0, 8)
+  if (!ranked.length) return []
+  // AI 축약이 깨진 경우에도 1분을 채우지 않는다. 점수가 가장 높은 최소
+  // 근거 세트만 골라 하나의 간결한 후보로 복구한다.
+  const selected = ranked
+    .slice(0, Math.min(ranked.length, Math.max(minRangesPerTopic, 3)))
     .toSorted(
       (left, right) =>
         left.sourceStart - right.sourceStart || left.sourceEnd - right.sourceEnd
     )
-  if (!pool.length) return []
-  const groups =
-    pool.length === 1
-      ? [[0]]
-      : pool.length === 2
-        ? [[0, 1]]
-        : fallbackMomentPairs(pool.length).map((pair) =>
-            expandFallbackMomentGroup(
-              pool,
-              pair,
-              targetDurationSeconds,
-              maxDurationSeconds
-            )
-          )
-  return groups.map((indexes, index) => {
-    const selected = indexes.map((itemIndex) => pool[itemIndex]!)
-    const first = selected[0]!
-    const last = selected.at(-1)!
-    return {
-      id: `summary-fallback-topic-${index + 1}`,
-      title: cleanText(first.title, 60),
+  const strongest = ranked[0]!
+  return [
+    {
+      id: "summary-fallback-topic-1",
+      title: cleanText(strongest.title, 60),
       summary: cleanText(
         selected.map((moment) => moment.summary).join(" "),
-        420
+        300
       ),
       keywords: [
         ...new Set(selected.flatMap((moment) => moment.keywords)),
@@ -472,68 +454,12 @@ function fallbackTopics(
         role:
           rangeIndex === 0
             ? "hook"
-            : rangeIndex === selected.length - 1 && last !== first
+            : rangeIndex === selected.length - 1 && selected.length > 1
               ? "conclusion"
               : "evidence",
       })),
-    }
-  })
-}
-
-function expandFallbackMomentGroup(
-  moments: ChunkMoment[],
-  seed: [number, number],
-  targetDurationSeconds: number,
-  maxDurationSeconds: number
-) {
-  const selected = new Set(seed)
-  if (moments.length >= 5) {
-    const center = (seed[0] + seed[1]) / 2
-    const candidates = moments
-      .map((_, index) => index)
-      .filter((index) => !selected.has(index))
-      .toSorted(
-        (left, right) =>
-          Math.abs(left - center) - Math.abs(right - center) || left - right
-      )
-    let duration = [...selected].reduce(
-      (sum, index) =>
-        sum + moments[index]!.sourceEnd - moments[index]!.sourceStart,
-      0
-    )
-    for (const index of candidates) {
-      if (duration >= targetDurationSeconds) break
-      const nextDuration =
-        moments[index]!.sourceEnd - moments[index]!.sourceStart
-      if (duration + nextDuration > maxDurationSeconds) continue
-      selected.add(index)
-      duration += nextDuration
-    }
-  }
-  return [...selected].toSorted((left, right) => left - right)
-}
-
-function fallbackMomentPairs(length: number): Array<[number, number]> {
-  if (length < 3) return []
-  const last = length - 1
-  const middle = Math.floor(last / 2)
-  const candidates: Array<[number, number]> = [
-    [0, last],
-    [Math.min(1, last - 1), Math.max(2, last - 1)],
-    [0, Math.max(1, middle)],
-    [Math.min(last - 1, middle), last],
-    [Math.min(2, last - 1), last],
+    },
   ]
-  const seen = new Set<string>()
-  return candidates.filter(([left, right]) => {
-    const first = Math.min(left, right)
-    const second = Math.max(left, right)
-    if (first === second || first < 0 || second >= length) return false
-    const key = `${first}-${second}`
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
 }
 
 function evenlySpaced<T>(values: T[]) {
@@ -667,7 +593,7 @@ function transcriptEvidence(
  * 선택한 실제 구간의 논리가 함께 보이도록 보강한다.
  */
 function explanatoryTopicSummary(value: unknown, moments: ChunkMoment[]) {
-  let summary = cleanText(value, 420)
+  let summary = cleanText(value, 300)
   if (summary.length >= 90 && sentenceCount(summary) >= 2) return summary
 
   const seen = new Set<string>()
@@ -679,8 +605,8 @@ function explanatoryTopicSummary(value: unknown, moments: ChunkMoment[]) {
       return true
     })
   for (const addition of additions) {
-    summary = cleanText([summary, addition].filter(Boolean).join(" "), 420)
-    if (summary.length >= 150 && sentenceCount(summary) >= 3) break
+    summary = cleanText([summary, addition].filter(Boolean).join(" "), 300)
+    if (summary.length >= 90 && sentenceCount(summary) >= 2) break
   }
   return summary
 }

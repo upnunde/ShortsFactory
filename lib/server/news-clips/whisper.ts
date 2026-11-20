@@ -20,11 +20,21 @@ type WhisperJson = {
   }[]
 }
 
+type WhisperRunOptions = {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
+const DEFAULT_FULL_WHISPER_TIMEOUT_MS = 15 * 60_000
+const DEFAULT_RANGE_WHISPER_TIMEOUT_MS = 120_000
+
 export async function transcribeWithLocalWhisper(
   sourceFile: string,
   projectId: string,
-  initialPrompt = ""
+  initialPrompt = "",
+  options: WhisperRunOptions = {}
 ) {
+  if (options.signal?.aborted) throw new Error("whisper-aborted")
   const bin = await whisperBin()
   const mlx = path.basename(bin) === "mlx_whisper"
   const model =
@@ -87,7 +97,16 @@ export async function transcribeWithLocalWhisper(
           "--output_dir",
           outputDir,
           ...promptArgs,
-        ]
+        ],
+    {
+      signal: options.signal,
+      timeoutMs:
+        options.timeoutMs ??
+        whisperTimeout(
+          "WHISPER_FULL_TIMEOUT_MS",
+          DEFAULT_FULL_WHISPER_TIMEOUT_MS
+        ),
+    }
   )
   const parsed = parseWhisperJson(await readFile(outputFile, "utf8"))
   return timestampJson(parsed)
@@ -99,8 +118,9 @@ export async function transcribeRangeWithLocalWhisper(
   projectId: string,
   range: { start: number; end: number },
   initialPrompt = "",
-  options: { paddingSeconds?: number } = {}
+  options: WhisperRunOptions & { paddingSeconds?: number } = {}
 ) {
+  if (options.signal?.aborted) throw new Error("whisper-aborted")
   const { start, end } = paddedWhisperRange(
     range,
     options.paddingSeconds ?? 1.5
@@ -117,30 +137,40 @@ export async function transcribeRangeWithLocalWhisper(
     "whisper-ranges"
   )
   const clip = path.join(folder, `range-${key}.wav`)
+  const timeoutMs =
+    options.timeoutMs ??
+    whisperTimeout("WHISPER_RANGE_TIMEOUT_MS", DEFAULT_RANGE_WHISPER_TIMEOUT_MS)
   await mkdir(folder, { recursive: true })
   try {
     await access(clip)
   } catch {
-    await run(ffmpegBin(), [
-      "-y",
-      "-ss",
-      String(start),
-      "-i",
-      sourceFile,
-      "-t",
-      String(end - start),
-      "-vn",
-      "-ac",
-      "1",
-      "-ar",
-      "16000",
-      "-c:a",
-      "pcm_s16le",
-      clip,
-    ])
+    await run(
+      ffmpegBin(),
+      [
+        "-y",
+        "-ss",
+        String(start),
+        "-i",
+        sourceFile,
+        "-t",
+        String(end - start),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        clip,
+      ],
+      { signal: options.signal, timeoutMs: Math.min(30_000, timeoutMs) }
+    )
   }
   const relative = JSON.parse(
-    await transcribeWithLocalWhisper(clip, projectId, initialPrompt)
+    await transcribeWithLocalWhisper(clip, projectId, initialPrompt, {
+      signal: options.signal,
+      timeoutMs,
+    })
   ) as WhisperJson
   const segments = (relative.segments ?? []).map((segment) => ({
     ...segment,
@@ -192,8 +222,12 @@ function parseWhisperJson(value: string): WhisperJson {
   ) as WhisperJson
 }
 
-function run(bin: string, args: string[]) {
+function run(bin: string, args: string[], options: WhisperRunOptions = {}) {
   return new Promise<void>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error("whisper-aborted"))
+      return
+    }
     const child = spawn(bin, args, {
       stdio: "ignore",
       env: {
@@ -209,11 +243,70 @@ function run(bin: string, args: string[]) {
           path.join(process.cwd(), ".tools", "huggingface"),
       },
     })
-    child.on("error", () => reject(new Error("whisper-unavailable")))
-    child.on("exit", (code) =>
-      code === 0 ? resolve() : reject(new Error("whisper-failed"))
+    let settled = false
+    let terminationError: Error | null = null
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined
+    let settleTimer: ReturnType<typeof setTimeout> | undefined
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout)
+      if (forceKillTimer) clearTimeout(forceKillTimer)
+      if (settleTimer) clearTimeout(settleTimer)
+      options.signal?.removeEventListener("abort", onAbort)
+    }
+    const settle = (error?: Error) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error) reject(error)
+      else resolve()
+    }
+    const terminate = (error: Error) => {
+      if (settled || terminationError) return
+      terminationError = error
+      if (child.exitCode !== null || child.signalCode !== null) {
+        settle(error)
+        return
+      }
+      child.kill("SIGTERM")
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL")
+        }
+      }, 2_000)
+      // 플랫폼 문제로 exit 이벤트가 오지 않아도 API 요청을 영구 대기시키지 않는다.
+      settleTimer = setTimeout(() => settle(error), 4_000)
+    }
+    const onAbort = () => terminate(new Error("whisper-aborted"))
+
+    options.signal?.addEventListener("abort", onAbort, { once: true })
+    const timeoutMs = Number(options.timeoutMs)
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timeout = setTimeout(
+        () => terminate(new Error("whisper-timeout")),
+        timeoutMs
+      )
+    }
+    child.once("error", () =>
+      settle(terminationError ?? new Error("whisper-unavailable"))
     )
+    child.once("exit", (code) => {
+      if (terminationError) {
+        settle(terminationError)
+        return
+      }
+      if (code === 0) settle()
+      else settle(new Error("whisper-failed"))
+    })
   })
+}
+
+function whisperTimeout(name: string, fallback: number) {
+  const configured = Number(process.env[name])
+  return Number.isFinite(configured) && configured >= 5_000
+    ? Math.min(configured, 30 * 60_000)
+    : fallback
 }
 
 async function whisperBin() {
