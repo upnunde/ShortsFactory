@@ -155,7 +155,7 @@ export function NewsClipAnglesStep({
         {isVideoSummary && sourceOverview ? (
           <Card>
             <Card.Header className="border-b border-separator pb-4">
-              <Card.Title>전체 내용 요약</Card.Title>
+              <Card.Title>영상 전체 맥락</Card.Title>
             </Card.Header>
             <Card.Content className="pt-4">
               <p className="text-sm leading-7 whitespace-pre-wrap">
@@ -223,7 +223,12 @@ export function NewsClipAnglesStep({
                       <p className="mt-1 text-base leading-6 font-medium">
                         {angle.title}
                       </p>
-                      <p className="mt-2 text-sm leading-6 text-muted">
+                      {isVideoSummary ? (
+                        <p className="mt-3 text-xs font-medium text-muted">
+                          핵심 논점
+                        </p>
+                      ) : null}
+                      <p className="mt-1 text-sm leading-7 text-muted">
                         {angle.summary}
                       </p>
                       {isVideoSummary && summaryRanges.length ? (

@@ -44,10 +44,7 @@ import {
   buttonBusyDisabled,
 } from "@/components/news-clips/loading-button-label"
 import { introStillTime, selectIntroStillRange } from "@/lib/news-clips/intro"
-import {
-  NEWS_SOURCE_PLAYBACK_RATE,
-  scaleQuoteTimelineSeconds,
-} from "@/lib/news-clips/playback"
+import { NEWS_SOURCE_PLAYBACK_RATE } from "@/lib/news-clips/playback"
 import { newsRenderSettingsKey } from "@/lib/news-clips/render-key"
 import {
   NEWS_MEDIA_MOTION_OPTIONS,
@@ -65,6 +62,7 @@ import {
 import {
   activeManualBodyCuts,
   applyBuildupBodyCuts,
+  remapSubtitlesAfterBodyCut,
   sourceRangeOverlapsManualCut,
 } from "@/lib/news-clips/body-cuts"
 import { angleHasLockedRange } from "@/lib/news-clips/angles"
@@ -495,6 +493,10 @@ export function NewsClipReviewStep({
   const visualFileInputRef = useRef<HTMLInputElement | null>(null)
   const visualUploadTargetRef = useRef<VisualUploadTarget | null>(null)
   const [visualUploadBusy, setVisualUploadBusy] = useState("")
+  /** 첨부 직후 부모 project 반영 전에도 미리보기에 바로 쓰기 위한 로컬 소스. */
+  const [attachedVisualSources, setAttachedVisualSources] = useState<
+    Record<string, NewsSource>
+  >({})
   const [selectedDirectionSceneId, setSelectedDirectionSceneId] = useState("")
   const [directionPlaying, setDirectionPlaying] = useState(false)
   const [directionCurrentTime, setDirectionCurrentTime] = useState(0)
@@ -553,14 +555,30 @@ export function NewsClipReviewStep({
   const sourceVideoUrl = project.source?.id
     ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(project.source.id)}`
     : ""
-  const sourceForId = (sourceId?: string) =>
-    [project.source, ...project.supportingSources].find(
-      (source) => source?.id === (sourceId || project.source?.id)
-    ) ?? project.source
+  const sourceForId = (sourceId?: string) => {
+    const resolvedId = sourceId || project.source?.id
+    const attached = Object.values(attachedVisualSources).find(
+      (source) => source.id === resolvedId
+    )
+    if (attached) return attached
+    return (
+      [project.source, ...project.supportingSources].find(
+        (source) => source?.id === resolvedId
+      ) ?? project.source
+    )
+  }
   const sourceVideoUrlFor = (sourceId?: string) => {
     const resolvedId = sourceForId(sourceId)?.id
     return resolvedId
       ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(resolvedId)}`
+      : sourceVideoUrl
+  }
+  const sceneVisualSource = (sceneId: string, sourceId?: string) =>
+    attachedVisualSources[sceneId] ?? sourceForId(sourceId)
+  const sceneVisualUrl = (sceneId: string, sourceId?: string) => {
+    const source = sceneVisualSource(sceneId, sourceId)
+    return source?.id
+      ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(source.id)}`
       : sourceVideoUrl
   }
   const sourceTitleFor = (sourceId?: string) =>
@@ -585,9 +603,9 @@ export function NewsClipReviewStep({
     previewDirectionScene?.sourceId
   )
   const scriptBodyVideoUrl = directionSourceVideoUrl
-  const introVideoUrl = sourceVideoUrlFor(
-    project.introSourceId || project.source?.id
-  )
+  const introVideoUrl = attachedVisualSources.intro
+    ? `/api/news-clips/source-file?sourceId=${encodeURIComponent(attachedVisualSources.intro.id)}`
+    : sourceVideoUrlFor(project.introSourceId || project.source?.id)
   const introMediaZoom = bodySourceTransform(
     introLayout.introStillZoom,
     introLayout.introStillFit
@@ -1022,21 +1040,60 @@ export function NewsClipReviewStep({
 
   function resetSceneLayout(sceneId: string) {
     const scene = project.reportScenes.find((item) => item.id === sceneId)
-    const currentLayout = scene
-      ? sceneLayoutFor(scene, project, sceneLayoutDrafts)
-      : null
+    const baseline = sceneVisualBaselines[sceneId]
     setSceneLayoutDrafts((current) => {
       const next = { ...current }
       delete next[sceneId]
       return next
     })
-    if (!scene || !currentLayout) return
+    setAttachedVisualSources((current) => {
+      if (!(sceneId in current)) return current
+      const next = { ...current }
+      delete next[sceneId]
+      return next
+    })
+    if (!scene) return
+
+    // 파일 첨부 전 스냅샷이 있으면 원본 영상·구간까지 되돌린다.
+    if (baseline) {
+      onProject((current) => ({
+        reportScenes: current.reportScenes.map((item) =>
+          item.id === sceneId
+            ? {
+                ...item,
+                sourceId: baseline.sourceId,
+                visual: baseline.visual,
+                visualMode: baseline.visualMode,
+                sourceStart: baseline.sourceStart,
+                sourceEnd: baseline.sourceEnd,
+                crop: baseline.crop
+                  ? { ...baseline.crop }
+                  : { ...DEFAULT_SOURCE_SCENE_CROP },
+                fit: baseline.fit ?? "contain",
+                motion: baseline.motion ?? "none",
+              }
+            : item
+        ),
+        subtitles: current.subtitles,
+        subtitleTimingsLocked: current.subtitleTimingsLocked,
+        renderSignature: "",
+      }))
+      setSceneVisualBaselines((current) => {
+        const next = { ...current }
+        delete next[sceneId]
+        return next
+      })
+      onNote("첨부 전 원본 화면으로 초기화했습니다.")
+      return
+    }
+
+    const currentLayout = sceneLayoutFor(scene, project, sceneLayoutDrafts)
     onProject((current) => ({
       reportScenes: current.reportScenes.map((item) =>
         item.id === sceneId
           ? {
               ...item,
-              // 현재 선택한 자료와 구간은 유지하고 화면 배치만 원본으로 돌린다.
+              // 첨부 이력이 없으면 구간은 유지하고 화면 배치만 원본으로 돌린다.
               sourceStart: currentLayout.sourceStart,
               sourceEnd: currentLayout.sourceEnd,
               crop: { ...DEFAULT_SOURCE_SCENE_CROP },
@@ -1049,11 +1106,6 @@ export function NewsClipReviewStep({
       subtitleTimingsLocked: current.subtitleTimingsLocked,
       renderSignature: "",
     }))
-    setSceneVisualBaselines((current) => {
-      const next = { ...current }
-      delete next[sceneId]
-      return next
-    })
     onNote("원본 비율과 중앙 위치로 초기화했습니다.")
   }
 
@@ -1118,9 +1170,43 @@ export function NewsClipReviewStep({
   }
 
   function resetIntroLayout() {
+    const baseline = introVisualBaseline
+    setAttachedVisualSources((current) => {
+      if (!("intro" in current)) return current
+      const next = { ...current }
+      delete next.intro
+      return next
+    })
+    setIntroLayoutDraft(null)
+    setIntroVisualBaseline(null)
+
+    // 파일 첨부 전이 있으면 원본 인트로 영상까지 되돌린다.
+    if (baseline) {
+      onProject((current) => ({
+        introSourceId: baseline.introSourceId,
+        introStillTimeSeconds: baseline.layout.introStillTimeSeconds,
+        introStillFit: baseline.layout.introStillFit,
+        introStillZoom: baseline.layout.introStillZoom,
+        introStillX: baseline.layout.introStillX,
+        introStillY: baseline.layout.introStillY,
+        introMotion: baseline.layout.introMotion,
+        subtitles: current.subtitles,
+        subtitleTimingsLocked: current.subtitleTimingsLocked,
+        renderSignature: "",
+      }))
+      setSourceDuration(
+        initialIntroSourceDuration({
+          ...project,
+          introSourceId: baseline.introSourceId,
+        })
+      )
+      onNote("첨부 전 원본 인트로로 초기화했습니다.")
+      return
+    }
+
     const currentTime = introLayout.introStillTimeSeconds
     onProject((current) => ({
-      // 현재 인트로 소스와 선택 시점은 유지하고 화면 배치만 초기화한다.
+      // 첨부 이력이 없으면 소스·시점은 유지하고 화면 배치만 초기화한다.
       introStillTimeSeconds: currentTime,
       introStillFit: "contain",
       introStillZoom: 1,
@@ -1131,8 +1217,6 @@ export function NewsClipReviewStep({
       subtitleTimingsLocked: current.subtitleTimingsLocked,
       renderSignature: "",
     }))
-    setIntroLayoutDraft(null)
-    setIntroVisualBaseline(null)
     if (sourceVideoRef.current) {
       sourceVideoRef.current.currentTime = currentTime ?? automaticIntroTime
     }
@@ -1521,59 +1605,28 @@ export function NewsClipReviewStep({
       )
       return
     }
-    const deletedOutputSeconds = scaleQuoteTimelineSeconds(end - start)
-    const deletedCaptionEnd = input.caption?.end ?? Number.POSITIVE_INFINITY
-    const subtitles = input.caption
-      ? project.subtitles.flatMap((cue) => {
-          const cueSourceRange = subtitleCueSourceRange(
-            cue,
-            project.reportScenes,
-            project.transcript,
-            settings.bodySubtitleText
-          )
-          if (
-            cue.id === input.caption?.id ||
-            (cueSourceRange &&
-              cueSourceRange.end > start + 0.001 &&
-              cueSourceRange.start < end - 0.001)
-          ) {
-            return []
-          }
-
-          let sceneId = cue.sceneId
-          if (cueSourceRange) {
-            const sourceScene = project.reportScenes.find(
-              (scene) => scene.id === cue.sceneId
-            )
-            const midpoint = (cueSourceRange.start + cueSourceRange.end) / 2
-            const nextScene = plan.scenes.find(
-              (scene) =>
-                reportSceneAudioMode(scene) === "original" &&
-                (!sourceScene?.sourceId ||
-                  !scene.sourceId ||
-                  scene.sourceId === sourceScene.sourceId) &&
-                midpoint >= scene.sourceStart - 0.001 &&
-                midpoint <= scene.sourceEnd + 0.001
-            )
-            if (!nextScene) return []
-            sceneId = nextScene.id
-          }
-
-          const shift =
-            (cueSourceRange && cueSourceRange.start >= end - 0.001) ||
-            (!cueSourceRange && cue.start >= deletedCaptionEnd - 0.001)
-              ? deletedOutputSeconds
-              : 0
-          return [
-            {
-              ...cue,
-              sceneId,
-              start: Math.max(0, cue.start - shift),
-              end: Math.max(0.04, cue.end - shift),
-            },
-          ]
-        })
-      : []
+    const subtitles = remapSubtitlesAfterBodyCut({
+      cues: project.subtitles,
+      previousScenes: project.reportScenes,
+      nextScenes: plan.scenes,
+      deletedSourceStart: start,
+      deletedSourceEnd: end,
+      deletedCaptionId: input.caption?.id,
+      deletedCaptionEnd: input.caption?.end,
+      resolveSourceRange: (cue, scenes) =>
+        subtitleCueSourceRange(
+          cue,
+          scenes,
+          project.transcript,
+          settings.bodySubtitleText
+        ),
+      isBodyCue: (cue, scenes) => {
+        if (!cue.sceneId) return true
+        const scene = scenes.find((item) => item.id === cue.sceneId)
+        if (!scene) return true
+        return reportScenePart(scene, project.productionMode) === "body"
+      },
+    })
     onProject({
       removedRanges,
       keepRanges: plan.keepRanges,
@@ -1582,6 +1635,7 @@ export function NewsClipReviewStep({
       subtitleTimingsLocked: false,
       renderSignature: "",
     })
+    setDeletedBodyCutsOpen(true)
     onNote(
       `${input.label} ${time(start)}–${time(end)} 구간을 삭제했습니다. 미리보기를 다시 만들면 영상·음성·자막에 함께 반영됩니다.`
     )
@@ -1654,15 +1708,75 @@ export function NewsClipReviewStep({
       onNote("삭제 구간을 복원하지 못했습니다.")
       return
     }
+    // 서두·훅·마무리 자막은 유지하고, 장면 ID가 바뀌는 본문 자막만 비운다.
+    const keptSubtitles = project.subtitles.filter((cue) => {
+      if (!cue.sceneId) return true
+      const scene = project.reportScenes.find((item) => item.id === cue.sceneId)
+      if (!scene) return false
+      return reportScenePart(scene, project.productionMode) !== "body"
+    })
     onProject({
       removedRanges,
       keepRanges: plan.keepRanges,
       reportScenes: plan.scenes,
-      subtitles: [],
+      subtitles: keptSubtitles,
       subtitleTimingsLocked: false,
       renderSignature: "",
     })
-    onNote("삭제한 본문 구간을 복원했습니다.")
+    setDeletedBodyCutsOpen(true)
+    onNote(
+      "삭제한 본문 구간을 복원했습니다. 본문을 다시 만들면 자막이 다시 잡힙니다."
+    )
+  }
+
+  function renderDeletedBodyCutsPanel() {
+    if (!activeBodyCuts.length) return null
+    return (
+      <div className="flex flex-col gap-2">
+        <button
+          type="button"
+          aria-expanded={deletedBodyCutsOpen}
+          className="flex items-center gap-1.5 text-left text-sm font-medium"
+          onClick={() => setDeletedBodyCutsOpen((open) => !open)}
+        >
+          <ChevronDown
+            className={`size-4 shrink-0 text-muted transition-transform ${
+              deletedBodyCutsOpen ? "" : "-rotate-90"
+            }`}
+          />
+          <span>삭제된 구간</span>
+          <span className="font-normal text-muted tabular-nums">
+            {activeBodyCuts.length}
+          </span>
+        </button>
+        {deletedBodyCutsOpen
+          ? activeBodyCuts.map((range) => (
+              <div
+                key={range.id}
+                className="flex items-center justify-between gap-4 rounded-xl bg-default/50 px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="text-xs text-muted tabular-nums">
+                    {time(range.start)}–{time(range.end)}
+                  </p>
+                  <p className="truncate text-sm text-muted">
+                    {transcriptTextInsideRange(project.transcript, range) ||
+                      "삭제한 본문 구간"}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  isDisabled={busy !== ""}
+                  onPress={() => restoreBodyTranscriptRange(range.id)}
+                >
+                  복원
+                </Button>
+              </div>
+            ))
+          : null}
+      </div>
+    )
   }
 
   function updateReportScene(
@@ -1722,18 +1836,25 @@ export function NewsClipReviewStep({
   function chooseVisualFile(target: VisualUploadTarget) {
     if (visualUploadBusy) return
     visualUploadTargetRef.current = target
-    if (visualFileInputRef.current) {
-      visualFileInputRef.current.value = ""
-      visualFileInputRef.current.click()
+    const input = visualFileInputRef.current
+    if (!input) {
+      onNote("파일 선택창을 열지 못했습니다. 다시 시도해 주세요.")
+      return
     }
+    input.value = ""
+    input.click()
   }
 
   async function uploadVisualFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0]
     const target = visualUploadTargetRef.current
     event.currentTarget.value = ""
+    if (!file) return
+    if (!target) {
+      onNote("화면 구간을 선택한 뒤 다시 첨부해 주세요.")
+      return
+    }
     visualUploadTargetRef.current = null
-    if (!file || !target) return
 
     const targetKey = target.type === "intro" ? "intro" : target.sceneId
     setVisualUploadBusy(targetKey)
@@ -1765,6 +1886,10 @@ export function NewsClipReviewStep({
         source.mediaType === "image" ? "contain" : "cover"
 
       if (target.type === "intro") {
+        setAttachedVisualSources((current) => ({
+          ...current,
+          intro: source,
+        }))
         setIntroVisualBaseline(
           (current) =>
             current ?? {
@@ -1795,60 +1920,78 @@ export function NewsClipReviewStep({
         return
       }
 
-      const scene = project.reportScenes.find(
+      const sourceEnd = Math.max(0.5, source.durationSeconds || 12)
+      const baselineScene = project.reportScenes.find(
         (item) => item.id === target.sceneId
       )
-      if (!scene) {
+      if (!baselineScene) {
         throw new Error("화면 구간을 다시 선택해 주세요.")
       }
-      const part = reportScenePart(scene, project.productionMode)
-      const sourceEnd = Math.max(0.5, source.durationSeconds || 12)
+      const part = reportScenePart(baselineScene, project.productionMode)
+      setAttachedVisualSources((current) => ({
+        ...current,
+        [target.sceneId]: source,
+      }))
       setSceneVisualBaselines((current) => {
         if (current[target.sceneId]) return current
         return {
           ...current,
           [target.sceneId]: {
-            sourceId: scene.sourceId,
-            visual: scene.visual,
-            visualMode: scene.visualMode,
-            sourceStart: scene.sourceStart,
-            sourceEnd: scene.sourceEnd,
-            crop: scene.crop ? { ...scene.crop } : undefined,
-            fit: scene.fit,
-            motion: scene.motion,
+            sourceId: baselineScene.sourceId,
+            visual: baselineScene.visual,
+            visualMode: baselineScene.visualMode,
+            sourceStart: baselineScene.sourceStart,
+            sourceEnd: baselineScene.sourceEnd,
+            crop: baselineScene.crop ? { ...baselineScene.crop } : undefined,
+            fit: baselineScene.fit,
+            motion: baselineScene.motion,
           },
         }
       })
-      onProject((current) => ({
-        supportingSources: appendSupportingSource(
-          current.supportingSources,
-          source
-        ),
-        reportScenes: current.reportScenes.map((item) =>
-          item.id === target.sceneId
-            ? {
-                ...item,
-                sourceId: source.id,
-                visual: "source",
-                visualMode: "supporting",
-                sourceStart: 0,
-                sourceEnd,
-                // 이미지는 원본 전체를 먼저 보이고, 영상만 프레임을 채운다.
-                crop: { ...NEUTRAL_SCENE_CROP },
-                fit: attachedMediaFit,
-                motion: "none",
-              }
-            : item
-        ),
-        subtitles: current.subtitles,
-        subtitleTimingsLocked: current.subtitleTimingsLocked,
-        renderSignature: "",
+      // 부모 project 반영 전에도 미리보기가 새 구간을 쓰도록 초안을 바로 채운다.
+      setSceneLayoutDrafts((current) => ({
+        ...current,
+        [target.sceneId]: {
+          crop: { ...NEUTRAL_SCENE_CROP },
+          fit: attachedMediaFit,
+          sourceStart: 0,
+          sourceEnd,
+          motion: "none",
+        },
       }))
-      setSceneLayoutDrafts((current) => {
-        const next = { ...current }
-        delete next[target.sceneId]
-        return next
+      onProject((current) => {
+        const scenes = current.reportScenes.some(
+          (item) => item.id === target.sceneId
+        )
+          ? current.reportScenes
+          : project.reportScenes
+        return {
+          supportingSources: appendSupportingSource(
+            current.supportingSources,
+            source
+          ),
+          reportScenes: scenes.map((item) =>
+            item.id === target.sceneId
+              ? {
+                  ...item,
+                  sourceId: source.id,
+                  visual: "source",
+                  visualMode: "supporting",
+                  sourceStart: 0,
+                  sourceEnd,
+                  // 이미지는 원본 전체를 먼저 보이고, 영상만 프레임을 채운다.
+                  crop: { ...NEUTRAL_SCENE_CROP },
+                  fit: attachedMediaFit,
+                  motion: "none",
+                }
+              : item
+          ),
+          subtitles: current.subtitles,
+          subtitleTimingsLocked: current.subtitleTimingsLocked,
+          renderSignature: "",
+        }
       })
+      selectDirectionScene(target.sceneId, 0)
       const partLabel =
         part === "hook"
           ? "핵심 훅"
@@ -1857,7 +2000,9 @@ export function NewsClipReviewStep({
             : part === "outro"
               ? "마무리"
               : "본문"
-      onNote(`${partLabel} 화면을 첨부 파일로 교체했습니다.`)
+      onNote(
+        `${partLabel} 화면에 첨부했습니다. 미리보기 영상에 넣으려면 이 구간을 다시 만들어 주세요.`
+      )
     } catch (error) {
       onNote(
         error instanceof Error ? error.message : "파일을 첨부하지 못했습니다."
@@ -2416,17 +2561,14 @@ export function NewsClipReviewStep({
     if (!draft) return
     setRemakingPreviewPart(part)
     try {
-      // 서두·마무리는 TTS라 다시 만들면 새 자막 칸이 생긴다. 잠금을 유지하면
-      // 예전 ID만 남겨 서두 자막 목록이 비거나 옛 칸이 남는다. 본문(원본 음성)
-      // 다시 만들기만 잠긴 자막 시간을 유지한다.
+      // 잠금을 유지해야 서두에 붙인 화면·크롭이 다시 만들기에 덮이지 않는다.
+      // 새 TTS 자막 칸은 preservePreviewSubtitleEdits가 잠긴 상태에서도 받는다.
       await onPreview(
         true,
         {
           ...draft,
           subtitleTimingsLocked: Boolean(
-            draft.subtitleTimingsLocked &&
-            draft.subtitles.length &&
-            part === "body"
+            draft.subtitleTimingsLocked && draft.subtitles.length
           ),
         },
         part
@@ -2638,7 +2780,7 @@ export function NewsClipReviewStep({
       <input
         ref={visualFileInputRef}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif,.gif,video/*,.mkv,.m4v"
+        accept="image/jpeg,image/png,image/webp,image/gif,.gif,video/*,.mkv,.m4v,.mov,.mp4"
         className="sr-only"
         aria-label="화면 파일 첨부"
         onChange={(event) => void uploadVisualFile(event)}
@@ -3556,58 +3698,8 @@ export function NewsClipReviewStep({
                                 )}
                               </div>
                               {activeBodyCuts.length ? (
-                                <div className="flex flex-col gap-2 border-t border-separator pt-4">
-                                  <button
-                                    type="button"
-                                    aria-expanded={deletedBodyCutsOpen}
-                                    className="flex items-center gap-1.5 text-left text-sm font-medium"
-                                    onClick={() =>
-                                      setDeletedBodyCutsOpen((open) => !open)
-                                    }
-                                  >
-                                    <ChevronDown
-                                      className={`size-4 shrink-0 text-muted transition-transform ${
-                                        deletedBodyCutsOpen ? "" : "-rotate-90"
-                                      }`}
-                                    />
-                                    <span>삭제된 구간</span>
-                                    <span className="font-normal text-muted tabular-nums">
-                                      {activeBodyCuts.length}
-                                    </span>
-                                  </button>
-                                  {deletedBodyCutsOpen
-                                    ? activeBodyCuts.map((range) => (
-                                        <div
-                                          key={range.id}
-                                          className="flex items-center justify-between gap-4 rounded-xl bg-default/50 px-3 py-2"
-                                        >
-                                          <div className="min-w-0">
-                                            <p className="text-xs text-muted tabular-nums">
-                                              {time(range.start)}–
-                                              {time(range.end)}
-                                            </p>
-                                            <p className="truncate text-sm text-muted">
-                                              {transcriptTextInsideRange(
-                                                project.transcript,
-                                                range
-                                              ) || "삭제한 본문 구간"}
-                                            </p>
-                                          </div>
-                                          <Button
-                                            size="sm"
-                                            variant="outline"
-                                            isDisabled={busy !== ""}
-                                            onPress={() =>
-                                              restoreBodyTranscriptRange(
-                                                range.id
-                                              )
-                                            }
-                                          >
-                                            복원
-                                          </Button>
-                                        </div>
-                                      ))
-                                    : null}
+                                <div className="border-t border-separator pt-4">
+                                  {renderDeletedBodyCutsPanel()}
                                 </div>
                               ) : null}
                             </section>
@@ -4300,7 +4392,8 @@ export function NewsClipReviewStep({
                                   sceneLayoutDrafts
                                 )
                                 const crop = layout.crop
-                                const sceneSource = sourceForId(
+                                const sceneSource = sceneVisualSource(
+                                  visualScene.id,
                                   visualScene.sourceId
                                 )
                                 const layoutDirty = sceneLayoutDirty(
@@ -4367,9 +4460,9 @@ export function NewsClipReviewStep({
                                   sourceEnd: layout.sourceEnd,
                                   fit: layout.fit,
                                 }
-                                const sourceTitle = sourceTitleFor(
-                                  visualScene.sourceId
-                                )
+                                const sourceTitle =
+                                  sceneSource?.title ||
+                                  sourceTitleFor(visualScene.sourceId)
                                 const visualLabel =
                                   project.productionMode === "report"
                                     ? "자료화면 · TTS"
@@ -4407,8 +4500,9 @@ export function NewsClipReviewStep({
                                       }
                                     >
                                       <video
-                                        key={`${visualScene.sourceId || project.source?.id || "source"}-${layout.sourceStart}`}
-                                        src={sourceVideoUrlFor(
+                                        key={`${sceneSource?.id || visualScene.sourceId || project.source?.id || "source"}-${layout.sourceStart}`}
+                                        src={sceneVisualUrl(
+                                          visualScene.id,
                                           visualScene.sourceId
                                         )}
                                         poster={sceneSource?.thumbnailUrl}
@@ -4492,25 +4586,60 @@ export function NewsClipReviewStep({
                                             </Button>
                                           ) : null}
                                           {canAttachVisual ? (
-                                            <Button
-                                              size="sm"
-                                              variant="outline"
-                                              isDisabled={Boolean(
-                                                visualUploadBusy
-                                              )}
-                                              onPress={() =>
-                                                chooseVisualFile({
-                                                  type: "scene",
-                                                  sceneId: visualScene.id,
-                                                })
-                                              }
-                                            >
-                                              <FileUp className="size-4" />
-                                              {visualUploadBusy ===
-                                              visualScene.id
-                                                ? "첨부 중"
-                                                : "파일 첨부"}
-                                            </Button>
+                                            <>
+                                              <input
+                                                id={`news-clip-scene-visual-${visualScene.id}`}
+                                                type="file"
+                                                accept="image/jpeg,image/png,image/webp,image/gif,.gif,video/*,.mkv,.m4v,.mov,.mp4"
+                                                className="sr-only"
+                                                tabIndex={-1}
+                                                aria-label={`${visualLabel} 파일 첨부`}
+                                                disabled={Boolean(
+                                                  visualUploadBusy
+                                                )}
+                                                onChange={(event) => {
+                                                  visualUploadTargetRef.current =
+                                                    {
+                                                      type: "scene",
+                                                      sceneId: visualScene.id,
+                                                    }
+                                                  void uploadVisualFile(event)
+                                                }}
+                                              />
+                                              <Button
+                                                size="sm"
+                                                variant="outline"
+                                                isDisabled={Boolean(
+                                                  visualUploadBusy
+                                                )}
+                                                onPress={() => {
+                                                  if (visualUploadBusy) return
+                                                  visualUploadTargetRef.current =
+                                                    {
+                                                      type: "scene",
+                                                      sceneId: visualScene.id,
+                                                    }
+                                                  const input =
+                                                    document.getElementById(
+                                                      `news-clip-scene-visual-${visualScene.id}`
+                                                    ) as HTMLInputElement | null
+                                                  if (!input) {
+                                                    onNote(
+                                                      "파일 선택창을 열지 못했습니다. 다시 시도해 주세요."
+                                                    )
+                                                    return
+                                                  }
+                                                  input.value = ""
+                                                  input.click()
+                                                }}
+                                              >
+                                                <FileUp className="size-4" />
+                                                {visualUploadBusy ===
+                                                visualScene.id
+                                                  ? "첨부 중"
+                                                  : "파일 첨부"}
+                                              </Button>
+                                            </>
                                           ) : null}
                                           <Button
                                             className={
@@ -4661,7 +4790,8 @@ export function NewsClipReviewStep({
                                         {mode === "preview" ||
                                         mode === "direction" ? (
                                           <SceneCropPreview
-                                            sourceUrl={sourceVideoUrlFor(
+                                            sourceUrl={sceneVisualUrl(
+                                              visualScene.id,
                                               visualScene.sourceId
                                             )}
                                             sourceStart={layout.sourceStart}
@@ -5245,6 +5375,24 @@ export function NewsClipReviewStep({
                               표시됩니다.
                             </p>
                           )}
+                        </Card.Content>
+                      </Card>
+                    ) : null}
+                    {mode === "preview" &&
+                    compositionPane === "body" &&
+                    project.productionMode === "buildup2" &&
+                    activeBodyCuts.length ? (
+                      <Card>
+                        <Card.Header className="min-h-16 border-b border-separator pb-4">
+                          <Card.Title className={cardTitleClass}>
+                            삭제한 본문 구간
+                          </Card.Title>
+                          <Card.Description className={cardDescriptionClass}>
+                            복원 후 본문을 다시 만들면 영상·자막에 반영됩니다.
+                          </Card.Description>
+                        </Card.Header>
+                        <Card.Content className="flex flex-col gap-3">
+                          {renderDeletedBodyCutsPanel()}
                         </Card.Content>
                       </Card>
                     ) : null}

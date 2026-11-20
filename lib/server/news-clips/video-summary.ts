@@ -32,6 +32,8 @@ type ChunkMoment = {
   id: string
   title: string
   summary: string
+  /** 모델의 재서술이 아닌, 해당 시간대의 실제 전사. */
+  evidence: string
   keywords: string[]
   sourceStart: number
   sourceEnd: number
@@ -61,13 +63,14 @@ export async function extractVideoSummaryPlan(
 
   const generateText = options.generateText ?? defaultVideoSummaryTextGenerator
   const focus = options.focus?.trim() ?? ""
+  const sourceTitle = options.sourceTitle?.trim() ?? ""
   const chunkAnalyses = await mapWithConcurrency(
     chunks,
     Math.max(1, Math.min(4, Math.floor(options.concurrency ?? 2))),
     async (chunk) =>
       analyzeTranscriptChunk(
         chunk,
-        options.sourceTitle ?? "",
+        sourceTitle,
         generateText,
         focus
       )
@@ -75,7 +78,8 @@ export async function extractVideoSummaryPlan(
   const moments = chunkAnalyses.flatMap((analysis) => analysis.moments)
   if (moments.length < 1) throw new Error("insufficient-summary-moments")
   const minTopics = moments.length >= 3 ? 3 : 1
-  const minRangesPerTopic = moments.length >= 2 ? 2 : 1
+  const minRangesPerTopic =
+    moments.length >= 6 ? 3 : moments.length >= 2 ? 2 : 1
   const targetDurationSeconds = Math.max(
     5,
     Math.min(120, options.targetDurationSeconds ?? 45)
@@ -85,45 +89,61 @@ export async function extractVideoSummaryPlan(
     Math.min(120, options.maxDurationSeconds ?? 50)
   )
 
+  const reductionSystem = [
+    "너는 긴 한국어 영상을 요약형 쇼츠로 재구성하는 편집자다.",
+    "아래는 전체 영상을 누락 없이 나눈 청크별 요약과, 실제 타임코드가 있는 moment 목록이다.",
+    "먼저 영상 전체의 내용 지도를 만들고, 서로 다른 핵심 논점을 찾아라. 하나의 논점을 문구만 바꿔 중복 제안하지 마라.",
+    "핵심 논점은 '누가·무엇을 주장했는지, 그렇게 보는 근거는 무엇인지, 결론이나 파장은 무엇인지'가 이해되는 정도로 완결되어야 한다.",
+    "자극적인 표현을 새로 만들지 말고, 원본의 주장·모순·수치·사례·반박·결론을 근거로 삼아라.",
+    "overallSummary는 영상 전체의 주제와 흐름을 4~6문장, 800자 이내의 자연스러운 한국어로 정리한다. 단순 목록이 아니라 전체 논리가 이해되게 쓴다.",
+    `topics는 서로 겹치지 않는 핵심 주제 후보 ${minTopics}~5개다.`,
+    `각 주제는 서로 떨어진 moment를 ${minRangesPerTopic}~8개 선택한다. 길이를 채우기 위한 무관한 구간은 금지하되, 논점을 충분히 설명할 수 있다면 선택 구간 합계는 약 ${Math.round(targetDurationSeconds)}초를 목표로 하고 ${Math.round(maxDurationSeconds)}초를 넘기지 않는다.`,
+    "각 주제는 hook → 필요한 context → 결정적 evidence → conclusion 흐름으로 완결되어야 한다. 같은 내용의 반복은 빼되, 주어나 배경을 빼서 무슨 말인지 모르게 만들지 마라.",
+    "topic.title은 단편적인 키워드가 아니라, 이 후보가 설명하는 핵심 주장을 하나의 완결된 문장으로 쓴다.",
+    "topic.summary는 3~5문장으로 쓴다. 중심 주장, 필요한 배경, 원본의 구체적 근거, 그 근거가 의미하는 결론을 포함해야 한다. 제목을 다시 말하는 한 문장 요약은 금지한다.",
+    "moment의 score가 높을수록 핵심성과 주목도가 높은 구간이다. 점수만 기계적으로 따르지 말고 하나의 논점으로 이어지는지 함께 판단한다.",
+    "원본의 핵심 발화 전체가 목표 시간보다 짧으면 억지로 늘리거나 실패시키지 말고, 있는 핵심만 완결되게 사용한다.",
+    "같은 발언을 반복하지 말고, sourceRanges는 원본 시간순으로 배치한다.",
+    "rangeId는 아래 moments에 있는 id만 사용한다. 시간과 내용을 새로 만들지 않는다.",
+    "role은 hook, context, evidence, conclusion 중 하나다.",
+    sourceTitle
+      ? "sourceTitle은 원본 영상 제작자가 내세운 핵심 논점이므로 분석의 중심 가설로 삼는다. 단, 단순 파일명·날짜·ID처럼 의미 없는 제목이면 이 규칙을 무시한다. overallSummary는 제목이 말하는 사건·주장부터 설명하고, topics 중 첫 후보는 제목의 핵심을 가장 잘 설명하는 실제 발언·배경·근거·결론으로 구성한다. 제목과 직접 연결되는 moment를 우선하되, 제목이 과장됐거나 전사와 다르면 억지로 맞추지 말고 실제 발언을 우선한다. 제목과 내용의 차이 자체가 원본에서 확인될 때만 그 차이를 논점으로 다룬다."
+      : "",
+    focus
+      ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. 명시적인 focus는 sourceTitle보다 우선한다. focus와 의미가 가까운 moment를 최우선으로 고르고, topics의 제목·요약도 focus 논점을 중심으로 구성한다. 원본에 없는 내용은 만들지 않는다."
+      : "",
+    "JSON 객체만 출력한다:",
+    '{"overallSummary":"...","topics":[{"id":"topic-1","title":"...","summary":"...","keywords":["..."],"sourceRanges":[{"rangeId":"summary-chunk-1-moment-1","role":"hook"}]}]}',
+  ]
+    .filter(Boolean)
+    .join("\n")
+  const reductionInput = JSON.stringify({
+    sourceTitle,
+    focus,
+    chunks: chunkAnalyses.map((analysis) => ({
+      id: analysis.chunkId,
+      summary: analysis.summary,
+    })),
+    moments,
+  })
   let reduced: Record<string, unknown> = {}
-  try {
-    const reducedText = await generateText(
-      [
-        "너는 긴 한국어 영상을 요약형 쇼츠로 재구성하는 편집자다.",
-        "아래는 전체 영상을 누락 없이 나눈 청크별 요약과, 실제 타임코드가 있는 moment 목록이다.",
-        "전체 내용을 순서대로 골고루 줄이지 않는다. 영상에서 가장 중요하고 시청자의 관심을 끌 수 있는 핵심 논점 하나를 먼저 정한 뒤 그 논점을 증명하는 구간만 고른다.",
-        "자극적인 표현을 새로 만들지 말고 원본 안에서 강한 발언·반전·모순·수치·결론을 훅으로 선택한다.",
-        "overallSummary는 영상 전체 흐름을 3~5문장, 500자 이내의 자연스러운 한국어로 정리한다.",
-        `topics는 서로 겹치지 않는 핵심 주제 후보 ${minTopics}~5개다.`,
-        `각 주제는 서로 떨어진 moment를 ${minRangesPerTopic}~8개 선택한다. 선택 구간 합계는 약 ${Math.round(targetDurationSeconds)}초를 목표로 하고 ${Math.round(maxDurationSeconds)}초를 넘기지 않는다.`,
-        "각 주제는 hook → 필요한 context → 결정적 evidence → conclusion 흐름으로 완결되어야 한다. 배경 설명·인사·반복 발언은 핵심 이해에 꼭 필요하지 않으면 제외한다.",
-        "moment의 score가 높을수록 핵심성과 주목도가 높은 구간이다. 점수만 기계적으로 따르지 말고 하나의 논점으로 이어지는지 함께 판단한다.",
-        "원본의 핵심 발화 전체가 목표 시간보다 짧으면 억지로 늘리거나 실패시키지 말고, 있는 핵심만 완결되게 사용한다.",
-        "같은 발언을 반복하지 말고, sourceRanges는 원본 시간순으로 배치한다.",
-        "rangeId는 아래 moments에 있는 id만 사용한다. 시간과 내용을 새로 만들지 않는다.",
-        "role은 hook, context, evidence, conclusion 중 하나다.",
-        focus
-          ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. focus와 의미가 가까운 moment를 최우선으로 고르고, topics의 제목·요약도 focus 논점을 중심으로 구성한다. 원본에 없는 내용은 만들지 않는다."
-          : "",
-        "JSON 객체만 출력한다:",
-        '{"overallSummary":"...","topics":[{"id":"topic-1","title":"...","summary":"...","keywords":["..."],"sourceRanges":[{"rangeId":"summary-chunk-1-moment-1","role":"hook"}]}]}',
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      JSON.stringify({
-        sourceTitle: options.sourceTitle ?? "",
-        focus,
-        chunks: chunkAnalyses.map((analysis) => ({
-          id: analysis.chunkId,
-          summary: analysis.summary,
-        })),
-        moments,
-      }),
-      2200
-    )
-    reduced = asRecord(parseJson(reducedText))
-  } catch {
-    // 모델 응답이 일시적으로 깨져도 아래의 실제 전사 기반 복구 계획을 쓴다.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const reducedText = await generateText(
+        attempt === 0
+          ? reductionSystem
+          : `${reductionSystem}\n이전 출력이 필수 주제 수나 서로 다른 근거 구간 수를 채우지 못했다. 요구 조건을 모두 충족한 완전한 JSON으로 다시 작성하라.`,
+        reductionInput,
+        3600
+      )
+      const candidate = asRecord(parseJson(reducedText))
+      if (reductionHasMinimumShape(candidate, minTopics, minRangesPerTopic)) {
+        reduced = candidate
+        break
+      }
+    } catch {
+      // 한 번 더 시도한 뒤에도 깨지면 실제 전사 기반 복구 계획을 쓴다.
+    }
   }
   const momentById = new Map(moments.map((moment) => [moment.id, moment]))
   const rawTopics = Array.isArray(reduced.topics) ? reduced.topics : []
@@ -134,12 +154,23 @@ export async function extractVideoSummaryPlan(
       : Array.isArray(record.rangeIds)
         ? record.rangeIds
         : []
+    const selectedMoments = refs.flatMap((reference) => {
+      const ref = asRecord(reference)
+      const rangeId =
+        typeof reference === "string"
+          ? reference
+          : typeof ref.rangeId === "string"
+            ? ref.rangeId
+            : ""
+      const moment = momentById.get(rangeId)
+      return moment ? [moment] : []
+    })
     return {
       id: record.id,
       title: record.title,
-      summary: record.summary,
+      summary: explanatoryTopicSummary(record.summary, selectedMoments),
       keywords: record.keywords,
-      sourceRanges: refs.flatMap((reference) => {
+      sourceRanges: refs.flatMap((reference, referenceIndex) => {
         const ref = asRecord(reference)
         const rangeId =
           typeof reference === "string"
@@ -156,7 +187,7 @@ export async function extractVideoSummaryPlan(
             summary: moment.summary,
             sourceStart: moment.sourceStart,
             sourceEnd: moment.sourceEnd,
-            role: normalizeRole(ref.role),
+            role: normalizeRole(ref.role, referenceIndex, refs.length),
           },
         ]
       }),
@@ -228,16 +259,21 @@ async function analyzeTranscriptChunk(
       [
         "너는 한국어 영상 전사에서 요약 재료를 추출하는 분석가다.",
         "입력은 전체 영상의 하나의 연속 청크다.",
-        "summary는 이 청크의 핵심을 2~4문장의 한국어로 요약한다.",
-        "moments는 후보 영상에 쓸 수 있는 서로 다른 핵심 발언 3~8개다.",
-        "각 moment는 가능하면 5~15초 안의 완결된 발언으로 잡고 18초를 넘기지 않는다.",
-        "인사·서론·반복 설명보다 핵심 주장, 반전, 모순, 구체적 수치, 강한 결론을 우선한다.",
+        "summary는 이 청크에서 다루는 주요 논점을 3~6문장의 한국어로 요약한다. 누가 무엇을 말했는지와 근거·결론이 드러나야 한다.",
+        "moments는 나중에 하나의 핵심 주제를 설명하는 영상으로 조립할 수 있는 서로 다른 발화 단위 4~10개다.",
+        "각 moment는 가능하면 6~20초 안에서 주어·주장·근거가 이해되는 완결된 호흡으로 잡고 24초를 넘기지 않는다.",
+        "인사·반복·의미 없는 맞장구는 제외한다. 다만 핵심 주장을 이해하는 데 필요한 배경 설명은 빼지 마라.",
+        "moment.title은 키워드가 아니라 해당 발화의 주장을 짧은 완결 문장으로 쓴다.",
+        "moment.summary는 해당 구간이 어떤 논점의 무엇을 설명하는지 1~2문장으로 쓴다. 단편적 단어나 표어만 쓰지 마라.",
         "score는 원본 안에서의 핵심성과 시청 주목도를 함께 평가한 0~100 정수다. 과장된 낚시 가능성이 아니라 내용 자체의 힘을 평가한다.",
         "moment의 sourceStart/sourceEnd는 입력 segment의 실제 start/end 범위만 쓴다.",
         "주어·대상·결론이 있는 완결된 발언을 선택하고, 같은 내용을 반복하지 않는다.",
         "원문에 없는 사실을 추가하지 않는다.",
+        sourceTitle
+          ? "sourceTitle은 원본 영상이 내세운 핵심 논점이다. 단순 파일명·날짜·ID처럼 의미 없는 제목이면 무시한다. 제목을 설명·입증·반박하거나 필요한 배경을 주는 발언을 moments에 우선 포함하고 관련 moment의 score를 높게 평가한다. 단, 제목 문구를 전사에 없는 사실처럼 덧붙이거나 제목에 억지로 맞추지 않는다."
+          : "",
         focus
-          ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. focus와 의미가 가까운 발언을 moments에 더 많이·우선적으로 넣는다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함한다."
+          ? "사용자가 focus에 원하는 키워드나 주요 내용을 적었다. 명시적인 focus는 sourceTitle보다 우선한다. focus와 의미가 가까운 발언을 moments에 더 많이·우선적으로 넣는다. 단어가 정확히 일치하지 않아도 같은 논점이면 포함한다."
           : "",
         "JSON 객체만 출력한다:",
         '{"summary":"...","moments":[{"title":"...","summary":"...","keywords":["..."],"sourceStart":0,"sourceEnd":10,"score":90}]}',
@@ -245,7 +281,7 @@ async function analyzeTranscriptChunk(
         .filter(Boolean)
         .join("\n"),
       JSON.stringify({ sourceTitle, focus, chunk }),
-      1300
+      1900
     )
     parsed = asRecord(parseJson(response))
   } catch {
@@ -266,11 +302,15 @@ async function analyzeTranscriptChunk(
       ) {
         return []
       }
+      const clampedStart = Math.max(chunk.sourceStart, sourceStart)
+      const clampedEnd = Math.min(chunk.sourceEnd, sourceEnd)
+      const evidence = transcriptEvidence(chunk, clampedStart, clampedEnd)
       return [
         {
           id: `${chunk.id}-moment-${index + 1}`,
-          title: cleanText(record.title, 80),
-          summary: cleanText(record.summary, 300),
+          title: cleanText(record.title, 100) || cleanText(evidence, 100),
+          summary: cleanText(record.summary, 360) || evidence,
+          evidence,
           keywords: Array.isArray(record.keywords)
             ? record.keywords
                 .filter(
@@ -280,8 +320,8 @@ async function analyzeTranscriptChunk(
                 .filter(Boolean)
                 .slice(0, 6)
             : [],
-          sourceStart: Math.max(chunk.sourceStart, sourceStart),
-          sourceEnd: Math.min(chunk.sourceEnd, sourceEnd),
+          sourceStart: clampedStart,
+          sourceEnd: clampedEnd,
           score: Math.max(
             0,
             Math.min(100, Math.round(finiteNumber(record.score) ?? 50))
@@ -291,7 +331,10 @@ async function analyzeTranscriptChunk(
     })
     .filter(
       (moment) =>
-        moment.title && moment.summary && moment.sourceEnd > moment.sourceStart
+        moment.title &&
+        moment.summary &&
+        moment.evidence &&
+        moment.sourceEnd > moment.sourceStart
     )
     .slice(0, 8)
   const moments = supplementChunkMoments(generatedMoments, chunk, focus)
@@ -327,6 +370,7 @@ function supplementChunkMoments(
       id: `${chunk.id}-fallback-${index + 1}`,
       title: cleanText(text, 36),
       summary: text,
+      evidence: text,
       keywords: [],
       sourceStart: segment.start,
       sourceEnd: segment.end,
@@ -351,7 +395,7 @@ function fallbackOverallSummary(
     .join(" ")
   return cleanText(
     chunkText || moments.map((moment) => moment.summary).join(" "),
-    500
+    800
   )
 }
 
@@ -554,10 +598,96 @@ function parseJson(value: string): unknown {
   }
 }
 
-function normalizeRole(value: unknown): VideoSummaryRangeRole {
-  return value === "hook" || value === "context" || value === "conclusion"
-    ? value
-    : "evidence"
+function reductionHasMinimumShape(
+  value: Record<string, unknown>,
+  minTopics: number,
+  minRangesPerTopic: number
+) {
+  const topics = Array.isArray(value.topics) ? value.topics : []
+  if (!cleanText(value.overallSummary, 800) || topics.length < minTopics) {
+    return false
+  }
+  return topics.every((topic) => {
+    const record = asRecord(topic)
+    const ranges = Array.isArray(record.sourceRanges)
+      ? record.sourceRanges
+      : Array.isArray(record.rangeIds)
+        ? record.rangeIds
+        : []
+    const distinctRangeIds = new Set(
+      ranges
+        .map((range) => {
+          if (typeof range === "string") return range
+          const record = asRecord(range)
+          return typeof record.rangeId === "string" ? record.rangeId : ""
+        })
+        .filter(Boolean)
+    )
+    return (
+      cleanText(record.title, 100).length > 0 &&
+      cleanText(record.summary, 420).length > 0 &&
+      distinctRangeIds.size >= minRangesPerTopic
+    )
+  })
+}
+
+function normalizeRole(
+  value: unknown,
+  index = 0,
+  total = 1
+): VideoSummaryRangeRole {
+  if (value === "hook" || value === "context" || value === "conclusion") {
+    return value
+  }
+  if (value === "evidence") return value
+  if (index === 0) return "hook"
+  if (index === total - 1 && total > 1) return "conclusion"
+  if (index === 1 && total >= 4) return "context"
+  return "evidence"
+}
+
+function transcriptEvidence(
+  chunk: VideoSummaryTranscriptChunk,
+  start: number,
+  end: number
+) {
+  return cleanText(
+    chunk.segments
+      .filter(
+        (segment) => segment.end > start + 0.001 && segment.start < end - 0.001
+      )
+      .map((segment) => segment.text)
+      .join(" "),
+    900
+  )
+}
+
+/**
+ * 모델이 제목을 반복한 한 문장만 내놓아도 2번 화면에서는
+ * 선택한 실제 구간의 논리가 함께 보이도록 보강한다.
+ */
+function explanatoryTopicSummary(value: unknown, moments: ChunkMoment[]) {
+  let summary = cleanText(value, 420)
+  if (summary.length >= 90 && sentenceCount(summary) >= 2) return summary
+
+  const seen = new Set<string>()
+  const additions = moments
+    .map((moment) => cleanText(moment.summary, 260))
+    .filter((text) => {
+      if (!text || summary.includes(text) || seen.has(text)) return false
+      seen.add(text)
+      return true
+    })
+  for (const addition of additions) {
+    summary = cleanText([summary, addition].filter(Boolean).join(" "), 420)
+    if (summary.length >= 150 && sentenceCount(summary) >= 3) break
+  }
+  return summary
+}
+
+function sentenceCount(value: string) {
+  const matches = value.match(/[.!?]|(?:다|요|죠|어|했어)(?=\s|$)/g)
+  return matches?.length ?? (value ? 1 : 0)
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

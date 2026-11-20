@@ -61,8 +61,7 @@ export function splitIntroTitleLines(
 
   const normalized = normalizeText(title)
   if (!normalized) return ["", ""]
-  const sentences =
-    normalized.match(/[^.!?。！？]+[.!?。！？]?/g)?.map(normalizeText) ?? []
+  const sentences = splitSubtitleSentences(normalized)
   if (sentences.length >= 2) {
     return [sentences[0], sentences.slice(1).join(" ")]
   }
@@ -613,9 +612,7 @@ export function splitIntoSubtitleChunks(
   const normalized = normalizeText(text)
   if (!normalized) return []
   const chunkLimit = lineLimit * maxLines
-  const sentences = normalized
-    .match(/[^.!?。！？]+[.!?。！？]?/g)
-    ?.map((value) => value.trim()) ?? [normalized]
+  const sentences = splitSubtitleSentences(normalized)
   const chunks = sentences.flatMap((sentence) => {
     if (!sentence) return []
     return subtitleUnits(sentence) <= chunkLimit
@@ -761,8 +758,11 @@ function subtitleLineBreakPenalty(
     penalty += lineLimit * 2.5
   }
   if (/[,;:，；：–—]$/u.test(left)) penalty -= lineLimit * 4
-  else if (/[.!?。！？]$/u.test(left)) penalty -= lineLimit * 5
+  else if (endsWithSentenceTerminator(left)) penalty -= lineLimit * 5
   if (endsWithSubtitleClauseBreak(left)) penalty -= lineLimit * 5
+  if (endsWithNumericDot(left) && /^\d/u.test(right)) {
+    penalty += lineLimit * 14
+  }
   if (
     /^(?:그런데|하지만|그러나|그래서|그리고|다만|반면|결국|따라서|한편|즉|또)\b/u.test(
       right
@@ -1047,7 +1047,7 @@ function pairScore(
   const rightUnits = measure(right)
   const shortPenalty =
     Math.min(leftUnits, rightUnits) < limit * 0.3 ? limit * 4 : 0
-  const naturalBreakBonus = /[.!?。！？]$/.test(left)
+  const naturalBreakBonus = endsWithSentenceTerminator(left)
     ? limit * 0.35
     : /[,;:，；：–—]$/.test(left)
       ? limit * 0.18
@@ -1157,6 +1157,33 @@ function subtitleUnits(value: string) {
 
 function normalizeText(value: string) {
   return value.replace(/\s+/g, " ").trim()
+}
+
+const DECIMAL_DOT_SENTINEL = "\uE000"
+
+/** `3.8%` / `3. 8%` 소수 점은 문장 끝으로 보지 않는다. */
+function splitSubtitleSentences(value: string) {
+  const protectedValue = value.replace(
+    /(\d)\.(\s*\d)/g,
+    `$1${DECIMAL_DOT_SENTINEL}$2`
+  )
+  return (
+    protectedValue
+      .match(/[^.!?。！？]+[.!?。！？]?/g)
+      ?.map((sentence) =>
+        sentence.replaceAll(DECIMAL_DOT_SENTINEL, ".").trim()
+      )
+      .filter(Boolean) ?? [value]
+  )
+}
+
+function endsWithNumericDot(value: string) {
+  return /\d\.["'”’)]*$/u.test(normalizeText(value))
+}
+
+function endsWithSentenceTerminator(value: string) {
+  if (!/[.!?。！？]["'”’)]*$/u.test(normalizeText(value))) return false
+  return !endsWithNumericDot(value)
 }
 
 function round(value: number) {

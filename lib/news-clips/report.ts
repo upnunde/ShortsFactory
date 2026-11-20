@@ -310,14 +310,32 @@ const CTA_GENERIC_TERMS = new Set([
   "뉴스",
 ])
 
+/** 소수·퍼센트 점 보호용(문장 분리 전용). */
+const DECIMAL_DOT_SENTINEL = "\uE000"
+
 export function splitReportSentences(script: string) {
+  // `3.8%` / TTS가 넣은 `3. 8%` 처럼 숫자 뒤 점은 문장 끝이 아니다.
+  const protectedScript = script
+    .replace(/\r?\n+/g, " ")
+    .replace(/(\d)\.(\s*\d)/g, `$1${DECIMAL_DOT_SENTINEL}$2`)
   return (
-    script
-      .replace(/\r?\n+/g, " ")
+    protectedScript
       .match(/[^.!?。！？]+[.!?。！？]?/g)
-      ?.map((sentence) => sentence.trim())
+      ?.map((sentence) =>
+        sentence.replaceAll(DECIMAL_DOT_SENTINEL, ".").trim()
+      )
       .filter(Boolean) ?? []
   )
+}
+
+/** `3.` / `…률 3.` 처럼 숫자 직후 점만 있는 경우 — 문장 종결이 아님. */
+function endsWithNumericDot(value: string) {
+  return /\d\.["'”’)]*$/u.test(cleanPhrase(value))
+}
+
+function endsWithSentenceTerminator(value: string) {
+  if (!/[.!?。！？]["'”’)]*$/u.test(cleanPhrase(value))) return false
+  return !endsWithNumericDot(value)
 }
 
 export function estimateReportDuration(script: string, ratePercent = -4) {
@@ -1079,7 +1097,7 @@ export function restoreSpeechSentenceBoundaries<T extends SpeechAlignmentUnit>(
   const restored = words.map((word) => ({
     ...word,
     boundaryAfter:
-      word.boundaryAfter === true || /[.!?。！？]["'”’)]*$/u.test(word.text),
+      word.boundaryAfter === true || endsWithSentenceTerminator(word.text),
   }))
   const sentences = splitReportSentences(narration)
   if (sentences.length < 2) return restored
@@ -1839,7 +1857,8 @@ function partitionSpeechTokens(
       if (!continuation) continue
       const hardBoundary =
         token.boundaryAfter === true ||
-        /[,;:，；：–—.!?。！？]["'”’)]*$/.test(text)
+        /[,;:，；：–—]["'”’)]*$/.test(text) ||
+        endsWithSentenceTerminator(text)
       const remainingLength = captionVisualUnits(remainingText)
       let score =
         spokenCaptionBoundaryScore({
@@ -1919,6 +1938,7 @@ function splitsFixedExpression(left: string, right: string) {
   const next = cleanPhrase(right)
   return (
     startsWithBoundParticle(next) ||
+    splitsDecimalFragment(current, next) ||
     splitsNumberAndUnit(current, next) ||
     (endsWithCoreArgumentParticle(current) &&
       startsWithDependentPredicate(next)) ||
@@ -1999,8 +2019,10 @@ function spokenCaptionBoundaryScore(input: {
     score -= (input.length - input.preferredChars) * 6
   }
   if (input.isLast) score += 100
-  if (/[.!?。！？]["'”’)]*$/.test(input.text)) score += 90
+  if (endsWithSentenceTerminator(input.text)) score += 90
   else if (/[,;:，；：–—]$/.test(input.text)) score += 78
+  // `3.` + `8%` 처럼 잘린 소수는 한 칸으로 유지한다.
+  if (splitsDecimalFragment(input.text, input.nextText)) score -= 220
   if (endsWithSpokenClauseBreak(input.text)) {
     // 같은 칸에 나머지 절이 들어가면 -고/-서 뒤에서 미리 자르지 않는다.
     const restFits =
@@ -2090,7 +2112,10 @@ function spokenTextUntilBoundary(
   let text = ""
   for (let index = startIndex; index < segments.length; index += 1) {
     text = joinSpokenTokens(text, cleanPhrase(segments[index]!.text))
-    if (segments[index]!.boundaryAfter || /[.!?。！？]["'”’)]*$/.test(text)) {
+    if (
+      segments[index]!.boundaryAfter ||
+      endsWithSentenceTerminator(text)
+    ) {
       break
     }
   }
@@ -2212,6 +2237,11 @@ function splitsNumberAndUnit(left: string, right: string) {
       cleanPhrase(right)
     )
   )
+}
+
+/** TTS가 `3.8%`를 `3.` / `8%`로 나눈 경우. */
+function splitsDecimalFragment(left: string, right: string) {
+  return endsWithNumericDot(left) && /^\d/u.test(cleanPhrase(right))
 }
 
 function groupCuesByScene(cues: SubtitleCue[], scenes: NewsReportScene[]) {

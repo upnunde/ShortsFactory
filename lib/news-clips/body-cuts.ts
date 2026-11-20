@@ -1,5 +1,12 @@
+import { reportSceneAudioMode } from "./report.ts"
+import { scaleQuoteTimelineSeconds } from "./playback.ts"
 import { makeKeepRanges } from "./timeline.ts"
-import type { KeepRange, NewsReportScene, RemovedRange } from "./types.ts"
+import type {
+  KeepRange,
+  NewsReportScene,
+  RemovedRange,
+  SubtitleCue,
+} from "./types.ts"
 
 const MINIMUM_BODY_PIECE_SECONDS = 0.1
 
@@ -132,6 +139,112 @@ export function applyBuildupBodyCuts(
     deletedDuration: round(Math.max(0, end - start - keptDuration)),
     reason: "",
   }
+}
+
+/**
+ * 본문 컷 이후에도 남은 자막은 새 quote-cut 장면으로 다시 붙인다.
+ * 매칭 실패 시 자막을 버리지 않고 가장 가까운 본문 장면에 연결한다.
+ */
+export function remapSubtitlesAfterBodyCut(input: {
+  cues: SubtitleCue[]
+  previousScenes: NewsReportScene[]
+  nextScenes: NewsReportScene[]
+  deletedSourceStart: number
+  deletedSourceEnd: number
+  deletedCaptionId?: string
+  deletedCaptionEnd?: number
+  resolveSourceRange: (
+    cue: SubtitleCue,
+    scenes: NewsReportScene[]
+  ) => { start: number; end: number } | null
+  isBodyCue: (cue: SubtitleCue, scenes: NewsReportScene[]) => boolean
+}) {
+  const deletedOutputSeconds = scaleQuoteTimelineSeconds(
+    Math.max(0, input.deletedSourceEnd - input.deletedSourceStart)
+  )
+  const deletedCaptionEnd =
+    input.deletedCaptionEnd ?? Number.POSITIVE_INFINITY
+  const quoteScenes = input.nextScenes.filter(
+    (scene) => reportSceneAudioMode(scene) === "original" && isBuildupQuote(scene)
+  )
+
+  return input.cues.flatMap((cue) => {
+    if (input.deletedCaptionId && cue.id === input.deletedCaptionId) {
+      return []
+    }
+    if (!input.isBodyCue(cue, input.previousScenes)) {
+      return [cue]
+    }
+
+    const cueSourceRange = input.resolveSourceRange(cue, input.previousScenes)
+    if (
+      cueSourceRange &&
+      cueSourceRange.end > input.deletedSourceStart + 0.001 &&
+      cueSourceRange.start < input.deletedSourceEnd - 0.001
+    ) {
+      return []
+    }
+
+    let sceneId = cue.sceneId
+    if (cueSourceRange) {
+      const midpoint = (cueSourceRange.start + cueSourceRange.end) / 2
+      const nextScene =
+        findQuoteSceneContaining(quoteScenes, midpoint) ??
+        findNearestQuoteScene(quoteScenes, midpoint) ??
+        quoteScenes[0]
+      if (nextScene) sceneId = nextScene.id
+    } else if (
+      cue.sceneId &&
+      !input.nextScenes.some((scene) => scene.id === cue.sceneId)
+    ) {
+      sceneId = quoteScenes[0]?.id || cue.sceneId
+    }
+
+    const shift =
+      (cueSourceRange &&
+        cueSourceRange.start >= input.deletedSourceEnd - 0.001) ||
+      (!cueSourceRange && cue.start >= deletedCaptionEnd - 0.001)
+        ? deletedOutputSeconds
+        : 0
+
+    return [
+      {
+        ...cue,
+        sceneId,
+        start: Math.max(0, cue.start - shift),
+        end: Math.max(0.04, cue.end - shift),
+      },
+    ]
+  })
+}
+
+function findQuoteSceneContaining(
+  scenes: NewsReportScene[],
+  midpoint: number
+) {
+  return scenes.find(
+    (scene) =>
+      midpoint >= scene.sourceStart - 0.001 &&
+      midpoint <= scene.sourceEnd + 0.001
+  )
+}
+
+function findNearestQuoteScene(
+  scenes: NewsReportScene[],
+  midpoint: number
+) {
+  if (!scenes.length) return undefined
+  return [...scenes].sort((left, right) => {
+    const leftDistance = midpointDistance(left, midpoint)
+    const rightDistance = midpointDistance(right, midpoint)
+    return leftDistance - rightDistance
+  })[0]
+}
+
+function midpointDistance(scene: NewsReportScene, midpoint: number) {
+  if (midpoint < scene.sourceStart) return scene.sourceStart - midpoint
+  if (midpoint > scene.sourceEnd) return midpoint - scene.sourceEnd
+  return 0
 }
 
 function isBuildupQuote(scene: Pick<NewsReportScene, "id">) {

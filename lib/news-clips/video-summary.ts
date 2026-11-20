@@ -94,7 +94,7 @@ export function normalizeVideoSummaryPlan(
   )
   const orderedTranscript = validTranscript(transcript)
   const coverage = transcriptCoverage(orderedTranscript)
-  const overallSummary = koreanText(record.overallSummary, 500)
+  const overallSummary = koreanText(record.overallSummary, 800)
   const rawTopics = Array.isArray(record.topics) ? record.topics : []
   const topics = rawTopics
     .flatMap((topic, index) => {

@@ -1,11 +1,15 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { applyBuildupBodyCuts } from "./body-cuts.ts"
+import {
+  applyBuildupBodyCuts,
+  remapSubtitlesAfterBodyCut,
+} from "./body-cuts.ts"
 import { reportSubtitles } from "./report.ts"
 import type {
   NewsReportScene,
   RemovedRange,
+  SubtitleCue,
   TranscriptSegment,
 } from "./types.ts"
 
@@ -161,6 +165,100 @@ test("본문 전체를 삭제하는 수동 컷은 거절한다", () => {
 
   assert.equal(plan.reason, "body-cut-removes-all")
   assert.equal(plan.scenes, scenes)
+})
+
+test("본문 컷 후에도 남은 자막은 새 quote-cut에 다시 붙는다", () => {
+  const plan = applyBuildupBodyCuts(scenes, { start: 10, end: 30 }, [
+    manualCut("cut-1", 16, 20),
+  ])
+  const cues: SubtitleCue[] = [
+    {
+      id: "lead-1",
+      sceneId: "buildup2-lead",
+      start: 0,
+      end: 2,
+      text: "서두 자막",
+      emphasis: [],
+      emphasisColor: "yellow",
+    },
+    {
+      id: "body-before",
+      sceneId: "buildup2-quote",
+      start: 0,
+      end: 4,
+      text: "앞 발화",
+      emphasis: [],
+      emphasisColor: "yellow",
+      sourceStart: 11,
+      sourceEnd: 15,
+    },
+    {
+      id: "body-deleted",
+      sceneId: "buildup2-quote",
+      start: 4,
+      end: 8,
+      text: "삭제할 발화",
+      emphasis: [],
+      emphasisColor: "yellow",
+      sourceStart: 16,
+      sourceEnd: 20,
+    },
+    {
+      id: "body-after",
+      sceneId: "buildup2-quote",
+      start: 8,
+      end: 14,
+      text: "뒤 발화",
+      emphasis: [],
+      emphasisColor: "yellow",
+      sourceStart: 21,
+      sourceEnd: 28,
+    },
+  ]
+
+  const remapped = remapSubtitlesAfterBodyCut({
+    cues,
+    previousScenes: scenes,
+    nextScenes: plan.scenes,
+    deletedSourceStart: 16,
+    deletedSourceEnd: 20,
+    deletedCaptionId: "body-deleted",
+    deletedCaptionEnd: 8,
+    resolveSourceRange: (cue) =>
+      Number.isFinite(cue.sourceStart) && Number.isFinite(cue.sourceEnd)
+        ? { start: cue.sourceStart!, end: cue.sourceEnd! }
+        : null,
+    isBodyCue: (cue) => cue.sceneId !== "buildup2-lead",
+  })
+
+  assert.deepEqual(
+    remapped.map((cue) => ({
+      id: cue.id,
+      sceneId: cue.sceneId,
+      start: cue.start,
+      end: cue.end,
+    })),
+    [
+      {
+        id: "lead-1",
+        sceneId: "buildup2-lead",
+        start: 0,
+        end: 2,
+      },
+      {
+        id: "body-before",
+        sceneId: "buildup2-quote-cut-1",
+        start: 0,
+        end: 4,
+      },
+      {
+        id: "body-after",
+        sceneId: "buildup2-quote-cut-2",
+        start: 4,
+        end: 10,
+      },
+    ]
+  )
 })
 
 test("삭제 구간을 복원하면 본문 quote 하나로 돌아간다", () => {

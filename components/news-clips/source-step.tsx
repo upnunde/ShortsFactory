@@ -119,7 +119,6 @@ export function NewsClipSourceStep({
   const directYoutubeUrl = extractYouTubeUrl(query)
   const isBuildup2 = productionMode === "buildup2"
   const isVideoSummary = isBuildup2 && sourceSelectionMode === "video-summary"
-  const showSourceFocus = Boolean(directYoutubeUrl) || Boolean(directVideoFile)
   const canAnalyze =
     Boolean(directYoutubeUrl) ||
     Boolean(directVideoFile) ||
@@ -131,14 +130,14 @@ export function NewsClipSourceStep({
   function runIssueAction() {
     if (busy) return
     const focus = sourceFocus.trim().slice(0, 300)
-    if (directYoutubeUrl) {
-      onYoutubeUrl(directYoutubeUrl, focus)
-      return
-    }
+    // 파일을 직접 붙였으면 URL보다 첨부를 우선한다. 입력란·키워드는 유지한다.
     if (directVideoFile) {
       const file = directVideoFile
-      setDirectVideoFile(null)
       onVideoFile(file, focus)
+      return
+    }
+    if (directYoutubeUrl) {
+      onYoutubeUrl(directYoutubeUrl, focus)
       return
     }
     if (isBuildup2) {
@@ -545,21 +544,30 @@ export function NewsClipSourceStep({
                     }
                   />
                   <input
+                    id="news-clip-direct-video-file"
                     ref={directVideoInputRef}
                     type="file"
-                    accept="video/mp4,video/quicktime,video/x-matroska,video/webm,video/x-m4v"
-                    className="hidden"
+                    accept="video/*,.mkv,.m4v,.mov,.mp4,.webm"
+                    className="sr-only"
+                    tabIndex={-1}
+                    aria-label="영상 파일 첨부"
                     onChange={(event) => {
-                      const file = event.currentTarget.files?.[0]
-                      event.currentTarget.value = ""
+                      const file = event.currentTarget.files?.[0] ?? null
                       if (file) setDirectVideoFile(file)
+                      // 같은 파일을 다시 고를 수 있게 값만 비운다. 키워드·URL은 유지.
+                      event.currentTarget.value = ""
                     }}
                   />
                   <Button
                     className="shrink-0"
                     variant={directVideoFile ? "secondary" : "outline"}
                     isDisabled={buttonBusyDisabled(busy, "file-source")}
-                    onPress={() => directVideoInputRef.current?.click()}
+                    onPress={() => {
+                      const input = directVideoInputRef.current
+                      if (!input || busyMatches(busy, "file-source")) return
+                      input.value = ""
+                      input.click()
+                    }}
                   >
                     <LoadingButtonLabel
                       loading={busyMatches(busy, "file-source")}
@@ -592,28 +600,26 @@ export function NewsClipSourceStep({
                     </Button>
                   ) : null}
                 </div>
-                {showSourceFocus ? (
-                  <label className="flex flex-col gap-2">
-                    <span className="text-sm font-medium">
-                      주요 키워드 · 문장
-                    </span>
-                    <textarea
-                      rows={2}
-                      maxLength={300}
-                      value={sourceFocus}
-                      aria-label="주요 키워드 또는 문장"
-                      placeholder={
-                        isVideoSummary
-                          ? "예: 예산 모순, 현장 피해, 후속 조치"
-                          : "예: 이 발언의 핵심 주장, 예산 낭비 근거"
-                      }
-                      onChange={(event) =>
-                        setSourceFocus(event.currentTarget.value)
-                      }
-                      className={`${field} min-h-16 resize-none`}
-                    />
-                  </label>
-                ) : null}
+                <label className="flex flex-col gap-2">
+                  <span className="text-sm font-medium">
+                    주요 키워드 · 문장
+                  </span>
+                  <textarea
+                    rows={2}
+                    maxLength={300}
+                    value={sourceFocus}
+                    aria-label="주요 키워드 또는 문장"
+                    placeholder={
+                      isVideoSummary
+                        ? "예: 예산 모순, 현장 피해, 후속 조치"
+                        : "예: 이 발언의 핵심 주장, 예산 낭비 근거"
+                    }
+                    onChange={(event) =>
+                      setSourceFocus(event.currentTarget.value)
+                    }
+                    className={`${field} min-h-16 resize-none`}
+                  />
+                </label>
                 <div className="flex flex-wrap items-center justify-end gap-3">
                   <Button
                     isDisabled={

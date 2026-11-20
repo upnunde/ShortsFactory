@@ -1141,10 +1141,15 @@ export function NewsClipsApp({
             : current.transcript,
           subtitleTimingsLocked: draft.productionMode !== "report",
           // 다시 만들 때는 승인한 영상 선택·컷 구간을 그대로 유지한다.
-          // 첫 초안이나 대본/연출을 명시적으로 바꾼 경우에만 서버 구성을 받는다.
-          reportScenes: draft.subtitleTimingsLocked
-            ? current.reportScenes
-            : (body.reportScenes ?? current.reportScenes),
+          // 서두 등에 붙인 사용자 화면은 서버 응답보다 클라이언트 구성을 우선한다.
+          reportScenes: preserveAttachedSceneVisuals(
+            draft.reportScenes.length
+              ? draft.reportScenes
+              : current.reportScenes,
+            draft.subtitleTimingsLocked
+              ? current.reportScenes
+              : (body.reportScenes ?? current.reportScenes)
+          ),
         }
       })
       if (!silent) {
@@ -1507,6 +1512,10 @@ export function NewsClipsApp({
   }
 
   async function runYoutubeUrl(url: string, focus = "") {
+    // API는 정규화한 URL로 호출하되, 분석 후 입력창에는 사용자가
+    // 붙여 넣은 원문을 유지한다. 성공 시 정규화 URL로 덮어쓰면
+    // 공유 파라미터가 사라져 주소가 잘린 것처럼 보인다.
+    const originalInput = issueSearch.query.trim() || url
     const progressKey = "url-source:video"
     const runId = crypto.randomUUID()
     updateOperationProgress(progressKey, runId, 1)
@@ -1529,7 +1538,7 @@ export function NewsClipsApp({
       }
 
       updateOperationProgress(progressKey, runId, 100)
-      await finishDirectSource(source, url, "URL", focus)
+      await finishDirectSource(source, originalInput, "URL", focus)
     } catch (error) {
       setNote(
         error instanceof Error
@@ -2065,50 +2074,6 @@ export function NewsClipsApp({
       </aside>
 
       <main className="flex h-svh min-h-0 w-full flex-1 flex-col overflow-hidden">
-        {previewTaskNotice ? (
-          <div
-            className={`shrink-0 border-b px-5 py-3 ${
-              previewTaskNotice.status === "error"
-                ? "border-danger/30 bg-danger/10"
-                : previewTaskNotice.status === "success"
-                  ? "border-success/30 bg-success/10"
-                  : "border-separator bg-surface"
-            }`}
-            role="status"
-          >
-            <div className="flex items-center gap-3 text-sm">
-              <span className="min-w-0 flex-1 truncate font-medium">
-                {previewTaskNotice.label}
-              </span>
-              {previewTaskNotice.status === "running" ? (
-                <>
-                  <span className="tabular-nums">
-                    {Math.round(previewProgress ?? 0)}%
-                  </span>
-                  <Button size="sm" variant="outline" onPress={cancelPreview}>
-                    취소
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onPress={() => setPreviewTaskNotice(null)}
-                >
-                  닫기
-                </Button>
-              )}
-            </div>
-            {previewTaskNotice.status === "running" ? (
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-default">
-                <div
-                  className="h-full rounded-full bg-foreground transition-[width]"
-                  style={{ width: `${Math.max(1, previewProgress ?? 1)}%` }}
-                />
-              </div>
-            ) : null}
-          </div>
-        ) : null}
         {showHistory ? (
           <NewsHistoryPanel
             profileId={profile.id}
@@ -3206,6 +3171,35 @@ function ensureTwoLineIntroTitle(
   }
   if (first) return `${first}\n핵심 포인트`
   return "오늘 이슈\n핵심 포인트"
+}
+
+/** 서두·마무리 등에 붙인 사용자 화면·크롭은 다시 만들기 응답에 덮이지 않게 한다. */
+function preserveAttachedSceneVisuals(
+  preferred: NewsReportScene[],
+  rendered: NewsReportScene[]
+) {
+  if (!preferred.length) return rendered
+  if (!rendered.length) return preferred
+  const preferredById = new Map(preferred.map((scene) => [scene.id, scene]))
+  return rendered.map((scene) => {
+    const client = preferredById.get(scene.id)
+    if (!client) return scene
+    const attachedSupporting =
+      client.visualMode === "supporting" && Boolean(client.sourceId)
+    const customCrop = Boolean(client.crop)
+    if (!attachedSupporting && !customCrop) return scene
+    return {
+      ...scene,
+      sourceId: attachedSupporting ? client.sourceId : scene.sourceId,
+      visual: attachedSupporting ? client.visual : scene.visual,
+      visualMode: attachedSupporting ? client.visualMode : scene.visualMode,
+      sourceStart: attachedSupporting ? client.sourceStart : scene.sourceStart,
+      sourceEnd: attachedSupporting ? client.sourceEnd : scene.sourceEnd,
+      crop: client.crop ?? scene.crop,
+      fit: client.fit ?? scene.fit,
+      motion: client.motion ?? scene.motion,
+    }
+  })
 }
 
 function productionFormatKey(

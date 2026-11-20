@@ -1,0 +1,11 @@
+---
+description: Local ShortsFactory dev server uses port 4000
+alwaysApply: true
+---
+
+# Local dev port
+
+- ShortsFactory 로컬 개발 서버는 **4000번대**를 쓴다. 기본 포트는 `4000`.
+- `npm run dev` / `next dev` / `next start`를 띄울 때 `-p 3000`이나 기본 3000을 쓰지 않는다.
+- 사용자에게 로컬 주소를 안내할 때는 `http://localhost:4000`을 기준으로 한다.
+- 4000이 점유 중이면 `4001`, `4002`처럼 **같은 4000번대**에서만 올린다. 3000번대로 돌아가지 않는다.

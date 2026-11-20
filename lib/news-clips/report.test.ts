@@ -22,6 +22,7 @@ import {
   restoreSpeechSentenceBoundaries,
   resolveReportVisualContinuations,
   reportSubtitles,
+  splitReportSentences,
   shortBreathReviewTranscript,
   subtitleCuesFromSpeechAlignment,
   applySubtitleTimingForRender,
@@ -1143,6 +1144,59 @@ test("음성 단어 타임스탬프는 읽기 좋은 자막 칸으로 묶는다"
   assert.ok(retimed.every((cue) => cue.id.startsWith("speech-caption-")))
   assert.ok(retimed.every((cue) => cue.sourceStart === undefined))
   assert.ok(retimed.every((cue) => cue.sourceEnd === undefined))
+})
+
+test("소수·퍼센트 점은 문장 끝으로 쪼개지 않는다", () => {
+  const compact = "정부는 경제성장률 3.8% 전망에 고용률 70% 돌파라는 목표를 제시했다."
+  const spaced = "정부는 경제성장률 3. 8% 전망에 고용률 70% 돌파라는 목표를 제시했다."
+  assert.deepEqual(splitReportSentences(compact), [compact])
+  assert.deepEqual(splitReportSentences(spaced), [spaced])
+  assert.equal(splitReportSentences(`${compact} 바로 다음 문장이다.`).length, 2)
+
+  const words = [
+    "정부는",
+    "경제성장률",
+    "3.",
+    "8%",
+    "전망에",
+    "고용률",
+    "70%",
+    "돌파라는",
+    "목표를",
+    "제시했다",
+  ]
+  const alignment = restoreSpeechSentenceBoundaries(
+    spaced,
+    words.map((text, index) => ({
+      text,
+      start: index * 0.3,
+      end: index * 0.3 + 0.24,
+    }))
+  )
+  assert.equal(
+    alignment.find((word) => word.text === "3.")?.boundaryAfter,
+    false
+  )
+  const cues = subtitleCuesFromSpeechAlignment(
+    {
+      id: "decimal-percent-boundary",
+      narration: spaced,
+      visual: "source",
+      sourceStart: 0,
+      sourceEnd: words.length * 0.3,
+      start: 0,
+      end: words.length * 0.3,
+      alignment,
+    },
+    { maxCharacters: 14, preferredCharacters: 12 }
+  )
+  assert.ok(
+    !cues.some(
+      (cue, index) =>
+        /3\.\s*$/u.test(cue.text) &&
+        /^8%/u.test(cues[index + 1]?.text.trim() ?? "")
+    )
+  )
 })
 
 test("TTS에서 마침표가 빠져도 거야와 결국을 한 자막으로 묶지 않는다", () => {

@@ -99,9 +99,11 @@ test("한국어 전체 요약과 3개 후보를 청크 분석 후 복수 구간�
   const plan = await extractVideoSummaryPlan(serializeTranscript(transcript), {
     sourceId: "source-1",
     sourceTitle: "정책 토론 전체 영상",
-    generateText: async (system) => {
+    generateText: async (system, user, maxTokens) => {
       calls += 1
       if (calls === 1) {
+        assert.match(system, /sourceTitle은 원본 영상이 내세운 핵심 논점/)
+        assert.match(user, /"sourceTitle":"정책 토론 전체 영상"/)
         return JSON.stringify({
           summary: "정책 추진 배경부터 후속 조치까지 설명한다.",
           moments: transcript.map((segment, index) => ({
@@ -113,15 +115,23 @@ test("한국어 전체 요약과 3개 후보를 청크 분석 후 복수 구간�
           })),
         })
       }
-      assert.match(system, /전체 내용을 순서대로 골고루 줄이지 않는다/)
+      assert.match(system, /영상 전체의 내용 지도/)
+      assert.match(system, /sourceTitle은 원본 영상 제작자가 내세운 핵심 논점/)
       assert.match(system, /hook.*context.*evidence.*conclusion/)
+      assert.match(system, /topic\.summary는 3~5문장/)
+      assert.match(
+        user,
+        /"evidence":"정부는 첫 번째 정책의 추진 배경을 설명했습니다\."/
+      )
+      assert.match(user, /"sourceTitle":"정책 토론 전체 영상"/)
+      assert.equal(maxTokens, 3600)
       return JSON.stringify({
         overallSummary:
           "영상은 정책의 추진 배경을 설명하고 예산 부족과 현장 피해를 짚어 본다. 이후 법적 모순과 책임 공방, 후속 조치까지 이어진다.",
         topics: [
-          summaryTopic("topic-1", "정책의 시작과 모순", 1, 4),
-          summaryTopic("topic-2", "예산 부족과 책임", 2, 5),
-          summaryTopic("topic-3", "현장 피해와 후속 조치", 3, 6),
+          summaryTopic("topic-1", "정책의 시작과 모순", 1, 2, 4),
+          summaryTopic("topic-2", "예산 부족과 책임", 2, 3, 5),
+          summaryTopic("topic-3", "현장 피해와 후속 조치", 3, 4, 6),
         ],
       })
     },
@@ -129,7 +139,8 @@ test("한국어 전체 요약과 3개 후보를 청크 분석 후 복수 구간�
 
   assert.equal(calls, 2)
   assert.equal(plan.topics.length, 3)
-  assert.ok(plan.topics.every((topic) => topic.sourceRanges.length === 2))
+  assert.ok(plan.topics.every((topic) => topic.sourceRanges.length === 3))
+  assert.ok(plan.topics.every((topic) => topic.summary.length >= 90))
   assert.ok(plan.topics.every((topic) => topic.assemblyPreview.length > 0))
   assert.equal(videoSummaryPlanIsComplete(plan), true)
 })
@@ -149,7 +160,7 @@ test("짧은 영상은 모델 JSON이 깨져도 실제 전사로 3개 요약 후
     }
   )
 
-  assert.equal(calls, 2)
+  assert.equal(calls, 3)
   assert.ok(plan.topics.length >= 3 && plan.topics.length <= 5)
   assert.ok(plan.topics.every((topic) => topic.sourceRanges.length >= 2))
   assert.ok(
@@ -323,7 +334,8 @@ function summaryTopic(
   id: string,
   title: string,
   firstMoment: number,
-  secondMoment: number
+  secondMoment: number,
+  thirdMoment: number
 ) {
   return {
     id,
@@ -338,6 +350,10 @@ function summaryTopic(
       {
         rangeId: `summary-chunk-1-moment-${secondMoment}`,
         role: "evidence",
+      },
+      {
+        rangeId: `summary-chunk-1-moment-${thirdMoment}`,
+        role: "conclusion",
       },
     ],
   }
